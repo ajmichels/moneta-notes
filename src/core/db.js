@@ -1,6 +1,12 @@
 import { DatabaseSync } from 'node:sqlite';
 import { load } from 'sqlite-vec';
 
+// node:sqlite binds every JS `number` as SQLite REAL, never INTEGER (only BigInt binds as
+// 'integer'). This is harmless for INTEGER-affinity columns (SQLite coerces 5.0 back to 5) but
+// `vec0` rejects a REAL rowid outright (chunk_vectors inserts must CAST(? AS INTEGER)), and
+// `meta.value` (TEXT affinity) would silently store a trailing '.0' unless explicitly
+// String()-ed — see getMeta/setMeta below, which apply that rule internally.
+
 export const SCHEMA_VERSION = 1;
 
 function createNotesTable(db) {
@@ -26,7 +32,8 @@ function createChunksTable(db) {
             char_end INTEGER NOT NULL,
             token_count INTEGER NOT NULL,
             embedding_model TEXT NOT NULL,
-            embedding_version TEXT NOT NULL
+            embedding_version TEXT NOT NULL,
+            UNIQUE (note_id, chunk_index)
         )
     `);
 }
@@ -56,6 +63,7 @@ function createNoteTagsTable(db) {
             PRIMARY KEY (note_id, tag_id)
         )
     `);
+    db.exec('CREATE INDEX note_tags_tag_id ON note_tags(tag_id)');
 }
 
 function createNotesFtsTable(db) {
@@ -64,6 +72,7 @@ function createNotesFtsTable(db) {
             title,
             body,
             content='',
+            contentless_delete=1,
             tokenize='porter unicode61 remove_diacritics 2'
         )
     `);
@@ -124,19 +133,28 @@ function tableExists(db, name) {
     return row !== undefined;
 }
 
+export function getMeta(db, key) {
+    const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(key);
+    return row ? row.value : null;
+}
+
+export function setMeta(db, key, value) {
+    db.prepare(`
+        INSERT INTO meta (key, value) VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(key, String(value));
+}
+
 function readSchemaVersion(db) {
     if (!tableExists(db, 'meta')) {
         return null;
     }
-    const row = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();
-    return row ? Number(row.value) : null;
+    const value = getMeta(db, 'schema_version');
+    return value === null ? null : Number(value);
 }
 
 function writeSchemaVersion(db, version) {
-    db.prepare(`
-        INSERT INTO meta (key, value) VALUES ('schema_version', ?)
-        ON CONFLICT(key) DO UPDATE SET value = excluded.value
-    `).run(String(version));
+    setMeta(db, 'schema_version', version);
 }
 
 export function openDb(dbPath) {
@@ -145,6 +163,8 @@ export function openDb(dbPath) {
     load(db);
     db.enableLoadExtension(false);
 
+    db.exec('PRAGMA journal_mode = WAL');
+    db.exec('PRAGMA busy_timeout = 5000');
     db.exec('PRAGMA foreign_keys = ON');
 
     const currentVersion = readSchemaVersion(db);

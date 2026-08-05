@@ -2,7 +2,18 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { openDb } from './db.js';
+import { openDb, getMeta, setMeta } from './db.js';
+
+const EXPECTED_TABLES = [
+    'notes',
+    'notes_fts',
+    'chunks',
+    'chunk_vectors',
+    'tags',
+    'note_tags',
+    'index_queue',
+    'meta',
+];
 
 const tempDirs = [];
 
@@ -23,6 +34,14 @@ describe('openDb', () => {
         const { db } = openDb(':memory:');
         const row = db.prepare('SELECT vec_version() AS version').get();
         expect(typeof row.version).toBe('string');
+        db.close();
+    });
+
+    it('enables WAL journal mode for a file-backed database', () => {
+        const dbPath = makeTempDbPath();
+        const { db } = openDb(dbPath);
+        const row = db.prepare('PRAGMA journal_mode').get();
+        expect(row.journal_mode).toBe('wal');
         db.close();
     });
 });
@@ -73,6 +92,29 @@ describe('schema: chunks table', () => {
 
         const remaining = db.prepare('SELECT COUNT(*) AS count FROM chunks WHERE note_id = ?').get(noteId);
         expect(remaining.count).toBe(0);
+        db.close();
+    });
+
+    it('rejects a duplicate (note_id, chunk_index) pair', () => {
+        const { db } = openDb(':memory:');
+        db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('Test.md', 'abc123', 10, 1000, 1000);
+        const noteId = db.prepare('SELECT id FROM notes WHERE path = ?').get('Test.md').id;
+
+        db.prepare(`
+            INSERT INTO chunks
+                (note_id, chunk_index, char_start, char_end, token_count, embedding_model, embedding_version)
+            VALUES (?, 0, 0, 100, 50, ?, ?)
+        `).run(noteId, 'Qwen3-Embedding-0.6B', 'v1');
+
+        expect(() => {
+            db.prepare(`
+                INSERT INTO chunks
+                    (note_id, chunk_index, char_start, char_end, token_count, embedding_model, embedding_version)
+                VALUES (?, 0, 100, 200, 50, ?, ?)
+            `).run(noteId, 'Qwen3-Embedding-0.6B', 'v1');
+        }).toThrow();
         db.close();
     });
 });
@@ -175,6 +217,42 @@ describe('schema: notes_fts table', () => {
         expect(hit.rowid).toBe(1);
         db.close();
     });
+
+    it('supports DELETE by rowid and removes the row from MATCH results', () => {
+        const { db } = openDb(':memory:');
+        db.prepare('INSERT INTO notes_fts (rowid, title, body) VALUES (1, ?, ?)').run(
+            'Test Title',
+            'hello world body',
+        );
+
+        expect(() => {
+            db.prepare('DELETE FROM notes_fts WHERE rowid = ?').run(1);
+        }).not.toThrow();
+
+        const hit = db.prepare("SELECT rowid FROM notes_fts WHERE notes_fts MATCH 'hello'").get();
+        expect(hit).toBeUndefined();
+        db.close();
+    });
+
+    it('does not leave stale tokens matching after delete-and-reinsert at the same rowid', () => {
+        const { db } = openDb(':memory:');
+        db.prepare('INSERT INTO notes_fts (rowid, title, body) VALUES (1, ?, ?)').run(
+            'Old Title',
+            'oldtoken body text',
+        );
+        db.prepare('DELETE FROM notes_fts WHERE rowid = ?').run(1);
+        db.prepare('INSERT INTO notes_fts (rowid, title, body) VALUES (1, ?, ?)').run(
+            'New Title',
+            'newtoken body text',
+        );
+
+        const staleHit = db.prepare("SELECT rowid FROM notes_fts WHERE notes_fts MATCH 'oldtoken'").get();
+        expect(staleHit).toBeUndefined();
+
+        const freshHit = db.prepare("SELECT rowid FROM notes_fts WHERE notes_fts MATCH 'newtoken'").get();
+        expect(freshHit.rowid).toBe(1);
+        db.close();
+    });
 });
 
 describe('schema: index_queue table', () => {
@@ -195,6 +273,39 @@ describe('schema: index_queue table', () => {
     });
 });
 
+describe('getMeta / setMeta', () => {
+    it('gets back a value that was set', () => {
+        const { db } = openDb(':memory:');
+        setMeta(db, 'foo', 'bar');
+        expect(getMeta(db, 'foo')).toBe('bar');
+        db.close();
+    });
+
+    it('returns null for a nonexistent key', () => {
+        const { db } = openDb(':memory:');
+        expect(getMeta(db, 'does_not_exist')).toBe(null);
+        db.close();
+    });
+
+    it('overwrites rather than duplicates on a second set of the same key', () => {
+        const { db } = openDb(':memory:');
+        setMeta(db, 'foo', 'first');
+        setMeta(db, 'foo', 'second');
+
+        expect(getMeta(db, 'foo')).toBe('second');
+        const rows = db.prepare('SELECT * FROM meta WHERE key = ?').all('foo');
+        expect(rows).toHaveLength(1);
+        db.close();
+    });
+
+    it('round-trips a numeric value as a string, without a trailing .0', () => {
+        const { db } = openDb(':memory:');
+        setMeta(db, 'x', 1000);
+        expect(getMeta(db, 'x')).toBe('1000');
+        db.close();
+    });
+});
+
 describe('schema versioning', () => {
     it('sets schema_version and reports reindexRequired on a fresh database', () => {
         const { db, reindexRequired } = openDb(':memory:');
@@ -202,6 +313,19 @@ describe('schema versioning', () => {
 
         const row = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();
         expect(row.value).toBe('1');
+        db.close();
+    });
+
+    it('creates exactly the expected top-level tables on a fresh database', () => {
+        const { db } = openDb(':memory:');
+        const rows = db
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
+            .all();
+        const names = rows.map((row) => row.name);
+
+        for (const expected of EXPECTED_TABLES) {
+            expect(names).toContain(expected);
+        }
         db.close();
     });
 
@@ -242,6 +366,15 @@ describe('schema rebuild on version mismatch', () => {
 
         const version = second.db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();
         expect(version.value).toBe('1');
+
+        const rows = second.db
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
+            .all();
+        const names = rows.map((row) => row.name);
+        for (const expected of EXPECTED_TABLES) {
+            expect(names).toContain(expected);
+        }
+
         second.db.close();
     });
 });
