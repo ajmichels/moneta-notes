@@ -222,3 +222,26 @@ describe('schema versioning', () => {
         second.db.close();
     });
 });
+
+describe('schema rebuild on version mismatch', () => {
+    it('rebuilds all tables and wipes data when schema_version is stale', () => {
+        const dbPath = makeTempDbPath();
+
+        const first = openDb(dbPath);
+        first.db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('Test.md', 'abc123', 10, 1000, 1000);
+        first.db.prepare("UPDATE meta SET value = '0' WHERE key = 'schema_version'").run();
+        first.db.close();
+
+        const second = openDb(dbPath);
+        expect(second.reindexRequired).toBe(true);
+
+        const noteCount = second.db.prepare('SELECT COUNT(*) AS count FROM notes').get().count;
+        expect(noteCount).toBe(0);
+
+        const version = second.db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();
+        expect(version.value).toBe('1');
+        second.db.close();
+    });
+});

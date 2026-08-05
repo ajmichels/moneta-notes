@@ -100,6 +100,23 @@ function createSchema(db) {
     createMetaTable(db);
 }
 
+const TABLES_IN_DROP_ORDER = [
+    'note_tags',
+    'index_queue',
+    'chunk_vectors',
+    'chunks',
+    'notes_fts',
+    'tags',
+    'notes',
+    'meta',
+];
+
+function dropAllTables(db) {
+    for (const table of TABLES_IN_DROP_ORDER) {
+        db.exec(`DROP TABLE IF EXISTS ${table}`);
+    }
+}
+
 function tableExists(db, name) {
     const row = db
         .prepare("SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?")
@@ -134,6 +151,7 @@ export function openDb(dbPath) {
     let reindexRequired = false;
 
     if (currentVersion !== SCHEMA_VERSION) {
+        dropAllTables(db);
         createSchema(db);
         writeSchemaVersion(db, SCHEMA_VERSION);
         reindexRequired = true;
