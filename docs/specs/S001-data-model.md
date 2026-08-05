@@ -17,6 +17,29 @@ setup. It exposes plain functions that `core/notes.js`, `core/search.js`, and `c
 it does not itself implement note I/O, search ranking, or tag extraction logic (those are specified
 in S003/S002/S004 respectively).
 
+## Driver: `node:sqlite`
+
+Node's built-in `node:sqlite` module (release-candidate stability as of Node 22.13/24, no longer
+behind a flag), not `better-sqlite3`. Zero new dependency for the driver itself — only `sqlite-vec`
+(the vector-search extension binary) needs to be an npm package, which is unavoidable regardless of
+driver choice since it isn't built into SQLite. Matches the project's minimal-dependency, plain-JS
+bias; release-candidate status is a non-issue for a personal single-user tool (the caveat that shows
+up in the wild is about long-lived production services, not scripts/internal tools); the
+Windows-specific `sqlite-vec` loading bugs reported against `better-sqlite3` are moot since this
+project is macOS-only.
+
+Loading the `sqlite-vec` extension requires opting in at database-open time:
+
+```js
+import { DatabaseSync } from 'node:sqlite';
+import * as sqliteVec from 'sqlite-vec';
+
+const db = new DatabaseSync(dbPath, { allowExtension: true });
+db.enableLoadExtension(true);
+sqliteVec.load(db);
+db.enableLoadExtension(false); // no further extension loads needed after this
+```
+
 ## Tables
 
 ### `notes`
