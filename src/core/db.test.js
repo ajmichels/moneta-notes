@@ -304,6 +304,13 @@ describe('getMeta / setMeta', () => {
         expect(getMeta(db, 'x')).toBe('1000');
         db.close();
     });
+
+    it('rejects null or undefined values instead of storing the literal string', () => {
+        const { db } = openDb(':memory:');
+        expect(() => setMeta(db, 'x', null)).toThrow();
+        expect(() => setMeta(db, 'x', undefined)).toThrow();
+        db.close();
+    });
 });
 
 describe('schema versioning', () => {

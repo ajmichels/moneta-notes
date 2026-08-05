@@ -139,6 +139,9 @@ export function getMeta(db, key) {
 }
 
 export function setMeta(db, key, value) {
+    if (value === null || value === undefined) {
+        throw new Error(`setMeta: value for key "${key}" must not be null or undefined`);
+    }
     db.prepare(`
         INSERT INTO meta (key, value) VALUES (?, ?)
         ON CONFLICT(key) DO UPDATE SET value = excluded.value

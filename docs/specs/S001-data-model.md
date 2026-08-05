@@ -276,8 +276,11 @@ table to one and not the other, an upgrade against a populated database throws m
 of completing (exactly the moment the migration is supposed to be saving you). Rather than deriving
 the drop list dynamically from `sqlite_master` (which would need care to preserve FK-safe drop
 ordering), this is guarded by a test: after both a fresh open and a rebuild-from-stale-version open,
-assert the exact set of tables in `sqlite_master` equals the expected eight. That turns a future
-list-drift bug into a failing test instead of a silent production break.
+assert `sqlite_master` contains all eight expected tables (not an exact-set equality check — FTS5
+and `vec0` each create their own internal shadow tables alongside `notes_fts`/`chunk_vectors`, which
+are a normal, expected side effect of those virtual table modules, not schema drift to filter out or
+guard against). That turns a future list-drift bug into a failing test instead of a silent
+production break.
 
 ## Idempotent reindex
 
