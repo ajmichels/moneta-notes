@@ -46,11 +46,22 @@ function createTagsTable(db) {
     `);
 }
 
+function createNoteTagsTable(db) {
+    db.exec(`
+        CREATE TABLE note_tags (
+            note_id INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+            tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+            PRIMARY KEY (note_id, tag_id)
+        )
+    `);
+}
+
 function createSchema(db) {
     createNotesTable(db);
     createChunksTable(db);
     createChunkVectorsTable(db);
     createTagsTable(db);
+    createNoteTagsTable(db);
 }
 
 export function openDb(dbPath) {
