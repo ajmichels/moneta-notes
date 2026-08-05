@@ -145,3 +145,17 @@ describe('schema: note_tags table', () => {
         db.close();
     });
 });
+
+describe('schema: notes_fts table', () => {
+    it('supports a contentless MATCH query', () => {
+        const { db } = openDb(':memory:');
+        db.prepare('INSERT INTO notes_fts (rowid, title, body) VALUES (1, ?, ?)').run(
+            'Test Title',
+            'hello world body',
+        );
+
+        const hit = db.prepare("SELECT rowid FROM notes_fts WHERE notes_fts MATCH 'hello'").get();
+        expect(hit.rowid).toBe(1);
+        db.close();
+    });
+});

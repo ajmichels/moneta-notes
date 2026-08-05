@@ -56,12 +56,24 @@ function createNoteTagsTable(db) {
     `);
 }
 
+function createNotesFtsTable(db) {
+    db.exec(`
+        CREATE VIRTUAL TABLE notes_fts USING fts5(
+            title,
+            body,
+            content='',
+            tokenize='porter unicode61 remove_diacritics 2'
+        )
+    `);
+}
+
 function createSchema(db) {
     createNotesTable(db);
     createChunksTable(db);
     createChunkVectorsTable(db);
     createTagsTable(db);
     createNoteTagsTable(db);
+    createNotesFtsTable(db);
 }
 
 export function openDb(dbPath) {
