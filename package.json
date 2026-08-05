@@ -1,0 +1,45 @@
+{
+  "name": "moneta-notes",
+  "version": "0.1.0",
+  "description": "Agentic markdown note taking tools.",
+  "keywords": [
+    "notes",
+    "agentic",
+    "markdown",
+    "mcp",
+    "cli"
+  ],
+  "author": "AJ Michels <ajmichels.web@gmail.com>",
+  "license": "ISC",
+  "main": "./src/mcp/server.js",
+  "type": "module",
+  "bin": {
+    "mnotes": "./src/cli/main.js",
+    "mnotes-mcp": "./src/mcp/server.js",
+    "mnotes-indexer": "./src/indexer/daemon.js"
+  },
+  "scripts": {
+    "prepare": "husky || exit 0",
+    "lint": "eslint",
+    "test": "vitest"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^20.4.3",
+    "@commitlint/config-conventional": "^20.4.3",
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.0.3",
+    "globals": "^17.4.0",
+    "husky": "^9.1.7",
+    "jest-extended": "^7.0.0",
+    "vitest": "^4.0.18"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^4.2.0",
+    "@modelcontextprotocol/sdk": "^1.30.0"
+  },
+  "pnpm": {
+    "overrides": {
+      "sharp": "npm:noop-package@1.0.0"
+    }
+  }
+}

@@ -1,0 +1,3 @@
+vault_path = "/Users/jsmith/Documents/Notes"
+db_path = "/Users/jsmith/Library/Application Support/mnotes/index.db"
+embedding_model = "Qwen3-Embedding-0.6B"
