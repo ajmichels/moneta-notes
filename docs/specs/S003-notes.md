@@ -62,7 +62,8 @@ gets an `id` written at creation time. Malformed YAML in the frontmatter block i
 - **`hash` not matching current content_hash** → staleness error.
 - Size-drop guard: if the new `content`'s line count is below ~50% of the current line count, the
   write is rejected unless `force: true` is passed. Applies to updates only (not create, where there's
-  no prior content to compare against).
+  no prior content to compare against). The threshold (`0.50`) is a `config.toml` value, not a
+  hardcoded constant — flagged for S009.
 - Returns `{ title, hash, line_count }` on success — the new content_hash and line_count, so a caller
   can chain a follow-up mutation without a separate `note_read`.
 

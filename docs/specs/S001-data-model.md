@@ -129,6 +129,23 @@ CREATE TABLE note_tags (
   both frontmatter and an inline mention in the same note collapses to one row, which is the correct
   behavior (a note either carries a tag or it doesn't).
 
+### `index_queue`
+
+```sql
+CREATE TABLE index_queue (
+  path            TEXT PRIMARY KEY,
+  enqueued_at     INTEGER NOT NULL,
+  attempts        INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at INTEGER NOT NULL
+);
+```
+
+Durable work queue for the indexing daemon (full behavior in S005). `path` as the primary key gives
+free dedup: re-enqueueing a path already pending is `INSERT ... ON CONFLICT(path) DO NOTHING` (the
+existing row's position is preserved, not bumped). `attempts`/`next_attempt_at` back the
+retry-with-backoff behavior for processing failures. Being a real table (not an in-memory queue)
+means a daemon crash mid-queue loses nothing — whatever's still in the table drains again on restart.
+
 ### `meta`
 
 ```sql

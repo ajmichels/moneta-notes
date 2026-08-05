@@ -18,6 +18,9 @@ README commits to (no raw BM25/cosine/RRF scores ever surface — rank position 
 This adds `limit` to what's currently documented in the README's `search` tool section — flagged as
 a deviation to reconcile there.
 
+The default (`20`) and max (`100`) are `config.toml` values, not hardcoded constants — flagged for
+S009, same treatment as S005's tunables.
+
 ## Modes
 
 | Mode | Fulltext side (`notes_fts`) | Semantic side (`chunk_vectors`) | Final ranking |
@@ -56,7 +59,8 @@ possibility in the default mode, not just an opt-in `fulltext` mode.
 The `limit × 5` (capped at `500`) over-fetch exists because multiple chunks from the same note can
 dominate the raw top-N chunk hits (e.g. three chunks of one long note outranking single chunks from
 three different notes) — fetching more chunks than the final note limit, then collapsing, ensures the
-note-level result list isn't artificially starved by chunk clustering.
+note-level result list isn't artificially starved by chunk clustering. The multiplier (`5`) and cap
+(`500`) are `config.toml` values — flagged for S009.
 
 ### Fulltext retrieval
 
@@ -75,7 +79,7 @@ score(note) = Σ 1 / (k + rank_i)
 summed over whichever of {fulltext rank, semantic rank} the note has (1-indexed position in that
 list). A note present in only one list gets just that one term — there's no implicit zero-rank
 penalty term for the list it's absent from, it simply doesn't contribute. Sort descending by
-`score(note)`, take top `limit`.
+`score(note)`, take top `limit`. `k` (`60`) is a `config.toml` value — flagged for S009.
 
 ### Tie-breaking
 

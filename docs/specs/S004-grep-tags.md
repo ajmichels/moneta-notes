@@ -40,7 +40,7 @@ S002/S003, not because they're related to each other.
   the README's output example exactly. The cap applies per note row, not to the total number of notes
   returned; the total note count is unbounded (grep is an exhaustive literal-match tool, not a
   relevance-ranked one, so silently dropping matching notes would be surprising for what's meant to be
-  a "find everywhere" primitive).
+  a "find everywhere" primitive). The cap (`10`) is a `config.toml` value — flagged for S009.
 
 ## Tags
 
