@@ -29,9 +29,18 @@ function createChunksTable(db) {
     `);
 }
 
+function createChunkVectorsTable(db) {
+    db.exec(`
+        CREATE VIRTUAL TABLE chunk_vectors USING vec0(
+            embedding float[1024] distance_metric=cosine
+        )
+    `);
+}
+
 function createSchema(db) {
     createNotesTable(db);
     createChunksTable(db);
+    createChunkVectorsTable(db);
 }
 
 export function openDb(dbPath) {
