@@ -159,3 +159,21 @@ describe('schema: notes_fts table', () => {
         db.close();
     });
 });
+
+describe('schema: index_queue table', () => {
+    it('deduplicates re-enqueued paths via the path primary key', () => {
+        const { db } = openDb(':memory:');
+        db.prepare(
+            'INSERT INTO index_queue (path, enqueued_at, next_attempt_at) VALUES (?, ?, ?) ON CONFLICT(path) DO NOTHING',
+        ).run('Test.md', 1000, 1000);
+        db.prepare(
+            'INSERT INTO index_queue (path, enqueued_at, next_attempt_at) VALUES (?, ?, ?) ON CONFLICT(path) DO NOTHING',
+        ).run('Test.md', 2000, 2000);
+
+        const rows = db.prepare('SELECT * FROM index_queue').all();
+        expect(rows).toHaveLength(1);
+        expect(rows[0].enqueued_at).toBe(1000);
+        expect(rows[0].attempts).toBe(0);
+        db.close();
+    });
+});

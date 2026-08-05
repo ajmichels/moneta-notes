@@ -67,6 +67,17 @@ function createNotesFtsTable(db) {
     `);
 }
 
+function createIndexQueueTable(db) {
+    db.exec(`
+        CREATE TABLE index_queue (
+            path TEXT PRIMARY KEY,
+            enqueued_at INTEGER NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at INTEGER NOT NULL
+        )
+    `);
+}
+
 function createSchema(db) {
     createNotesTable(db);
     createChunksTable(db);
@@ -74,6 +85,7 @@ function createSchema(db) {
     createTagsTable(db);
     createNoteTagsTable(db);
     createNotesFtsTable(db);
+    createIndexQueueTable(db);
 }
 
 export function openDb(dbPath) {
