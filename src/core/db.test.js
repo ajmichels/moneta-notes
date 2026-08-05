@@ -107,7 +107,7 @@ describe('schema: tags table', () => {
 });
 
 describe('schema: note_tags table', () => {
-    it('cascades when the note or the tag is deleted', () => {
+    it('cascades when the note is deleted', () => {
         const { db } = openDb(':memory:');
         db.prepare(
             'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
@@ -122,6 +122,25 @@ describe('schema: note_tags table', () => {
         db.prepare('DELETE FROM notes WHERE id = ?').run(noteId);
         const afterNoteDelete = db.prepare('SELECT COUNT(*) AS count FROM note_tags').get();
         expect(afterNoteDelete.count).toBe(0);
+
+        db.close();
+    });
+
+    it('cascades when the tag is deleted', () => {
+        const { db } = openDb(':memory:');
+        db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('Test.md', 'abc123', 10, 1000, 1000);
+        const noteId = db.prepare('SELECT id FROM notes WHERE path = ?').get('Test.md').id;
+
+        db.prepare('INSERT INTO tags (name) VALUES (?)').run('project');
+        const tagId = db.prepare('SELECT id FROM tags WHERE name = ?').get('project').id;
+
+        db.prepare('INSERT INTO note_tags (note_id, tag_id) VALUES (?, ?)').run(noteId, tagId);
+
+        db.prepare('DELETE FROM tags WHERE id = ?').run(tagId);
+        const afterTagDelete = db.prepare('SELECT COUNT(*) AS count FROM note_tags').get();
+        expect(afterTagDelete.count).toBe(0);
 
         db.close();
     });
