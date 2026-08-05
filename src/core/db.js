@@ -1,6 +1,8 @@
 import { DatabaseSync } from 'node:sqlite';
 import { load } from 'sqlite-vec';
 
+export const SCHEMA_VERSION = 1;
+
 function createNotesTable(db) {
     db.exec(`
         CREATE TABLE notes (
@@ -78,6 +80,15 @@ function createIndexQueueTable(db) {
     `);
 }
 
+function createMetaTable(db) {
+    db.exec(`
+        CREATE TABLE meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+    `);
+}
+
 function createSchema(db) {
     createNotesTable(db);
     createChunksTable(db);
@@ -86,6 +97,29 @@ function createSchema(db) {
     createNoteTagsTable(db);
     createNotesFtsTable(db);
     createIndexQueueTable(db);
+    createMetaTable(db);
+}
+
+function tableExists(db, name) {
+    const row = db
+        .prepare("SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?")
+        .get(name);
+    return row !== undefined;
+}
+
+function readSchemaVersion(db) {
+    if (!tableExists(db, 'meta')) {
+        return null;
+    }
+    const row = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();
+    return row ? Number(row.value) : null;
+}
+
+function writeSchemaVersion(db, version) {
+    db.prepare(`
+        INSERT INTO meta (key, value) VALUES ('schema_version', ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(String(version));
 }
 
 export function openDb(dbPath) {
@@ -96,7 +130,14 @@ export function openDb(dbPath) {
 
     db.exec('PRAGMA foreign_keys = ON');
 
-    createSchema(db);
+    const currentVersion = readSchemaVersion(db);
+    let reindexRequired = false;
 
-    return { db, reindexRequired: false };
+    if (currentVersion !== SCHEMA_VERSION) {
+        createSchema(db);
+        writeSchemaVersion(db, SCHEMA_VERSION);
+        reindexRequired = true;
+    }
+
+    return { db, reindexRequired };
 }

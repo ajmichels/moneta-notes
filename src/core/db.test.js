@@ -1,5 +1,22 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { openDb } from './db.js';
+
+const tempDirs = [];
+
+function makeTempDbPath() {
+    const dir = mkdtempSync(join(tmpdir(), 'mnotes-db-test-'));
+    tempDirs.push(dir);
+    return join(dir, 'index.db');
+}
+
+afterEach(() => {
+    while (tempDirs.length > 0) {
+        rmSync(tempDirs.pop(), { recursive: true, force: true });
+    }
+});
 
 describe('openDb', () => {
     it('loads the sqlite-vec extension', () => {
@@ -175,5 +192,33 @@ describe('schema: index_queue table', () => {
         expect(rows[0].enqueued_at).toBe(1000);
         expect(rows[0].attempts).toBe(0);
         db.close();
+    });
+});
+
+describe('schema versioning', () => {
+    it('sets schema_version and reports reindexRequired on a fresh database', () => {
+        const { db, reindexRequired } = openDb(':memory:');
+        expect(reindexRequired).toBe(true);
+
+        const row = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();
+        expect(row.value).toBe('1');
+        db.close();
+    });
+
+    it('does not rebuild or lose data on a reopen at the same version', () => {
+        const dbPath = makeTempDbPath();
+
+        const first = openDb(dbPath);
+        first.db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('Test.md', 'abc123', 10, 1000, 1000);
+        first.db.close();
+
+        const second = openDb(dbPath);
+        expect(second.reindexRequired).toBe(false);
+
+        const row = second.db.prepare('SELECT * FROM notes WHERE path = ?').get('Test.md');
+        expect(row.content_hash).toBe('abc123');
+        second.db.close();
     });
 });
