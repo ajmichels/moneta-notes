@@ -1,0 +1,106 @@
+# S002 — Search
+
+Status: **Approved**
+Owns: `src/core/search.js`
+Depends on: `S001-data-model`
+Consumed by: `S006-cli`, `S007-mcp-server`
+
+## Purpose
+
+Defines how `core/search.js` answers `fulltext`, `semantic`, and `hybrid` queries over the tables
+defined in S001, and how results collapse and merge into the note-level, rank-only output shape the
+README commits to (no raw BM25/cosine/RRF scores ever surface — rank position only).
+
+## Input
+
+`query<string>`, `?mode<fulltext|semantic|hybrid>=hybrid`, `?limit<int>=20>` (max `100`).
+
+This adds `limit` to what's currently documented in the README's `search` tool section — flagged as
+a deviation to reconcile there.
+
+## Modes
+
+| Mode | Fulltext side (`notes_fts`) | Semantic side (`chunk_vectors`) | Final ranking |
+|------|------------------------------|-----------------------------------|----------------|
+| `fulltext` | Raw FTS5 query DSL, passed straight to `MATCH` | not used | BM25 rank, ascending |
+| `semantic` | not used | Query text embedded verbatim | Cosine distance, ascending, after best-chunk-wins collapse |
+| `hybrid` (default) | Same passthrough as `fulltext` mode — identical query-building code path | Same embedding as `semantic` mode | RRF merge of both rankings |
+
+### Fulltext query building
+
+The fulltext side always passes the caller's `query` string straight to FTS5's `MATCH`, unmodified,
+in every mode that uses it (`fulltext` and `hybrid` alike) — there is no separate
+"sanitized-for-hybrid" code path. This means FTS5's query mini-language (`AND`/`OR`/`NOT`, `"phrase"`,
+prefix `word*`, `NEAR(a b, N)`) is live in both modes, not gated behind `mode=fulltext`. Rationale:
+the semantic side doesn't parse this syntax at all (it just embeds whatever text is given, operators
+included, as ordinary tokens) — so there was no benefit to stripping/sanitizing it before hitting the
+semantic side, and keeping one query-building function for the fulltext side (rather than two) is
+simpler and removes a source of divergent behavior between modes.
+
+**A malformed FTS5 expression is a hard tool error** in both `fulltext` and `hybrid` mode — consistent
+with the "fail loudly" principle in CLAUDE.md, no silent degradation to semantic-only. This needs to
+be reflected in the MCP tool's `description` (S007) so Claude knows FTS5 syntax errors are a live
+possibility in the default mode, not just an opt-in `fulltext` mode.
+
+### Semantic retrieval and chunk collapse
+
+1. Embed `query` verbatim (same embedding pipeline as indexing, `indexer/embed.js` per S005).
+2. Query `chunk_vectors` for the nearest `min(limit × 5, 500)` chunks by cosine distance, filtered to
+   `chunks.embedding_model` / `chunks.embedding_version` matching the currently configured model.
+   Chunks from a stale (not-yet-re-embedded) model version are silently excluded — comparing vectors
+   across different embedding models is meaningless, not a degraded result, so there's nothing to
+   surface to the caller here. Staleness is visible via `mnotes stats`, not search output.
+3. Collapse to one row per note: **best chunk wins** — keep each note's single lowest-distance chunk,
+   discard the rest. A note's semantic rank is its best chunk's rank among the collapsed list.
+
+The `limit × 5` (capped at `500`) over-fetch exists because multiple chunks from the same note can
+dominate the raw top-N chunk hits (e.g. three chunks of one long note outranking single chunks from
+three different notes) — fetching more chunks than the final note limit, then collapsing, ensures the
+note-level result list isn't artificially starved by chunk clustering.
+
+### Fulltext retrieval
+
+Query `notes_fts` for the top `min(limit × 5, 500)` matching notes by BM25. Already one row per note
+(no chunking on the fulltext side), so no collapse step is needed — the over-fetch here exists purely
+to give the RRF merge (hybrid mode) enough candidates from both sides before truncating to `limit`.
+
+### RRF merge (hybrid mode only)
+
+Standard Reciprocal Rank Fusion, `k=60` (per README):
+
+```
+score(note) = Σ 1 / (k + rank_i)
+```
+
+summed over whichever of {fulltext rank, semantic rank} the note has (1-indexed position in that
+list). A note present in only one list gets just that one term — there's no implicit zero-rank
+penalty term for the list it's absent from, it simply doesn't contribute. Sort descending by
+`score(note)`, take top `limit`.
+
+### Tie-breaking
+
+Equal RRF score (hybrid) or equal native rank (single-mode) breaks by `notes.mtime` descending — most
+recently modified note wins. Uses a column already in the S001 schema, no extra bookkeeping.
+
+### Single-mode ranking
+
+`fulltext`-only and `semantic`-only searches skip the RRF step entirely and sort directly by their
+native ranking (BM25 ascending / cosine distance ascending after chunk collapse), then apply the same
+`notes.mtime` descending tie-break.
+
+## Output
+
+Unchanged from the README's documented shape: `note_title`, `file_line_count`, and (in `hybrid` mode)
+`fulltext_rank` / `semantic_rank` — rank position only, never raw scores. `file_line_count` and
+`note_title` are read from the `notes` row (`line_count` column, `path` → title derivation per S001);
+no additional query needed beyond what's already fetched during ranking.
+
+## Explicitly out of scope here
+
+- **Chunking algorithm** (token counting, ~512/~15% overlap window construction) — S005.
+- **Embedding pipeline invocation details** — S005 (`indexer/embed.js`); this spec assumes an
+  `embed(text) -> float[1024]` function exists and calls it for the query text.
+- **`--explain` CLI flag** (surfacing raw BM25/cosine/RRF numbers for debugging) — S006. This spec's
+  "no raw scores in output" rule applies to the tool-facing `search` output; a CLI debug flag is a
+  distinct, explicitly-opted-into surface and may show whatever's useful for debugging.
+- **MCP tool description text** documenting the mode-dependent FTS5 DSL availability — S007.
