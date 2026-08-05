@@ -37,3 +37,25 @@ describe('schema: notes table', () => {
         db.close();
     });
 });
+
+describe('schema: chunks table', () => {
+    it('cascades chunk deletion when the parent note is deleted', () => {
+        const { db } = openDb(':memory:');
+        db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('Test.md', 'abc123', 10, 1000, 1000);
+        const noteId = db.prepare('SELECT id FROM notes WHERE path = ?').get('Test.md').id;
+
+        db.prepare(`
+            INSERT INTO chunks
+                (note_id, chunk_index, char_start, char_end, token_count, embedding_model, embedding_version)
+            VALUES (?, 0, 0, 100, 50, ?, ?)
+        `).run(noteId, 'Qwen3-Embedding-0.6B', 'v1');
+
+        db.prepare('DELETE FROM notes WHERE id = ?').run(noteId);
+
+        const remaining = db.prepare('SELECT COUNT(*) AS count FROM chunks WHERE note_id = ?').get(noteId);
+        expect(remaining.count).toBe(0);
+        db.close();
+    });
+});

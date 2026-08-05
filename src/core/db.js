@@ -14,8 +14,24 @@ function createNotesTable(db) {
     `);
 }
 
+function createChunksTable(db) {
+    db.exec(`
+        CREATE TABLE chunks (
+            id INTEGER PRIMARY KEY,
+            note_id INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+            chunk_index INTEGER NOT NULL,
+            char_start INTEGER NOT NULL,
+            char_end INTEGER NOT NULL,
+            token_count INTEGER NOT NULL,
+            embedding_model TEXT NOT NULL,
+            embedding_version TEXT NOT NULL
+        )
+    `);
+}
+
 function createSchema(db) {
     createNotesTable(db);
+    createChunksTable(db);
 }
 
 export function openDb(dbPath) {
@@ -23,6 +39,8 @@ export function openDb(dbPath) {
     db.enableLoadExtension(true);
     load(db);
     db.enableLoadExtension(false);
+
+    db.exec('PRAGMA foreign_keys = ON');
 
     createSchema(db);
 
