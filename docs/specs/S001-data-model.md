@@ -106,7 +106,7 @@ CREATE VIRTUAL TABLE chunk_vectors USING vec0(
 ```sql
 CREATE TABLE tags (
   id   INTEGER PRIMARY KEY,
-  name TEXT UNIQUE NOT NULL
+  name TEXT UNIQUE NOT NULL COLLATE NOCASE
 );
 
 CREATE TABLE note_tags (
@@ -120,6 +120,11 @@ CREATE TABLE note_tags (
   both feed the same join table with no source distinction, since no tool in the README (`tag_list`,
   `tag_notes`) needs to know where a tag came from. Extraction logic (frontmatter parsing, inline
   scan rules to avoid false positives in code fences/headings/URLs) is specified in S004, not here.
+- `tags.name` uses `COLLATE NOCASE` rather than forced lowercasing, matching Obsidian's own tag
+  behavior exactly: tags are case-insensitive for matching/uniqueness, but display using whichever
+  casing was used the first time that tag was created (`#Project` created first, `#project` used
+  later in another note — both count toward one tag, shown as "Project"). See S004 for the
+  case-insensitive `INSERT ... ON CONFLICT` upsert logic this implies.
 - `note_tags` has no surrogate key — `(note_id, tag_id)` is naturally unique, and a tag appearing via
   both frontmatter and an inline mention in the same note collapses to one row, which is the correct
   behavior (a note either carries a tag or it doesn't).
