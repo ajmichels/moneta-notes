@@ -38,7 +38,34 @@ const db = new DatabaseSync(dbPath, { allowExtension: true });
 db.enableLoadExtension(true);
 sqliteVec.load(db);
 db.enableLoadExtension(false); // no further extension loads needed after this
+
+db.exec('PRAGMA journal_mode = WAL');
+db.exec('PRAGMA busy_timeout = 5000');
+db.exec('PRAGMA foreign_keys = ON');
 ```
+
+**`WAL` + `busy_timeout`**: three separate processes (the indexing daemon, the CLI, the MCP server)
+all open connections against the same SQLite file, with the daemon as the sole writer and the
+CLI/MCP server as readers. The default rollback-journal mode blocks readers during a writer's
+transaction; `WAL` lets readers proceed against the last-committed snapshot while a write is in
+progress. `busy_timeout = 5000` means a genuine contention moment (e.g. two writers, which
+shouldn't normally happen but isn't impossible) waits up to 5s and retries rather than throwing
+`SQLITE_BUSY` immediately. Both values are `config.toml`-backed per this project's established
+tunable pattern (S009) — 5000ms is the default, not a hardcoded constant.
+
+**`node:sqlite` numeric binding**: `DatabaseSync` binds every JS `number` parameter as SQLite
+`REAL`, never `INTEGER` (verified: `SELECT typeof(?)` bound to `5` returns `'real'`; only a
+`BigInt` binds as `'integer'`). This is silently harmless for `INTEGER`-affinity columns (SQLite's
+type affinity coerces `5.0` back to `5` on storage) but has two concrete consequences elsewhere in
+this schema:
+
+- **`chunk_vectors.rowid`**: `vec0` enforces a strict integer-typed rowid and rejects a bound `REAL`
+  outright (`Only integers are allowed for primary key values on chunk_vectors`). Inserts must use
+  `INSERT INTO chunk_vectors (rowid, embedding) VALUES (CAST(? AS INTEGER), ?)`.
+- **`meta.value`** (`TEXT` affinity, no numeric coercion): binding a bare JS number stores it with a
+  trailing `.0` (e.g. `1000` becomes the string `'1000.0'`). Every write to `meta.value` must
+  explicitly `String(n)` the value before binding — see `getMeta`/`setMeta` below, which apply this
+  rule internally so callers never have to think about it.
 
 ## Tables
 
@@ -66,6 +93,7 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
   title,
   body,
   content='',
+  contentless_delete=1,
   tokenize='porter unicode61 remove_diacritics 2'
 );
 ```
@@ -74,6 +102,18 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
   rowid), never the note text itself. This matches the README's "no duplicated note content" rule.
   It means `snippet()`/`highlight()` are unavailable — acceptable because the `search` tool's output
   is note title + rank only, never a text snippet (see README).
+- **`contentless_delete=1` is required, not optional.** A plain contentless table (`content=''`
+  alone) rejects `DELETE FROM notes_fts WHERE rowid = ?` outright (`cannot DELETE from contentless
+  fts5 table`), and — worse — silently re-inserting the same rowid with different text does *not*
+  replace the old tokens: the old terms keep matching forever, which permanently violates the
+  idempotent-reindex requirement (CLAUDE.md: "no double-inserted FTS rows") on every single note
+  edit. `contentless_delete=1` (SQLite ≥ 3.43; Node 24 bundles a recent-enough version) makes
+  `DELETE` work correctly and is a hard prerequisite for the delete-and-reinsert step in "Idempotent
+  reindex" below. Tables using it accumulate delete markers over time and want an occasional
+  `INSERT INTO notes_fts(notes_fts) VALUES('optimize')` (not scheduled by this spec — revisit if
+  index bloat becomes a real concern at this project's scale). The `'rebuild'` FTS5 command isn't
+  supported on contentless tables, but that's moot here since a rebuild is always a full drop +
+  recreate (see Migrations below), never an in-place FTS rebuild.
 - `rowid` is set explicitly to `notes.id` at insert time, so a search hit maps back to a note with a
   simple rowid join — no separate mapping table needed.
 - Tokenizer: `porter` stemming over `unicode61` (diacritics stripped). A reasonable default for
@@ -96,6 +136,14 @@ One row per embedding chunk. A note with N chunks has N rows here.
 | `token_count`       | INTEGER | NOT NULL                                      | Token count of this chunk (target ~512, see S005 for the chunker itself). |
 | `embedding_model`   | TEXT    | NOT NULL                                      | e.g. `Qwen3-Embedding-0.6B`. |
 | `embedding_version` | TEXT    | NOT NULL                                      | Model/build version string, so a re-pull of the same model name with different weights is still detectable. |
+
+`UNIQUE (note_id, chunk_index)` on the table (in addition to the `id` primary key): this does double
+duty. First, it's the index that makes `DELETE FROM chunks WHERE note_id = ?` (run on every single
+note reindex, per "Idempotent reindex" below, plus the `ON DELETE CASCADE` from `notes`) an indexed
+lookup instead of a full table scan — without it, a full-vault reindex is O(notes × chunks). Second,
+it upgrades "no duplicate chunk rows for the same note+position" from a convention the reindex code
+has to get right to a constraint the database enforces — a bug that inserts a chunk twice fails
+loudly (per CLAUDE.md) instead of silently duplicating data.
 
 `(embedding_model, embedding_version)` on a chunk row is what makes a model swap detectable at
 per-note granularity: `mnotes stats`' "notes pending re-embedding" count is a query over `chunks`
@@ -139,7 +187,15 @@ CREATE TABLE note_tags (
   tag_id  INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
   PRIMARY KEY (note_id, tag_id)
 );
+
+CREATE INDEX note_tags_tag_id ON note_tags(tag_id);
 ```
+
+The composite primary key `(note_id, tag_id)` gives a free index for `note_id`-first lookups, but
+not for `tag_id`-first ones — `note_tags_tag_id` covers those explicitly. This matters for two real
+query paths: S004's `tag_notes` tool ("which notes carry this tag" — a primary user-facing query,
+filtered by `tag_id` first) and the `ON DELETE CASCADE` from `tags`. Without it, both are full table
+scans.
 
 - Tags come from both YAML frontmatter (`tags: [...]`) and inline `#hashtags` in the note body —
   both feed the same join table with no source distinction, since no tool in the README (`tag_list`,
@@ -185,6 +241,15 @@ Single-value bookkeeping. Known keys:
 - `schema_version` — integer (as text), checked at every connection open.
 - `last_full_reindex_at` — epoch seconds, surfaced by `mnotes stats`.
 
+`core/db.js` exports `getMeta(db, key) -> string | null` and `setMeta(db, key, value)` — per this
+spec's stated goal of `db.js` "exposing plain functions that `core/notes.js`, `core/search.js`, and
+`core/tags.js` call," rather than every consumer (S005's daemon writing `last_full_reindex_at`,
+`mnotes stats` reading it) hand-rolling its own `INSERT ... ON CONFLICT` upsert — the exact
+CLI/MCP-duplication problem CLAUDE.md warns against, one layer down. `setMeta` internally applies
+`String(value)` before binding, so callers never have to think about the `node:sqlite` numeric
+binding quirk described above (a bare JS number written to this `TEXT`-affinity column would
+otherwise store with a trailing `.0`).
+
 ## Migrations: version-check-and-rebuild
 
 Because every row in this database is derivable from the vault, there's no data here worth
@@ -192,15 +257,27 @@ preserving across a schema change — so migrations don't use incremental `ALTER
 Instead:
 
 1. On connection open, `core/db.js` reads `meta.schema_version`.
-2. If it's missing or doesn't match the `CURRENT_SCHEMA_VERSION` constant in code, every table
-   (`notes`, `notes_fts`, `chunks`, `chunk_vectors`, `tags`, `note_tags`) is dropped and recreated
-   from the current `CREATE TABLE`/`CREATE VIRTUAL TABLE` statements, then `meta.schema_version` is
-   set to the new value.
+2. If it's missing or doesn't match the `SCHEMA_VERSION` constant in code, **every** table —
+   `notes`, `notes_fts`, `chunks`, `chunk_vectors`, `tags`, `note_tags`, `index_queue`, `meta`, all
+   eight, not just the six that hold reconstructable index data — is dropped and recreated from the
+   current `CREATE TABLE`/`CREATE VIRTUAL TABLE` statements, then `meta.schema_version` is set to the
+   new value. `index_queue` and `meta` are included deliberately: a schema rebuild implies a full
+   reindex is about to happen, so any pending queue entries are moot, and `last_full_reindex_at`
+   describes a reindex that (from the new schema's perspective) never happened.
 3. `core/db.js` surfaces this as a `reindexRequired: true` signal to the caller (daemon startup logs
    it and immediately kicks off a full reindex; `mnotes stats` reports 100% of notes pending).
 
 This is intentionally simple: bump the version constant whenever the schema changes, and the rebuild
 is unconditional. No migration script authoring, no partial-migration edge cases.
+
+**Keeping the drop list and the create list in sync**: the set of tables to drop and the set of
+tables `createSchema` creates are two lists that must agree — if a future schema version adds a
+table to one and not the other, an upgrade against a populated database throws mid-rebuild instead
+of completing (exactly the moment the migration is supposed to be saving you). Rather than deriving
+the drop list dynamically from `sqlite_master` (which would need care to preserve FK-safe drop
+ordering), this is guarded by a test: after both a fresh open and a rebuild-from-stale-version open,
+assert the exact set of tables in `sqlite_master` equals the expected eight. That turns a future
+list-drift bug into a failing test instead of a silent production break.
 
 ## Idempotent reindex
 
