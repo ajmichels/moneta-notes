@@ -111,10 +111,12 @@ the FTS5 contentless decision above.
 
 ```sql
 CREATE VIRTUAL TABLE chunk_vectors USING vec0(
-  embedding float[1024]
+  embedding float[1024] distance_metric=cosine
 );
 ```
 
+- `distance_metric=cosine` is required explicitly — sqlite-vec's default is L2 (Euclidean) distance,
+  which would silently contradict S002's cosine-distance ranking throughout if left unset.
 - `rowid` = `chunks.id` (1:1 join, set explicitly at insert time).
 - Dimension is the full native Qwen3-Embedding-0.6B output (1024) — no Matryoshka/MRL truncation for
   v1. The vault's scale (thousands of notes, not millions) doesn't need the storage/query-speed
