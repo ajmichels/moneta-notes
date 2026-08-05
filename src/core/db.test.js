@@ -9,3 +9,31 @@ describe('openDb', () => {
         db.close();
     });
 });
+
+describe('schema: notes table', () => {
+    it('creates the notes table with the expected columns', () => {
+        const { db } = openDb(':memory:');
+        db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('Weekly Notes/2026-W32.md', 'abc123', 42, 1000, 1000);
+
+        const row = db.prepare('SELECT * FROM notes WHERE path = ?').get('Weekly Notes/2026-W32.md');
+        expect(row.content_hash).toBe('abc123');
+        expect(row.line_count).toBe(42);
+        db.close();
+    });
+
+    it('rejects a duplicate path', () => {
+        const { db } = openDb(':memory:');
+        db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('Dup.md', 'a', 1, 1, 1);
+
+        expect(() => {
+            db.prepare(
+                'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+            ).run('Dup.md', 'b', 2, 2, 2);
+        }).toThrow();
+        db.close();
+    });
+});
