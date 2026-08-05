@@ -37,10 +37,20 @@ function createChunkVectorsTable(db) {
     `);
 }
 
+function createTagsTable(db) {
+    db.exec(`
+        CREATE TABLE tags (
+            id INTEGER PRIMARY KEY,
+            name TEXT UNIQUE NOT NULL COLLATE NOCASE
+        )
+    `);
+}
+
 function createSchema(db) {
     createNotesTable(db);
     createChunksTable(db);
     createChunkVectorsTable(db);
+    createTagsTable(db);
 }
 
 export function openDb(dbPath) {

@@ -92,3 +92,16 @@ describe('schema: chunk_vectors table', () => {
         db.close();
     });
 });
+
+describe('schema: tags table', () => {
+    it('preserves first-seen casing via COLLATE NOCASE uniqueness', () => {
+        const { db } = openDb(':memory:');
+        db.prepare('INSERT INTO tags (name) VALUES (?) ON CONFLICT(name) DO NOTHING').run('Project');
+        db.prepare('INSERT INTO tags (name) VALUES (?) ON CONFLICT(name) DO NOTHING').run('project');
+
+        const rows = db.prepare('SELECT name FROM tags').all();
+        expect(rows).toHaveLength(1);
+        expect(rows[0].name).toBe('Project');
+        db.close();
+    });
+});
