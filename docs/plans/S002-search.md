@@ -72,6 +72,12 @@ with a real in-memory `openDb(':memory:')` per test (no mocking `core/db.js`, pe
 - Lint budget to keep in mind while structuring helpers: `max-lines-per-function: 50`,
   `max-statements: 30`, `max-depth: 2`, `max-nested-callbacks: 3`, `max-params: 5`
   (`eslint.config.js`) — every function in this plan stays well under these.
+- **Logging** (S008, S002 "Logging"): `search.js` calls `getContextLogger()` from `../logger.js` —
+  never `getLogger` directly, no file/component decisions here. Two call sites only, both added in the
+  tasks below: a `warn` right before the malformed-FTS5-query throw (Task 5), and a `debug` when
+  stale-embedding-model chunks get excluded from a semantic query (Task 2). No log line on the normal
+  successful-search path in any mode — that's the hot path and logging it would just flood whichever
+  file the caller's `runWithLogger` context points at.
 
 ---
 
@@ -168,6 +174,8 @@ similar).
 Create `src/core/search.js`:
 
 ```js
+import { getContextLogger } from '../logger.js';
+
 const DEFAULT_LIMIT = 20;
 const OVERFETCH_MULTIPLIER = 5;
 const OVERFETCH_CAP = 500;
@@ -251,7 +259,12 @@ git commit -m "feat(search): implement fulltext search with BM25 ranking"
   described above — tests always supply a fake `embed`).
 - Produces: `semanticSearch(db, query, limit, opts)` and the `semantic` branch of `search()`. Adds
   `vectorToBuffer`, `runSemanticQuery`, `collapseToBestChunkPerNote`, `hydrateNotes`, all private and
-  reused by `hybrid` mode in Task 3 unchanged.
+  reused by `hybrid` mode in Task 3 unchanged. Also adds `countStaleChunks`, which
+  `semanticSearch` calls once per query to power a `getContextLogger().debug(...)` line (S002
+  "Logging") when the vault has any chunks embedded under a different model/version than the one this
+  query is using — a cheap, separate `COUNT(*)` against `chunks`, not scoped to this query's specific
+  top-K results (an honest, vault-wide "are there stale chunks at all" signal, not a precise
+  per-query count).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -429,6 +442,14 @@ function hydrateNotes(db, noteIds) {
     return new Map(rows.map((row) => [ row.id, row ]));
 }
 
+function countStaleChunks(db, embeddingModel, embeddingVersion) {
+    const row = db.prepare(`
+        SELECT COUNT(*) AS count FROM chunks
+        WHERE NOT (embedding_model = ? AND embedding_version = ?)
+    `).get(embeddingModel, embeddingVersion);
+    return row.count;
+}
+
 async function semanticSearch(db, query, limit, { embed, embeddingModel, embeddingVersion }) {
     if (typeof embed !== 'function') {
         throw new Error('search: semantic and hybrid modes require an `embed` function');
@@ -436,6 +457,15 @@ async function semanticSearch(db, query, limit, { embed, embeddingModel, embeddi
 
     const vector = await embed(query);
     const rawRows = runSemanticQuery(db, vector, computeOverfetch(limit), embeddingModel, embeddingVersion);
+
+    const staleCount = countStaleChunks(db, embeddingModel, embeddingVersion);
+    if (staleCount > 0) {
+        getContextLogger().debug('excluded chunks from stale embedding model', {
+            excluded_count: staleCount,
+            current_model: `${embeddingModel}@${embeddingVersion}`,
+        });
+    }
+
     const bestDistanceByNote = collapseToBestChunkPerNote(rawRows);
     const notesById = hydrateNotes(db, [ ...bestDistanceByNote.keys() ]);
 
@@ -860,7 +890,9 @@ git commit -m "feat(search): add mtime tie-breaking and limit validation"
   (S002 "A malformed FTS5 expression is a hard tool error in both fulltext and hybrid mode").
 - Produces: a descriptive thrown error (not a raw `node:sqlite`/FTS5 error message) on invalid FTS5
   syntax, in both modes that touch `notes_fts`. `semantic` mode is unaffected — it never queries
-  `notes_fts` at all.
+  `notes_fts` at all. Also produces a `getContextLogger().warn('malformed FTS5 query', { query })`
+  call immediately before the throw (S002 "Logging"), landing wherever the caller's `runWithLogger`
+  context points, or nowhere (no-op) when called with no such context.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -908,14 +940,38 @@ describe('search: malformed FTS5 query', () => {
         ).resolves.not.toThrow();
         db.close();
     });
+
+    it('logs a warn line via the context logger before throwing', async () => {
+        const logDir = mkdtempSync(join(tmpdir(), 'mnotes-search-test-log-'));
+        const logger = getLogger('mcp-server', logDir);
+        const { db } = openDb(':memory:');
+
+        await expect(
+            runWithLogger(logger, () =>
+                search(db, { query: '"unterminated phrase', mode: 'fulltext', limit: 20 })),
+        ).rejects.toThrow(/malformed/i);
+        db.close();
+
+        await vi.waitFor(() => {
+            const line = readFileSync(join(logDir, 'mcp-server.log'), 'utf8').trim();
+            expect(line).toContain('WARN  [mcp-server] malformed FTS5 query');
+            expect(line).toContain('query="\\"unterminated phrase"');
+        });
+        rmSync(logDir, { recursive: true, force: true });
+    });
 });
 ```
+
+Add to the top-level imports in `src/core/search.test.js` for this test: `mkdtempSync, rmSync,
+readFileSync` from `node:fs`, `tmpdir` from `node:os`, `join` from `node:path` (only if not already
+imported by earlier tasks), and `getLogger, runWithLogger` from `../logger.js`.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `pnpm vitest run src/core/search.test.js`
 Expected: FAIL — the first two tests fail because the raw error propagating out of
-`node:sqlite`/FTS5 (e.g. `fts5: syntax error near "..."`) does not match `/malformed/i`.
+`node:sqlite`/FTS5 (e.g. `fts5: syntax error near "..."`) does not match `/malformed/i`; the new
+logging test fails because `mcp-server.log` is never written (no `getContextLogger()` call yet).
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -935,6 +991,7 @@ function fulltextSearch(db, query, limit) {
             LIMIT ?
         `).all(query, computeOverfetch(limit));
     } catch (err) {
+        getContextLogger().warn('malformed FTS5 query', { query });
         throw new Error(`search: malformed fulltext query "${query}": ${err.message}`);
     }
 
@@ -976,8 +1033,12 @@ git commit -m "feat(search): fail loudly on malformed FTS5 syntax"
   embedding_version)` filtering (stale chunks silently excluded, not surfaced), RRF merge (`k = 60`,
   no implicit zero-rank term for an absent side), `notes.mtime` descending tie-break in every mode,
   the `note_title`/`file_line_count`/`fulltext_rank`/`semantic_rank` output shape, `limit` bounds
-  (`1`–`100`, default `20`), and malformed-FTS5-as-hard-error in both modes touching `notes_fts` are
-  each covered by a task and a test.
+  (`1`–`100`, default `20`), malformed-FTS5-as-hard-error in both modes touching `notes_fts`, and this
+  plan's logging additions (Task 5's `warn` before the malformed-query throw, Task 2's `debug` on
+  stale-chunk exclusion, per S002's "Logging" section and S008) are each covered by a task and a test
+  (Task 2's stale-chunk `debug` line is exercised by the existing stale-chunk test's assertions on
+  query behavior, not a separate logging-specific test — lower stakes than the `warn` path, which does
+  get one).
 - **Explicitly out of scope** (per S002's own "Explicitly out of scope" section and this plan's
   framing): the chunking algorithm and embedding pipeline internals (S005 — `embed` is an injected
   fake here, never a real model call); the `--explain` CLI flag for surfacing raw scores (S006); MCP
