@@ -96,7 +96,9 @@ moneta-notes/
 │       ├── prompts.js      # stub — prompts not yet speced
 │       └── prompts.test.js
 ├── launchd/
-│   └── *.plist.template    # daemon + log-rotation agent templates — S009
+│   ├── *.plist.template    # daemon + log-rotation agent templates — S009
+│   ├── launcher.c          # native launcher, gives each agent its own BTM identity — S009
+│   └── Info.plist          # launcher .app bundle metadata — S009
 └── scripts/
     ├── install.sh          # S009
     └── uninstall.sh        # S009

@@ -1,7 +1,8 @@
 # S009 — Config & Install
 
 Status: **Approved**
-Owns: `src/config.js`, `scripts/install.sh`, `scripts/uninstall.sh`, `launchd/*.plist.template`
+Owns: `src/config.js`, `scripts/install.sh`, `scripts/uninstall.sh`, `launchd/*.plist.template`,
+`launchd/launcher.c`, `launchd/Info.plist`
 Depends on: `S002-search`, `S003-notes`, `S004-grep-tags`, `S005-indexing-daemon`, `S007-mcp-server`,
 `S008-logging` (config knobs flagged across all of these land here)
 
@@ -92,36 +93,66 @@ step, not part of this script). Steps, in order:
    script — no duplicate schema-creation logic between install and the daemon) and the S005 Unix
    socket (`daemon.sock`).
 5. **Create Logs directory** (`~/Library/Logs/com.ajmichels.mnotes/`).
-6. **Create both Property List files** from templates: the indexing daemon's plist (existing, per
-   README) and the **new** log-rotation LaunchAgent's plist (S008: `RunAtLoad: true` +
-   `StartCalendarInterval` at `00:00`/`06:00`/`12:00`/`18:00`).
-7. **Bootstrap both launchd jobs**: `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ajmichels.mnotes.plist`
+6. **Build the native launcher app bundle.** macOS's Background Task Management attributes a
+   LaunchAgent's "Software from X" identity (both the Login Items & Extensions listing and the
+   transient "App Background Activity" notification) to the code signature of the executable
+   `ProgramArguments` actually launches — pointing it straight at `node` gets both LaunchAgents
+   attributed to Node.js Foundation's signing identity, not to `mnotes`. `which clang` — if present
+   (Xcode Command Line Tools; near-universal on a dev Mac), compile `launchd/launcher.c` (a ~20-line
+   native launcher that `execv`s `<node> --disable-warning=ExperimentalWarning <script> [args...]`,
+   with the `node` path baked in at compile time via `-DNODE_BIN_PATH`) into
+   `~/Library/Application Support/mnotes/MonetaNotes.app/Contents/MacOS/moneta-notes-launcher`,
+   copy `launchd/Info.plist` (static `CFBundleName`/`CFBundleIdentifier` metadata, no templating
+   needed) alongside it as `Contents/Info.plist` so Launch Services can resolve a bundle name, then
+   ad-hoc sign the bundle (`codesign --sign -` — no paid Apple Developer ID needed, since this binary
+   is compiled and run locally, never distributed, so Gatekeeper's quarantine flow never triggers). If
+   `clang` is missing, warn (same "warn and continue" posture as step 1's `rg` check, naming
+   `xcode-select --install` as the fix) and fall back to writing a plain
+   `~/Library/Application Support/mnotes/mnotes-node-wrapper.sh` (`exec node --disable-warning=... "$@"`)
+   instead — functionally equivalent (both LaunchAgents still work, warning still suppressed), just
+   without the corrected BTM identity. Either way, this step's output is a single **launch executable
+   path** (the compiled+signed launcher, or the fallback wrapper script) that step 7 points both
+   plists' `ProgramArguments[0]` at.
+7. **Create both Property List files** from templates: the indexing daemon's plist (existing, per
+   README) and the log-rotation LaunchAgent's plist (S008: `RunAtLoad: true` +
+   `StartCalendarInterval` at `00:00`/`06:00`/`12:00`/`18:00`). Both templates' `ProgramArguments` are
+   now `[launch executable from step 6, script path]` — two elements, not three — since the
+   `--disable-warning` flag and the real `node` path are both already baked into whichever launch
+   executable step 6 produced, rather than being separate array entries pointing at `node` directly.
+8. **Bootstrap both launchd jobs**: `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ajmichels.mnotes.plist`
    and the equivalent for `com.ajmichels.mnotes.logrotate.plist`.
-8. **Pre-download the embedding model**: a one-line pipeline warm-up call (loads the `q8` model per
+9. **Pre-download the embedding model**: a one-line pipeline warm-up call (loads the `q8` model per
    the now-created config, triggering `@huggingface/transformers`' download-and-cache) as the final
    step, with a visible "downloading embedding model, this may take a minute..." message — so the
    first real note write after install doesn't stall on a surprise multi-minute download in the middle
    of the daemon's first indexing pass.
-9. **Link the CLI onto `PATH`**: `pnpm link --global` (run against the repo root) — this is what
-   actually makes `package.json`'s `bin` entries (`mnotes`, `mnotes-mcp`, `mnotes-indexer`) resolve
-   as commands; a plain local `pnpm install` (this script's own prerequisite, per the top of this
-   section) never puts a package's own `bin` entries on `PATH` on its own, only `pnpm link --global`
-   or an actual global install does. If the command fails (e.g. a stale/mismatched global pnpm store
-   on this machine — a real, observed failure mode, unrelated to anything this script controls), print
-   a warning with the exact command to retry by hand and continue (same "warn and continue" posture as
-   step 1's `rg` check) rather than aborting the rest of install over it.
-10. **Register the MCP server with Claude Code**: `which claude` — if missing, print a clear warning
+10. **Link the CLI onto `PATH`**: `pnpm link --global` (run against the repo root) — this is what
+    actually makes `package.json`'s `bin` entries (`mnotes`, `mnotes-mcp`, `mnotes-indexer`) resolve
+    as commands; a plain local `pnpm install` (this script's own prerequisite, per the top of this
+    section) never puts a package's own `bin` entries on `PATH` on its own, only `pnpm link --global`
+    or an actual global install does. If the command fails (e.g. a stale/mismatched global pnpm store
+    on this machine — a real, observed failure mode, unrelated to anything this script controls), print
+    a warning with the exact command to retry by hand and continue (same "warn and continue" posture as
+    step 1's `rg` check) rather than aborting the rest of install over it.
+11. **Register the MCP server with Claude Code**: `which claude` — if missing, print a clear warning
     (the same "warn and continue" posture as step 1's `rg` check — Claude Desktop users or anyone
     registering the server by hand don't need the CLI present) naming the manual `claude mcp add`
     command to run later. If `claude` is present, check first via `claude mcp get mnotes` — if it
     already exists (exit `0`), leave it untouched and say so (same never-clobber posture as step 3's
     config file); otherwise register it with
-    `claude mcp add mnotes -s user -- <node> <repo>/src/mcp/server.js` (`-s user`: available in every
-    Claude Code session on this machine, not just one project directory — matching how the daemon,
-    config, and index are already all machine-level, not project-level, resources). This step invokes
-    `node`/the script path directly rather than depending on step 9's `mnotes-mcp` having successfully
-    landed on `PATH` — the two steps are independent, and a step 9 failure shouldn't cascade into
-    step 10 also failing.
+    `claude mcp add mnotes -s user -- <node> --disable-warning=ExperimentalWarning <repo>/src/mcp/server.js`
+    (`-s user`: available in every Claude Code session on this machine, not just one project directory
+    — matching how the daemon, config, and index are already all machine-level, not project-level,
+    resources). This step invokes `node`/the script path directly, not the step 6 launcher — the MCP
+    server is spawned per-session by Claude Code itself, never registered as its own launchd item, so
+    there's no separate BTM identity to fix here, only the same `ExperimentalWarning` suppression
+    already applied everywhere else. This step is independent of step 10's `mnotes-mcp` having
+    successfully landed on `PATH` — a step 10 failure shouldn't cascade into step 11 also failing.
+
+Both `launchd/launcher.c` and the two `.plist.template` files use a single shared launcher, not one
+compiled binary per agent — the launcher's first argument is always the target script path (`daemon.js`
+or `log-rotator.js`), so both plists point `ProgramArguments[1]` at their own script but share
+`ProgramArguments[0]` (the same launcher/wrapper path from step 6).
 
 ## Uninstall (`scripts/uninstall.sh`)
 

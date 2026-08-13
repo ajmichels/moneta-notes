@@ -77,12 +77,42 @@ LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 DAEMON_PLIST="$LAUNCH_AGENTS_DIR/com.ajmichels.mnotes.plist"
 LOGROTATE_PLIST="$LAUNCH_AGENTS_DIR/com.ajmichels.mnotes.logrotate.plist"
 
-# --- Step 6: render both plists from templates --------------------------------
+# --- Step 6: build the native launcher app bundle ------------------------------
+#
+# launchd attributes a background item's "Software from X" identity to the code signature of the
+# executable it launches — pointing ProgramArguments at $NODE_BIN directly gets both LaunchAgents
+# attributed to Node.js Foundation's signing identity in macOS's Background Task Management UI/
+# notifications, not to this tool. Compiling a thin launcher and wrapping it in a minimal .app bundle
+# (so Launch Services can resolve CFBundleName) gives each agent its own identity instead.
+
+APP_BUNDLE_DIR="$APP_SUPPORT_DIR/MonetaNotes.app"
+LAUNCHER_BIN="$APP_BUNDLE_DIR/Contents/MacOS/moneta-notes-launcher"
+FALLBACK_WRAPPER="$APP_SUPPORT_DIR/mnotes-node-wrapper.sh"
+
+if command -v clang >/dev/null 2>&1; then
+    mkdir -p "$APP_BUNDLE_DIR/Contents/MacOS"
+    cp "$REPO_ROOT/launchd/Info.plist" "$APP_BUNDLE_DIR/Contents/Info.plist"
+    clang -O2 -DNODE_BIN_PATH="\"$NODE_BIN\"" -o "$LAUNCHER_BIN" "$REPO_ROOT/launchd/launcher.c"
+    codesign --force --sign - "$APP_BUNDLE_DIR"
+    rm -f "$FALLBACK_WRAPPER"
+    LAUNCH_EXECUTABLE="$LAUNCHER_BIN"
+    echo "Built and signed the Moneta Notes launcher app bundle at $APP_BUNDLE_DIR."
+else
+    echo "WARNING: \`clang\` not found — install Xcode Command Line Tools (\`xcode-select --install\`) for background LaunchAgents to be identified as \"Moneta Notes\" instead of \"Node.js Foundation\". Falling back to a plain wrapper script for now."
+    cat > "$FALLBACK_WRAPPER" << EOF
+#!/bin/sh
+exec "$NODE_BIN" --disable-warning=ExperimentalWarning "\$@"
+EOF
+    chmod +x "$FALLBACK_WRAPPER"
+    LAUNCH_EXECUTABLE="$FALLBACK_WRAPPER"
+fi
+
+# --- Step 7: render both plists from templates --------------------------------
 
 render_plist() {
     local template="$1" dest="$2"
     sed \
-        -e "s#__NODE_BIN__#$NODE_BIN#g" \
+        -e "s#__LAUNCH_EXECUTABLE__#$LAUNCH_EXECUTABLE#g" \
         -e "s#__DAEMON_SCRIPT_PATH__#$DAEMON_SCRIPT#g" \
         -e "s#__LOG_ROTATOR_SCRIPT_PATH__#$LOG_ROTATOR_SCRIPT#g" \
         -e "s#__LOG_DIR__#$LOG_DIR#g" \
@@ -93,12 +123,12 @@ mkdir -p "$LAUNCH_AGENTS_DIR"
 render_plist "$REPO_ROOT/launchd/com.ajmichels.mnotes.plist.template" "$DAEMON_PLIST"
 render_plist "$REPO_ROOT/launchd/com.ajmichels.mnotes.logrotate.plist.template" "$LOGROTATE_PLIST"
 
-# --- Step 7: bootstrap both launchd jobs --------------------------------------
+# --- Step 8: bootstrap both launchd jobs --------------------------------------
 
 launchctl bootstrap "gui/$(id -u)" "$DAEMON_PLIST"
 launchctl bootstrap "gui/$(id -u)" "$LOGROTATE_PLIST"
 
-# --- Step 8: pre-download the embedding model ---------------------------------
+# --- Step 9: pre-download the embedding model ---------------------------------
 
 echo "downloading embedding model, this may take a minute..."
 "$NODE_BIN" -e "
@@ -108,7 +138,7 @@ import('$REPO_ROOT/src/indexer/embed.js').then((m) => m.embed('warm-up')).then((
 });
 "
 
-# --- Step 9: link the mnotes CLI onto PATH via pnpm ---------------------------
+# --- Step 10: link the mnotes CLI onto PATH via pnpm ---------------------------
 
 if pnpm link --global -C "$REPO_ROOT"; then
     echo "Linked mnotes/mnotes-mcp/mnotes-indexer onto PATH via pnpm."
@@ -116,7 +146,7 @@ else
     echo "WARNING: \`pnpm link --global\` failed — mnotes/mnotes-mcp/mnotes-indexer will not be on PATH. Retry manually with \`pnpm link --global -C $REPO_ROOT\` once resolved."
 fi
 
-# --- Step 10: register the MCP server with Claude Code -------------------------
+# --- Step 11: register the MCP server with Claude Code -------------------------
 
 MCP_SERVER_NAME="mnotes"
 MCP_SERVER_SCRIPT="$REPO_ROOT/src/mcp/server.js"
