@@ -1,0 +1,212 @@
+import { DatabaseSync } from 'node:sqlite';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { z } from 'zod';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { openDb, SCHEMA_VERSION } from '../core/db.js';
+import { getAuditLogger, getLogger, defaultLogDir } from '../logger.js';
+import { embed } from '../indexer/embed.js';
+import { defaultAppSupportDir, DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_VERSION } from '../indexer/daemon.js';
+import { registerPrompts } from './prompts.js';
+import {
+    searchTool, grepTool, tagListTool, tagNotesTool, noteReadTool, noteWriteTool,
+    noteEditTool, noteAppendTool, noteRenameTool,
+} from './tools.js';
+
+function readStoredSchemaVersion(dbPath) {
+    const db = new DatabaseSync(dbPath);
+    try {
+        const tableRow = db.prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'meta'",
+        ).get();
+        if (!tableRow) {
+            return null;
+        }
+        const row = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();
+        return row ? Number(row.value) : null;
+    } finally {
+        db.close();
+    }
+}
+
+export function assertSchemaCurrent(dbPath) {
+    const storedVersion = readStoredSchemaVersion(dbPath);
+
+    if (storedVersion !== SCHEMA_VERSION) {
+        throw new Error(
+            `mnotes-mcp: index schema is out of date or missing (expected version ${SCHEMA_VERSION}, `
+            + `found ${storedVersion === null ? 'none' : storedVersion}). Ensure the mnotes indexing `
+            + 'daemon is running — it owns schema migration and rebuilds the index on startup.',
+        );
+    }
+}
+
+const SEARCH_DESCRIPTION = 'Full-text, semantic, or hybrid search over the vault. FTS5 query syntax '
+    + '(AND/OR/NOT, "phrase", word*, NEAR) is live in both fulltext and hybrid mode — a malformed '
+    + 'expression is a hard error in either mode, not just fulltext.';
+
+const TOOL_DEFS = [
+    {
+        name: 'search',
+        description: SEARCH_DESCRIPTION,
+        inputSchema: {
+            query: z.string(),
+            mode: z.enum([ 'fulltext', 'semantic', 'hybrid' ]).optional(),
+            limit: z.number().int().min(1).max(100).optional(),
+            reason: z.string(),
+        },
+        handler: searchTool,
+    },
+    {
+        name: 'grep',
+        description: 'Ripgrep-backed literal or regex search over vault note files.',
+        inputSchema: {
+            pattern: z.string(),
+            regex: z.boolean().optional(),
+            note_title: z.string().optional(),
+            reason: z.string(),
+        },
+        handler: grepTool,
+    },
+    {
+        name: 'tag_list',
+        description: 'List every tag currently in use, with an exact-match note count per tag.',
+        inputSchema: { reason: z.string() },
+        handler: tagListTool,
+    },
+    {
+        name: 'tag_notes',
+        description: 'List notes carrying a tag, including nested child tags (parent-includes-child).',
+        inputSchema: { tag: z.string(), reason: z.string() },
+        handler: tagNotesTool,
+    },
+    {
+        name: 'note_read',
+        description: 'Read a note by title, optionally windowed to a line range.',
+        inputSchema: {
+            note_title: z.string(),
+            start_line: z.number().int().optional(),
+            end_line: z.number().int().optional(),
+            reason: z.string(),
+        },
+        handler: noteReadTool,
+    },
+    {
+        name: 'note_write',
+        description: 'Create a note (hash: null) or fully replace an existing one (hash matches its '
+            + 'current content_hash). No hash against an existing title is an error, not a silent '
+            + 'overwrite.',
+        inputSchema: {
+            note_title: z.string(),
+            hash: z.string().nullable(),
+            metadata: z.record(z.string(), z.any()).nullable().optional(),
+            content: z.string(),
+            force: z.boolean().optional(),
+            reason: z.string(),
+        },
+        handler: noteWriteTool,
+    },
+    {
+        name: 'note_edit',
+        description: 'Surgically replace old_txt with new_txt in an existing note. old_txt must '
+            + 'match exactly once.',
+        inputSchema: {
+            note_title: z.string(),
+            hash: z.string(),
+            old_txt: z.string(),
+            new_txt: z.string(),
+            metadata: z.record(z.string(), z.any()).nullable().optional(),
+            reason: z.string(),
+        },
+        handler: noteEditTool,
+    },
+    {
+        name: 'note_append',
+        description: 'Append content to the end of an existing note.',
+        inputSchema: {
+            note_title: z.string(),
+            hash: z.string(),
+            content: z.string(),
+            reason: z.string(),
+        },
+        handler: noteAppendTool,
+    },
+    {
+        name: 'note_rename',
+        description: 'Rename a note. Hard error if new_title already exists — no force override.',
+        inputSchema: {
+            old_title: z.string(),
+            new_title: z.string(),
+            hash: z.string(),
+            reason: z.string(),
+        },
+        handler: noteRenameTool,
+    },
+];
+
+export function createServer(deps) {
+    const server = new McpServer({ name: 'mnotes-mcp', version: '0.1.0' });
+
+    for (const { name, description, inputSchema, handler } of TOOL_DEFS) {
+        server.registerTool(name, { description, inputSchema }, (input) => handler(deps, input));
+    }
+
+    registerPrompts(server);
+
+    // S007 "Logging": the SDK's underlying `Server` (a `Protocol`) exposes `onclose`/`onerror` as
+    // plain settable fields, invoked whenever *this* connection closes or hits a protocol-level
+    // error (malformed JSON-RPC framing, an unsupported request) — independent of which transport
+    // ends up calling `.connect()` on this server (always `StdioServerTransport` in `main()`; an
+    // `InMemoryTransport` in this file's own tests). The SDK only exposes one `onerror` hook, not a
+    // separate warn/error-tier pair, so every protocol-level error lands at `error` here.
+    server.server.onclose = () => deps.mcpLogger.info('stdio transport disconnected');
+    server.server.onerror = (err) => deps.mcpLogger.error('protocol error', { message: err.message });
+
+    return server;
+}
+
+function resolveVaultRoot(env = process.env) {
+    if (!env.MNOTES_VAULT_ROOT) {
+        throw new Error(
+            'MNOTES_VAULT_ROOT is not set — point it at your Obsidian vault directory '
+            + '(stand-in for config.toml\'s vault_path until S009 lands)',
+        );
+    }
+    return env.MNOTES_VAULT_ROOT;
+}
+
+function resolveDbPath(env = process.env) {
+    return env.MNOTES_DB_PATH ?? join(defaultAppSupportDir(), 'index.db');
+}
+
+export async function main() {
+    const vaultRoot = resolveVaultRoot();
+    const dbPath = resolveDbPath();
+    const mcpLogger = getLogger('mcp-server', defaultLogDir());
+
+    assertSchemaCurrent(dbPath);
+    const { db } = openDb(dbPath);
+    const auditLogger = getAuditLogger(defaultLogDir());
+
+    const server = createServer({
+        db,
+        vaultRoot,
+        embed,
+        embeddingModel: DEFAULT_EMBEDDING_MODEL,
+        embeddingVersion: DEFAULT_EMBEDDING_VERSION,
+        auditLogger,
+        mcpLogger,
+    });
+
+    mcpLogger.info('server started');
+    await server.connect(new StdioServerTransport());
+    mcpLogger.info('stdio transport connected');
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+    main().catch((err) => {
+        process.stderr.write(`mnotes-mcp: fatal: ${err.message}\n`);
+        process.exit(1);
+    });
+}
