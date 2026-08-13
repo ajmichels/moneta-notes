@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import { search, explainSearch } from '../core/search.js';
 import { grep } from '../core/grep.js';
 import { tagList, tagNotes } from '../core/tags.js';
-import { noteRead, titleToPath, noteWrite, noteEdit, noteAppend } from '../core/notes.js';
+import { noteRead, titleToPath, noteWrite, noteEdit, noteAppend, noteRename } from '../core/notes.js';
 import { logAudit } from '../logger.js';
 import {
     formatSearchTable, formatExplain, formatGrepTable, formatTagListTable, formatTagNotesTable, formatJson,
@@ -307,6 +307,32 @@ export async function runAppend(args, deps) {
 }
 
 registerCommand('append', runAppend);
+
+export async function runRename(args, deps) {
+    const { values, positionals } = parseArgs({
+        args,
+        allowPositionals: true,
+        options: { hash: { type: 'string' } },
+    });
+    const [ oldTitle, newTitle ] = positionals;
+
+    try {
+        // Passes deps.db (unlike this task's original literal spec draft) so the search index is
+        // updated in place immediately — noteRename's write-through db param exists specifically
+        // to avoid a rename briefly disappearing from search while waiting on the daemon's fswatch
+        // loop to notice the file move.
+        const result = noteRename(deps.vaultRoot, oldTitle, newTitle, values.hash ?? null, deps.db ?? null);
+        logAudit(deps.auditLogger, { tool: 'rename', noteTitle: newTitle, source: 'cli', outcome: 'success' });
+        return { stdout: formatJson(result), stderr: '', exitCode: 0 };
+    } catch (err) {
+        logAudit(deps.auditLogger, {
+            tool: 'rename', noteTitle: newTitle, source: 'cli', outcome: 'error', errorMessage: err.message,
+        });
+        throw err;
+    }
+}
+
+registerCommand('rename', runRename);
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
     main().then((exitCode) => {

@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync as readAudi
 import { Readable } from 'node:stream';
 import {
     dispatch, resolveVaultRoot, resolveDbPath, registerCommand, runSearch, runGrep, runTags, runRead,
-    runWrite, runEdit, runAppend,
+    runWrite, runEdit, runAppend, runRename,
 } from './main.js';
 import { openDb } from '../core/db.js';
 import { syncNoteTags } from '../core/tags.js';
@@ -430,5 +430,64 @@ describe('runAppend', () => {
         );
 
         expect(result.exitCode).toBe(0);
+    });
+});
+
+describe('runRename', () => {
+    it('moves the note and logs success against the new title', async () => {
+        const vaultRoot = makeTempVault();
+        const logDir = makeTempVault();
+        const auditLogger = getAuditLogger(logDir);
+        const { db } = openDb(':memory:');
+        const created = await runWrite([ 'Old Name', '--content=body' ], { vaultRoot, auditLogger });
+        const hash = JSON.parse(created.stdout).hash;
+
+        const result = await runRename(
+            [ 'Old Name', 'New Name', `--hash=${hash}` ],
+            { vaultRoot, auditLogger, db },
+        );
+
+        expect(result.exitCode).toBe(0);
+        expect(JSON.parse(result.stdout).title).toBe('New Name');
+
+        // Audit entry is logged against the *new* title, per this task's "Interfaces" note above —
+        // not the old one, even though the command's first positional was 'Old Name'.
+        await vi.waitFor(() => {
+            const lines = readAuditLog(join(logDir, 'audit.log'), 'utf8').trim().split('\n');
+            const lastLine = lines[lines.length - 1];
+            expect(lastLine).toContain('INFO  [audit] rename');
+            expect(lastLine).toContain('note_title="New Name"');
+            expect(lastLine).toContain('source=cli');
+            expect(lastLine).toContain('outcome=success');
+        });
+        db.close();
+    });
+
+    it('propagates a target-exists error via dispatch, with no force override, and logs an error audit entry', async () => {
+        const vaultRoot = makeTempVault();
+        const logDir = makeTempVault();
+        const auditLogger = getAuditLogger(logDir);
+        const { db } = openDb(':memory:');
+        const source = await runWrite([ 'Source', '--content=a' ], { vaultRoot, auditLogger });
+        await runWrite([ 'Target', '--content=b' ], { vaultRoot, auditLogger });
+        const hash = JSON.parse(source.stdout).hash;
+
+        const result = await dispatch(
+            [ 'rename', 'Source', 'Target', `--hash=${hash}` ],
+            { vaultRoot, auditLogger, db },
+        );
+
+        expect(result.exitCode).toBe(1);
+        expect(result.stderr).toMatch(/already exists/i);
+
+        await vi.waitFor(() => {
+            const lines = readAuditLog(join(logDir, 'audit.log'), 'utf8').trim().split('\n');
+            const lastLine = lines[lines.length - 1];
+            expect(lastLine).toContain('INFO  [audit] rename');
+            expect(lastLine).toContain('note_title="Target"');
+            expect(lastLine).toContain('outcome=error');
+            expect(lastLine).toMatch(/error_message=".*already exists.*"/i);
+        });
+        db.close();
     });
 });
