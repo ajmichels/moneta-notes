@@ -1,5 +1,7 @@
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
+import { execFileSync, spawn } from 'node:child_process';
+import { createInterface } from 'node:readline';
 import { noteRead } from '../core/notes.js';
 import { extractTags, syncNoteTags } from '../core/tags.js';
 import { getContextLogger } from '../logger.js';
@@ -300,4 +302,29 @@ export function createDebouncer(onSettle, options = {}) {
     }
 
     return { notify, cancelAll };
+}
+
+export function assertFswatchAvailable(env = process.env) {
+    try {
+        execFileSync('fswatch', [ '--version' ], { env, stdio: 'ignore' });
+    } catch (error) {
+        if (error.code === 'ENOENT') {
+            throw new Error('fswatch not found — install via `brew install fswatch`', { cause: error });
+        }
+        throw error;
+    }
+}
+
+export function spawnFswatch(vaultRoot, onPath) {
+    assertFswatchAvailable();
+    const child = spawn('fswatch', [ '-r', vaultRoot ]);
+    getContextLogger().info('fswatch watcher started');
+    const rl = createInterface({ input: child.stdout });
+    rl.on('line', (line) => {
+        const path = line.trim();
+        if (path.length > 0) {
+            onPath(path);
+        }
+    });
+    return child;
 }

@@ -6,7 +6,7 @@ import { openDb } from '../core/db.js';
 import { getLogger, runWithLogger } from '../logger.js';
 import {
     enqueuePath, dequeueNextPath, processPath, deleteNoteByPath, recordFailure, drainQueueOnce,
-    watermarkCatchup, existenceCheck, createDebouncer,
+    watermarkCatchup, existenceCheck, createDebouncer, assertFswatchAvailable, spawnFswatch,
 } from './daemon.js';
 
 const tempDirs = [];
@@ -517,4 +517,34 @@ describe('createDebouncer', () => {
 
         expect(cancelled).toEqual([ 'timer', 'timer' ]);
     });
+});
+
+describe('assertFswatchAvailable', () => {
+    it('does not throw when fswatch is resolvable on PATH', () => {
+        expect(() => assertFswatchAvailable()).not.toThrow();
+    });
+
+    it('throws an actionable error when fswatch is not on PATH', () => {
+        expect(() => assertFswatchAvailable({ PATH: '' })).toThrow(/fswatch not found/);
+    });
+});
+
+describe('spawnFswatch (real binary)', () => {
+    it('reports a path when a file changes under the watched directory', async () => {
+        const vaultRoot = makeTempVault();
+
+        const seenPaths = await new Promise((resolve, reject) => {
+            const found = [];
+            const child = spawnFswatch(vaultRoot, (path) => {
+                found.push(path);
+                child.kill();
+                resolve(found);
+            });
+            child.on('error', reject);
+            setTimeout(() => writeNote(vaultRoot, 'Triggered.md', 'content', undefined), 300);
+            setTimeout(() => { child.kill(); resolve(found); }, 5000);
+        });
+
+        expect(seenPaths.length).toBeGreaterThan(0);
+    }, 10000);
 });
