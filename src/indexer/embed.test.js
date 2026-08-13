@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { chunkText } from './embed.js';
+import { chunkText, loadTokenizer, tokenizeWithOffsets } from './embed.js';
 
 function fakeTokenizeWithOffsets(text) {
     const tokens = [];
@@ -68,4 +68,33 @@ describe('chunkText: long body (sliding window with overlap)', () => {
             expect(chunk.tokenCount).toBeGreaterThan(0);
         }
     });
+});
+
+describe('tokenizeWithOffsets: real Qwen3 tokenizer (slow, network on first run)', () => {
+    it('produces char-offset token spans that round-trip against the source text', async () => {
+        const tokenizer = await loadTokenizer();
+        const text = 'The quick brown fox jumps over the lazy dog.';
+
+        const tokens = tokenizeWithOffsets(tokenizer, text);
+
+        expect(tokens.length).toBeGreaterThan(0);
+        for (const { start, end } of tokens) {
+            expect(end).toBeGreaterThan(start);
+            expect(text.slice(start, end).length).toBeGreaterThan(0);
+        }
+        expect(tokens[0].start).toBeGreaterThanOrEqual(0);
+        expect(tokens[tokens.length - 1].end).toBeLessThanOrEqual(text.length);
+    }, 120000);
+
+    it('round-trips offsets for text with unicode, tabs, newlines, and double spaces', async () => {
+        const tokenizer = await loadTokenizer();
+        const text = 'Hello, world!\n\nThis has  double  spaces, a tab\t, unicode: café \u{1F389}, and\nnewlines.';
+
+        const tokens = tokenizeWithOffsets(tokenizer, text);
+
+        for (const { start, end } of tokens) {
+            expect(text.slice(start, end).length).toBeGreaterThan(0);
+        }
+        expect(tokens[tokens.length - 1].end).toBe(text.length);
+    }, 120000);
 });
