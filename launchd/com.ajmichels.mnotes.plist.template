@@ -9,6 +9,11 @@
         <string>__LAUNCH_EXECUTABLE__</string>
         <string>__DAEMON_SCRIPT_PATH__</string>
     </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>__DAEMON_PATH_ENV__</string>
+    </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>

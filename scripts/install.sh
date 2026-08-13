@@ -13,21 +13,35 @@ if ! command -v rg >/dev/null 2>&1; then
     echo "WARNING: ripgrep not found — install via \`brew install ripgrep\` before using \`mnotes grep\`."
 fi
 
+if ! command -v fswatch >/dev/null 2>&1; then
+    echo "WARNING: fswatch not found — install via \`brew install fswatch\` before starting the indexing daemon (it will crash-loop without it)."
+fi
+
 # --- Step 2: prompt for vault_path / db_path, resolve to absolute paths -----
 
 resolve_path() {
     local raw="$1"
+    # Strip a single matching pair of enclosing quotes — typing a quoted path (natural instinct for
+    # a path containing spaces) would otherwise leave literal quote characters embedded in the
+    # resolved path, since `read` takes the whole line verbatim with no shell-style word splitting.
+    case "$raw" in
+        \"*\") raw="${raw#\"}"; raw="${raw%\"}" ;;
+        \'*\') raw="${raw#\'}"; raw="${raw%\'}" ;;
+    esac
     case "$raw" in
         "~"*) raw="$HOME${raw#\~}" ;;
     esac
     "$NODE_BIN" -e 'console.log(require("node:path").resolve(process.argv[1]))' "$raw"
 }
 
-read -r -p "Vault path [$DEFAULT_VAULT_PATH]: " vault_path_input
+# -e enables GNU Readline for these prompts: arrow-key/Home/End cursor movement, working backspace,
+# and (readline's default completer) Tab-completion of file paths — typing a wrong character no
+# longer means killing the script and starting the whole prompt sequence over.
+read -e -r -p "Vault path [$DEFAULT_VAULT_PATH]: " vault_path_input
 vault_path_input="${vault_path_input:-$DEFAULT_VAULT_PATH}"
 vault_path="$(resolve_path "$vault_path_input")"
 
-read -r -p "Index DB path [$DEFAULT_DB_PATH]: " db_path_input
+read -e -r -p "Index DB path [$DEFAULT_DB_PATH]: " db_path_input
 db_path_input="${db_path_input:-$DEFAULT_DB_PATH}"
 db_path="$(resolve_path "$db_path_input")"
 
@@ -108,6 +122,19 @@ EOF
 fi
 
 # --- Step 7: render both plists from templates --------------------------------
+#
+# launchd runs LaunchAgents with a minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin) that omits Homebrew's
+# install prefix — the daemon's own `fswatch` child-process spawn (S005) fails to find it there even
+# when it's on PATH in every interactive shell, so the daemon's plist gets an explicit
+# EnvironmentVariables/PATH prepending fswatch's resolved directory (falls back to the standard
+# Homebrew prefixes if fswatch isn't installed yet, so a later `brew install fswatch` — no reinstall —
+# is still found without editing the plist by hand).
+if command -v fswatch >/dev/null 2>&1; then
+    FSWATCH_DIR="$(dirname "$(command -v fswatch)")"
+else
+    FSWATCH_DIR="/opt/homebrew/bin:/usr/local/bin"
+fi
+DAEMON_PATH_ENV="$FSWATCH_DIR:/usr/bin:/bin:/usr/sbin:/sbin"
 
 render_plist() {
     local template="$1" dest="$2"
@@ -116,6 +143,7 @@ render_plist() {
         -e "s#__DAEMON_SCRIPT_PATH__#$DAEMON_SCRIPT#g" \
         -e "s#__LOG_ROTATOR_SCRIPT_PATH__#$LOG_ROTATOR_SCRIPT#g" \
         -e "s#__LOG_DIR__#$LOG_DIR#g" \
+        -e "s#__DAEMON_PATH_ENV__#$DAEMON_PATH_ENV#g" \
         "$template" > "$dest"
 }
 
