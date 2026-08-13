@@ -1,6 +1,10 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { openDb } from './db.js';
 import { search } from './search.js';
+import { getLogger, runWithLogger } from '../logger.js';
 
 function insertNote(db, { path, contentHash = 'hash', lineCount = 10, mtime = 1000 }) {
     db.prepare(
@@ -322,5 +326,67 @@ describe('search: limit validation', () => {
         await expect(search(db, { query: 'term', mode: 'fulltext', limit: 1 })).resolves.not.toThrow();
         await expect(search(db, { query: 'term', mode: 'fulltext', limit: 100 })).resolves.not.toThrow();
         db.close();
+    });
+});
+
+describe('search: malformed FTS5 query', () => {
+    it('throws a descriptive error for invalid FTS5 syntax in fulltext mode', async () => {
+        const { db } = openDb(':memory:');
+        await expect(
+            search(db, { query: '"unterminated phrase', mode: 'fulltext', limit: 20 }),
+        ).rejects.toThrow(/malformed/i);
+        db.close();
+    });
+
+    it('throws the same descriptive error for invalid FTS5 syntax in hybrid mode', async () => {
+        const { db } = openDb(':memory:');
+        await expect(
+            search(db, {
+                query: '"unterminated phrase',
+                mode: 'hybrid',
+                limit: 20,
+                embed: fakeEmbed(0.1),
+                embeddingModel: 'test-model',
+                embeddingVersion: 'v1',
+            }),
+        ).rejects.toThrow(/malformed/i);
+        db.close();
+    });
+
+    it('does not raise a fulltext-syntax error in semantic mode (fts5 side unused)', async () => {
+        const { db } = openDb(':memory:');
+        const noteId = insertNote(db, { path: 'A.md' });
+        insertChunkWithVector(db, noteId, { seed: 0.5 });
+
+        await expect(
+            search(db, {
+                query: '"unterminated phrase',
+                mode: 'semantic',
+                limit: 20,
+                embed: fakeEmbed(0.5),
+                embeddingModel: 'test-model',
+                embeddingVersion: 'v1',
+            }),
+        ).resolves.not.toThrow();
+        db.close();
+    });
+
+    it('logs a warn line via the context logger before throwing', async () => {
+        const logDir = mkdtempSync(join(tmpdir(), 'mnotes-search-test-log-'));
+        const logger = getLogger('mcp-server', logDir);
+        const { db } = openDb(':memory:');
+
+        await expect(
+            runWithLogger(logger, () =>
+                search(db, { query: '"unterminated phrase', mode: 'fulltext', limit: 20 })),
+        ).rejects.toThrow(/malformed/i);
+        db.close();
+
+        await vi.waitFor(() => {
+            const line = readFileSync(join(logDir, 'mcp-server.log'), 'utf8').trim();
+            expect(line).toContain('WARN  [mcp-server] malformed FTS5 query');
+            expect(line).toContain('query="\\"unterminated phrase"');
+        });
+        rmSync(logDir, { recursive: true, force: true });
     });
 });

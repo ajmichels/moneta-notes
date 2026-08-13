@@ -27,15 +27,21 @@ function validateLimit(limit) {
 }
 
 function fulltextSearch(db, query, limit) {
-    const rows = db.prepare(`
-        SELECT n.id AS note_id, n.path, n.line_count AS file_line_count, n.mtime,
-               bm25(notes_fts) AS score
-        FROM notes_fts
-        JOIN notes n ON n.id = notes_fts.rowid
-        WHERE notes_fts MATCH ?
-        ORDER BY bm25(notes_fts)
-        LIMIT ?
-    `).all(query, computeOverfetch(limit));
+    let rows;
+    try {
+        rows = db.prepare(`
+            SELECT n.id AS note_id, n.path, n.line_count AS file_line_count, n.mtime,
+                   bm25(notes_fts) AS score
+            FROM notes_fts
+            JOIN notes n ON n.id = notes_fts.rowid
+            WHERE notes_fts MATCH ?
+            ORDER BY bm25(notes_fts)
+            LIMIT ?
+        `).all(query, computeOverfetch(limit));
+    } catch (err) {
+        getContextLogger().warn('malformed FTS5 query', { query });
+        throw new Error(`search: malformed fulltext query "${query}": ${err.message}`, { cause: err });
+    }
 
     rows.sort((a, b) => a.score - b.score || b.mtime - a.mtime);
 
