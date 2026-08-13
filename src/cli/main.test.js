@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync as readAudi
 import { Readable } from 'node:stream';
 import {
     dispatch, resolveVaultRoot, resolveDbPath, registerCommand, runSearch, runGrep, runTags, runRead,
-    runWrite, runEdit,
+    runWrite, runEdit, runAppend,
 } from './main.js';
 import { openDb } from '../core/db.js';
 import { syncNoteTags } from '../core/tags.js';
@@ -388,5 +388,47 @@ describe('runEdit', () => {
             expect(lastLine).toContain('outcome=error');
             expect(lastLine).toMatch(/error_message=".*ambiguous.*"/i);
         });
+    });
+});
+
+describe('runAppend', () => {
+    it('appends --content to the end of the body and logs a success audit entry', async () => {
+        const vaultRoot = makeTempVault();
+        const logDir = makeTempVault();
+        const auditLogger = getAuditLogger(logDir);
+        const created = await runWrite([ 'Appendable', '--content=first line' ], { vaultRoot, auditLogger });
+        const hash = JSON.parse(created.stdout).hash;
+
+        const result = await runAppend(
+            [ 'Appendable', `--hash=${hash}`, '--content=second line' ],
+            { vaultRoot, auditLogger },
+        );
+
+        expect(result.exitCode).toBe(0);
+        const read = await runRead([ 'Appendable' ], { vaultRoot });
+        expect(read.stdout).toBe('first line\nsecond line\n');
+
+        await vi.waitFor(() => {
+            const lines = readAuditLog(join(logDir, 'audit.log'), 'utf8').trim().split('\n');
+            const lastLine = lines[lines.length - 1];
+            expect(lastLine).toContain('INFO  [audit] append');
+            expect(lastLine).toContain('note_title="Appendable"');
+            expect(lastLine).toContain('source=cli');
+            expect(lastLine).toContain('outcome=success');
+        });
+    });
+
+    it('reads content from stdin when --content is omitted', async () => {
+        const vaultRoot = makeTempVault();
+        const auditLogger = getAuditLogger(makeTempVault());
+        const created = await runWrite([ 'StdinAppend', '--content=first' ], { vaultRoot, auditLogger });
+        const hash = JSON.parse(created.stdout).hash;
+
+        const result = await runAppend(
+            [ 'StdinAppend', `--hash=${hash}` ],
+            { vaultRoot, auditLogger, stdin: fakeStdin('second') },
+        );
+
+        expect(result.exitCode).toBe(0);
     });
 });

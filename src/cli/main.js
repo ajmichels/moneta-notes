@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import { search, explainSearch } from '../core/search.js';
 import { grep } from '../core/grep.js';
 import { tagList, tagNotes } from '../core/tags.js';
-import { noteRead, titleToPath, noteWrite, noteEdit } from '../core/notes.js';
+import { noteRead, titleToPath, noteWrite, noteEdit, noteAppend } from '../core/notes.js';
 import { logAudit } from '../logger.js';
 import {
     formatSearchTable, formatExplain, formatGrepTable, formatTagListTable, formatTagNotesTable, formatJson,
@@ -284,6 +284,29 @@ export async function runEdit(args, deps) {
 }
 
 registerCommand('edit', runEdit);
+
+export async function runAppend(args, deps) {
+    const { values, positionals } = parseArgs({
+        args,
+        allowPositionals: true,
+        options: { hash: { type: 'string' }, content: { type: 'string' } },
+    });
+    const title = positionals[0];
+    const content = values.content ?? await readStdinContent(deps.stdin ?? process.stdin);
+
+    try {
+        const result = noteAppend(deps.vaultRoot, title, values.hash ?? null, content);
+        logAudit(deps.auditLogger, { tool: 'append', noteTitle: title, source: 'cli', outcome: 'success' });
+        return { stdout: formatJson(result), stderr: '', exitCode: 0 };
+    } catch (err) {
+        logAudit(deps.auditLogger, {
+            tool: 'append', noteTitle: title, source: 'cli', outcome: 'error', errorMessage: err.message,
+        });
+        throw err;
+    }
+}
+
+registerCommand('append', runAppend);
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
     main().then((exitCode) => {
