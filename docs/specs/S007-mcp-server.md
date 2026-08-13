@@ -75,7 +75,12 @@ about to use `search` reliably, not an implementation detail to hide.
 
 **Input**: `pattern<string>`, `?regex<bool>=false`, `?note_title<string>`, `reason<string>`.
 **Output**: `note_title`, `file_line_count`, `line_matches` (capped at 10 per note + `(+N more)`, per
-S004).
+S004) — **line numbers only** (`L2, L5`), never the matched line's text. Unlike the CLI (S006), the
+MCP tool has no input for opting into match text — grep is meant to help Claude locate *which* notes
+and *which lines* are worth a closer look, not to substitute for reading them. Returning matched text
+inline would burn context on content Claude hasn't decided it needs yet, especially for a broad
+pattern with many hits across many notes; the intended flow is `grep` to find candidates, then
+`note_read` (scoped to the relevant `start_line`/`end_line`) to actually see them.
 
 ### `tag_list`
 

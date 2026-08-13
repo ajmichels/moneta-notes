@@ -167,7 +167,7 @@ describe('runSearch: --explain', () => {
 });
 
 describe('runGrep', () => {
-    it('formats a text match by default', async () => {
+    it('formats line numbers only by default (no match text)', async () => {
         const vaultRoot = makeTempVault();
         writeFileSync(join(vaultRoot, 'Recipe.md'), 'line one\nsome hello world text\n');
 
@@ -175,6 +175,16 @@ describe('runGrep', () => {
 
         expect(result.exitCode).toBe(0);
         expect(result.stdout).toContain('note_title|file_line_count|line_matches');
+        expect(result.stdout).toContain('Recipe|2|L2');
+        expect(result.stdout).not.toContain('hello world text');
+    });
+
+    it('includes match text with --content', async () => {
+        const vaultRoot = makeTempVault();
+        writeFileSync(join(vaultRoot, 'Recipe.md'), 'line one\nsome hello world text\n');
+
+        const result = await runGrep([ 'hello', '--content' ], { vaultRoot });
+
         expect(result.stdout).toContain('Recipe|2|L2: some hello world text');
     });
 
@@ -184,7 +194,19 @@ describe('runGrep', () => {
 
         const result = await runGrep([ 'hello', '--json' ], { vaultRoot });
 
-        expect(JSON.parse(result.stdout)[0].note_title).toBe('Recipe');
+        const parsed = JSON.parse(result.stdout)[0];
+        expect(parsed.note_title).toBe('Recipe');
+        expect(parsed.line_matches[0].text).toBeUndefined();
+    });
+
+    it('supports --json --content, including match text', async () => {
+        const vaultRoot = makeTempVault();
+        writeFileSync(join(vaultRoot, 'Recipe.md'), 'hello world\n');
+
+        const result = await runGrep([ 'hello', '--json', '--content' ], { vaultRoot });
+
+        const parsed = JSON.parse(result.stdout)[0];
+        expect(parsed.line_matches[0].text).toBe('hello world');
     });
 });
 

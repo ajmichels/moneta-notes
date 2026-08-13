@@ -251,7 +251,7 @@ describe('searchTool', () => {
 });
 
 describe('grepTool', () => {
-    it('returns a pipe-delimited table with capped line_matches', async () => {
+    it('returns a pipe-delimited table with capped line_matches, line numbers only (no match text)', async () => {
         const vaultRoot = makeTempVault({ 'Recipe.md': 'line one\nsome hello world text\n' });
 
         const result = await grepTool(
@@ -261,8 +261,9 @@ describe('grepTool', () => {
 
         expect(result.isError).toBeUndefined();
         expect(result.content[0].text).toBe(
-            'note_title|file_line_count|line_matches\nRecipe|2|L2: some hello world text\n',
+            'note_title|file_line_count|line_matches\nRecipe|2|L2\n',
         );
+        expect(result.content[0].text).not.toContain('hello world text');
     });
 
     it('maps a thrown grep() error (unknown note_title) to isError: true', async () => {

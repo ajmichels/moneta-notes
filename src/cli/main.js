@@ -52,7 +52,7 @@ Run 'mnotes <command> --help' for command-specific flags.
 
 const COMMAND_USAGE = {
     search: 'mnotes search <query> [--mode=hybrid|fulltext|semantic] [--limit=N] [--explain] [--json]',
-    grep: 'mnotes grep <pattern> [--regex] [--note=<title>] [--json]',
+    grep: 'mnotes grep <pattern> [--regex] [--note=<title>] [--content] [--json]',
     tags: "mnotes tags list [--json]\n       mnotes tags notes <tag> [--json]",
     read: 'mnotes read <title> [--start=N] [--end=N] [--raw] [--json]',
     write: "mnotes write <title> [--hash=H] [--metadata='{...}'] [--content=\"...\"]\n"
@@ -142,6 +142,7 @@ export async function runGrep(args, deps) {
             regex: { type: 'boolean', default: false },
             note: { type: 'string' },
             json: { type: 'boolean', default: false },
+            content: { type: 'boolean', default: false },
         },
     });
     const pattern = positionals[0];
@@ -152,12 +153,14 @@ export async function runGrep(args, deps) {
             note_title: r.noteTitle,
             file_line_count: r.fileLineCount,
             total_match_count: r.totalMatchCount,
-            line_matches: r.lineMatches,
+            line_matches: values.content
+                ? r.lineMatches
+                : r.lineMatches.map((m) => ({ line: m.line })),
         }));
         return { stdout: formatJson(mapped), stderr: '', exitCode: 0 };
     }
 
-    return { stdout: formatGrepTable(results), stderr: '', exitCode: 0 };
+    return { stdout: formatGrepTable(results, { includeText: values.content }), stderr: '', exitCode: 0 };
 }
 
 registerCommand('grep', runGrep);

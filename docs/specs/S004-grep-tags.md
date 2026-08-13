@@ -18,6 +18,12 @@ S002/S003, not because they're related to each other.
 **Input**: `pattern<string>`, `?regex<bool>=false`, `?note_title<string>`, `reason<string>`.
 **Output**: `note_title`, `file_line_count`, `line_matches` (per README).
 
+`core/grep.js`'s return value always includes each match's line text (`{ line, text }`) — that's
+cheap, already parsed out of ripgrep's own JSON output, and `core/` has no opinion on what a caller
+does with it. Whether match text actually reaches an output surface is a formatting decision made
+above `core/`, per-surface (see S006/S007): the CLI can opt into showing it via a flag, the MCP tool
+never does.
+
 ### Implementation
 
 - Shells out to a **system-installed `rg` binary** via `child_process` — not an npm-bundled copy.

@@ -35,7 +35,11 @@ command is still an error regardless of a trailing `--help`.
 `rename`, produced by the same formatting function each MCP tool handler calls. This is a direct
 consequence of the architecture rule that `cli/` and `mcp/` must not duplicate logic — one formatter
 per tool, shared by both surfaces, rather than a second "human-friendly" renderer that could drift
-from what Claude actually sees.
+from what Claude actually sees. **`grep`'s `--content` flag (see Commands below) is the one
+deliberate exception**: `formatGrepTable`'s `includeText` option is still the single shared formatter
+(no duplicated rendering logic), but the CLI is the only caller that ever passes `includeText: true`
+— a human at a terminal running `grep` interactively benefits from seeing match text inline, where
+the MCP tool (S007) never does, for context-budget reasons specific to that surface.
 
 List-style commands accept a `--json` flag for scripting/`obsidian.nvim` integration use cases where
 structured output is more convenient than parsing pipe-delimited columns. `write`/`edit`/`append`/
@@ -91,7 +95,7 @@ it's already present in the raw output.
 | Command | Flags | Notes |
 |---|---|---|
 | `mnotes search <query>` | `--mode=hybrid\|fulltext\|semantic`, `--limit=N`, `--explain`, `--json` | See `--explain` below. |
-| `mnotes grep <pattern>` | `--regex`, `--note=<title>`, `--json` | |
+| `mnotes grep <pattern>` | `--regex`, `--note=<title>`, `--content`, `--json` | `--content` shows each match's line text; omitted by default (line numbers only), matching the MCP tool's output shape unless explicitly opted into. |
 | `mnotes tags list` | `--json` | |
 | `mnotes tags notes <tag>` | `--json` | |
 | `mnotes read <title>` | `--start=N`, `--end=N`, `--raw`, `--json` | See output modes above; default is neither raw nor JSON. |

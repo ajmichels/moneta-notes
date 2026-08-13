@@ -34,17 +34,19 @@ function formatExplainRow(r, rank, mode) {
         + `| semantic_rank=${r.semantic_rank ?? '-'} | rrf=${r.rrf_formula}`;
 }
 
-function formatLineMatches(lineMatches, totalMatchCount) {
-    const rendered = lineMatches.map((m) => `L${m.line}: ${m.text}`).join('; ');
+function formatLineMatches(lineMatches, totalMatchCount, includeText) {
+    const rendered = includeText
+        ? lineMatches.map((m) => `L${m.line}: ${m.text}`).join('; ')
+        : lineMatches.map((m) => `L${m.line}`).join(', ');
     const more = totalMatchCount - lineMatches.length;
     return more > 0 ? `${rendered} (+${more} more)` : rendered;
 }
 
-export function formatGrepTable(results) {
+export function formatGrepTable(results, { includeText = false } = {}) {
     const rows = results.map((r) => ({
         note_title: r.noteTitle,
         file_line_count: r.fileLineCount,
-        line_matches: formatLineMatches(r.lineMatches, r.totalMatchCount),
+        line_matches: formatLineMatches(r.lineMatches, r.totalMatchCount, includeText),
     }));
     return formatTable([ 'note_title', 'file_line_count', 'line_matches' ], rows);
 }

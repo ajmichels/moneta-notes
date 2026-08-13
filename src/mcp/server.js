@@ -62,7 +62,8 @@ const TOOL_DEFS = [
     },
     {
         name: 'grep',
-        description: 'Ripgrep-backed literal or regex search over vault note files.',
+        description: 'Ripgrep-backed literal or regex search over vault note files. Returns matching '
+            + 'line numbers only, not line content — use note_read to view the matched lines.',
         inputSchema: {
             pattern: z.string(),
             regex: z.boolean().optional(),

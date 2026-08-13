@@ -89,7 +89,7 @@ describe('formatExplain', () => {
 });
 
 describe('formatGrepTable', () => {
-    it('renders line_matches as "L<line>: <text>" joined by "; "', () => {
+    it('renders line_matches as line numbers only by default (no match text)', () => {
         const text = formatGrepTable([
             {
                 noteTitle: 'Recipe',
@@ -98,6 +98,19 @@ describe('formatGrepTable', () => {
                 totalMatchCount: 2,
             },
         ]);
+
+        expect(text).toBe('note_title|file_line_count|line_matches\nRecipe|10|L2, L5\n');
+    });
+
+    it('renders line_matches as "L<line>: <text>" joined by "; " when includeText is true', () => {
+        const text = formatGrepTable([
+            {
+                noteTitle: 'Recipe',
+                fileLineCount: 10,
+                lineMatches: [ { line: 2, text: 'hello world' }, { line: 5, text: 'hello again' } ],
+                totalMatchCount: 2,
+            },
+        ], { includeText: true });
 
         expect(text).toBe('note_title|file_line_count|line_matches\nRecipe|10|L2: hello world; L5: hello again\n');
     });
@@ -112,7 +125,7 @@ describe('formatGrepTable', () => {
             },
         ]);
 
-        expect(text).toBe('note_title|file_line_count|line_matches\nBig|100|L1: x (+11 more)\n');
+        expect(text).toBe('note_title|file_line_count|line_matches\nBig|100|L1 (+11 more)\n');
     });
 });
 
