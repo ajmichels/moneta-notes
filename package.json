@@ -36,6 +36,7 @@
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
+    "gray-matter": "^4.0.3",
     "sqlite-vec": "^0.1.9"
   },
   "pnpm": {
