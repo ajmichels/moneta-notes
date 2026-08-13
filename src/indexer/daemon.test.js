@@ -1,11 +1,12 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, utimesSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, utimesSync, readFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb } from '../core/db.js';
 import { getLogger, runWithLogger } from '../logger.js';
 import {
     enqueuePath, dequeueNextPath, processPath, deleteNoteByPath, recordFailure, drainQueueOnce,
+    watermarkCatchup, existenceCheck,
 } from './daemon.js';
 
 const tempDirs = [];
@@ -392,5 +393,63 @@ describe('drainQueueOnce', () => {
         const summary = await drainQueueOnce(vaultRoot, db, baseDeps());
 
         expect(summary).toEqual({ reindexed: 0, skipped: 0, failed: 0 });
+    });
+});
+
+describe('watermarkCatchup', () => {
+    it('enqueues every .md file when notes is empty (0 watermark = full first-run index)', () => {
+        const vaultRoot = makeTempVault();
+        writeNote(vaultRoot, 'A.md', 'a', 1000);
+        mkdirSync(join(vaultRoot, 'Weekly Notes'));
+        writeNote(vaultRoot, 'Weekly Notes/2026-W32.md', 'w', 1000);
+        const db = makeTestDb();
+
+        const count = watermarkCatchup(db, vaultRoot, 2000);
+
+        expect(count).toBe(2);
+        const queued = db.prepare('SELECT path FROM index_queue ORDER BY path').all().map((r) => r.path);
+        expect(queued).toEqual([ 'A.md', 'Weekly Notes/2026-W32.md' ]);
+    });
+
+    it('only enqueues files newer than the current MAX(notes.updated_at) watermark', () => {
+        const vaultRoot = makeTempVault();
+        writeNote(vaultRoot, 'Old.md', 'old', 500);
+        writeNote(vaultRoot, 'New.md', 'new', 1500);
+        const db = makeTestDb();
+        db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('Old.md', 'hash', 1, 500, 1000);
+
+        const count = watermarkCatchup(db, vaultRoot, 2000);
+
+        expect(count).toBe(1);
+        expect(db.prepare('SELECT path FROM index_queue').get().path).toBe('New.md');
+    });
+
+    it('ignores non-.md files', () => {
+        const vaultRoot = makeTempVault();
+        writeFileSync(join(vaultRoot, 'attachment.png'), 'binary');
+        const db = makeTestDb();
+
+        expect(watermarkCatchup(db, vaultRoot, 2000)).toBe(0);
+    });
+});
+
+describe('existenceCheck', () => {
+    it('deletes notes rows whose file no longer exists on disk', () => {
+        const vaultRoot = makeTempVault();
+        const db = makeTestDb();
+        db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('Gone.md', 'hash', 1, 1000, 1000);
+        writeNote(vaultRoot, 'Still Here.md', 'body', 1000);
+        db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('Still Here.md', 'hash', 1, 1000, 1000);
+
+        const count = existenceCheck(db, vaultRoot);
+
+        expect(count).toBe(1);
+        expect(db.prepare('SELECT path FROM notes').get().path).toBe('Still Here.md');
     });
 });

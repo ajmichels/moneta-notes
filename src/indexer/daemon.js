@@ -1,5 +1,5 @@
-import { statSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readdirSync, statSync } from 'node:fs';
+import { join, relative, sep } from 'node:path';
 import { noteRead } from '../core/notes.js';
 import { extractTags, syncNoteTags } from '../core/tags.js';
 import { getContextLogger } from '../logger.js';
@@ -225,4 +225,52 @@ export async function processPath(vaultRoot, db, path, deps) {
 
     getContextLogger().info('reindexed note', { note_title: title, chunk_count: embeddedChunks.length });
     return { status: 'reindexed' };
+}
+
+function toVaultRelativePath(vaultRoot, absPath) {
+    return relative(vaultRoot, absPath).split(sep).join('/');
+}
+
+function walkVaultForMarkdown(vaultRoot) {
+    const results = [];
+    function walk(dir) {
+        for (const entry of readdirSync(dir, { withFileTypes: true })) {
+            const full = join(dir, entry.name);
+            if (entry.isDirectory()) {
+                walk(full);
+            } else if (entry.isFile() && entry.name.endsWith('.md')) {
+                results.push(full);
+            }
+        }
+    }
+    walk(vaultRoot);
+    return results;
+}
+
+export function watermarkCatchup(db, vaultRoot, now = Date.now()) {
+    const row = db.prepare('SELECT MAX(updated_at) AS watermark FROM notes').get();
+    const watermark = row.watermark ?? 0;
+
+    let enqueuedCount = 0;
+    for (const absPath of walkVaultForMarkdown(vaultRoot)) {
+        const mtimeSec = Math.floor(statSync(absPath).mtimeMs / 1000);
+        if (mtimeSec > watermark) {
+            enqueuePath(db, toVaultRelativePath(vaultRoot, absPath), now);
+            enqueuedCount += 1;
+        }
+    }
+    getContextLogger().info('watermark catch-up complete', { watermark, enqueued_count: enqueuedCount });
+    return enqueuedCount;
+}
+
+export function existenceCheck(db, vaultRoot) {
+    let deletedCount = 0;
+    for (const row of db.prepare('SELECT path FROM notes').all()) {
+        if (!existsSync(join(vaultRoot, row.path))) {
+            deleteNoteByPath(db, row.path);
+            deletedCount += 1;
+        }
+    }
+    getContextLogger().info('existence check complete', { deleted_count: deletedCount });
+    return deletedCount;
 }
