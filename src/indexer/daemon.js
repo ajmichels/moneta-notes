@@ -77,20 +77,47 @@ export function deleteNoteByPath(db, path) {
     db.prepare('DELETE FROM notes WHERE id = ?').run(note.id); // cascades chunks, note_tags (S001 FKs)
 }
 
+function statOrNull(absPath) {
+    try {
+        return statSync(absPath);
+    } catch (err) {
+        if (err.code === 'ENOENT') {
+            return null;
+        }
+        throw err;
+    }
+}
+
+function readNoteOrNull(vaultRoot, title) {
+    try {
+        return noteRead(vaultRoot, title);
+    } catch (err) {
+        if (/not found/i.test(err.message)) {
+            return null;
+        }
+        throw err;
+    }
+}
+
+async function embedChunks(content, chunkText, embed) {
+    const embeddedChunks = [];
+    for (const descriptor of chunkText(content)) {
+        const chunkBody = content.slice(descriptor.charStart, descriptor.charEnd);
+        const vector = await embed(chunkBody);
+        embeddedChunks.push({ ...descriptor, vector });
+    }
+    return embeddedChunks;
+}
+
 export async function processPath(vaultRoot, db, path, deps) {
     const { chunkText, embed, embeddingModel, embeddingVersion, now = Date.now() } = deps;
     const absPath = join(vaultRoot, path);
     const title = path.replace(/\.md$/, '');
 
-    let stats;
-    try {
-        stats = statSync(absPath);
-    } catch (err) {
-        if (err.code === 'ENOENT') {
-            deleteNoteByPath(db, path);
-            return { status: 'deleted' };
-        }
-        throw err;
+    const stats = statOrNull(absPath);
+    if (stats === null) {
+        deleteNoteByPath(db, path);
+        return { status: 'deleted' };
     }
 
     const currentMtime = Math.floor(stats.mtimeMs / 1000);
@@ -100,15 +127,10 @@ export async function processPath(vaultRoot, db, path, deps) {
         return { status: 'unchanged' };
     }
 
-    let read;
-    try {
-        read = noteRead(vaultRoot, title);
-    } catch (err) {
-        if (/not found/i.test(err.message)) {
-            deleteNoteByPath(db, path);
-            return { status: 'deleted' };
-        }
-        throw err;
+    const read = readNoteOrNull(vaultRoot, title);
+    if (read === null) {
+        deleteNoteByPath(db, path);
+        return { status: 'deleted' };
     }
 
     if (existing && existing.content_hash === read.content_hash) {
@@ -118,13 +140,7 @@ export async function processPath(vaultRoot, db, path, deps) {
         return { status: 'unchanged' };
     }
 
-    const chunkDescriptors = chunkText(read.content);
-    const embeddedChunks = [];
-    for (const descriptor of chunkDescriptors) {
-        const chunkBody = read.content.slice(descriptor.charStart, descriptor.charEnd);
-        const vector = await embed(chunkBody);
-        embeddedChunks.push({ ...descriptor, vector });
-    }
+    const embeddedChunks = await embedChunks(read.content, chunkText, embed);
 
     const noteId = upsertNoteRow(
         db, path, read.content_hash, read.total_lines, currentMtime, Math.floor(now / 1000),
