@@ -6,7 +6,7 @@ import { openDb } from '../core/db.js';
 import { getLogger, runWithLogger } from '../logger.js';
 import {
     enqueuePath, dequeueNextPath, processPath, deleteNoteByPath, recordFailure, drainQueueOnce,
-    watermarkCatchup, existenceCheck, createDebouncer, assertFswatchAvailable, spawnFswatch,
+    watermarkCatchup, existenceCheck, createDebouncer, assertFswatchAvailable, spawnFswatch, runReindex,
 } from './daemon.js';
 
 const tempDirs = [];
@@ -547,4 +547,75 @@ describe('spawnFswatch (real binary)', () => {
 
         expect(seenPaths.length).toBeGreaterThan(0);
     }, 10000);
+});
+
+describe('runReindex', () => {
+    it('enqueues and reindexes every .md file in the vault when noteTitle is omitted', async () => {
+        const vaultRoot = makeTempVault();
+        writeNote(vaultRoot, 'A.md', 'note a', 1000);
+        writeNote(vaultRoot, 'B.md', 'note b', 1000);
+        const db = makeTestDb();
+        const messages = [];
+
+        await runReindex(vaultRoot, db, { ...baseDeps(), now: 0 }, {}, (msg) => messages.push(msg));
+
+        const summaryMsg = messages.find((m) => m.summary);
+        expect(summaryMsg.summary).toEqual({ reindexed: 2, skipped: 0, failed: 0 });
+        expect(db.prepare('SELECT COUNT(*) AS count FROM notes').get().count).toBe(2);
+    });
+
+    it('scopes to a single path when noteTitle is given', async () => {
+        const vaultRoot = makeTempVault();
+        writeNote(vaultRoot, 'Only.md', 'note', 1000);
+        writeNote(vaultRoot, 'Ignored.md', 'note', 1000);
+        const db = makeTestDb();
+        const messages = [];
+
+        await runReindex(vaultRoot, db, { ...baseDeps(), now: 0 }, { noteTitle: 'Only' }, (msg) => messages.push(msg));
+
+        expect(db.prepare('SELECT COUNT(*) AS count FROM notes').get().count).toBe(1);
+        expect(db.prepare('SELECT path FROM notes').get().path).toBe('Only.md');
+    });
+
+    it('streams a message per attempt and retries in place until success or exhaustion', async () => {
+        const vaultRoot = makeTempVault();
+        writeNote(vaultRoot, 'Flaky.md', 'note', 1000);
+        const db = makeTestDb();
+        let attemptCount = 0;
+        const flakyDeps = {
+            ...baseDeps(),
+            embed: async (text) => {
+                attemptCount += 1;
+                if (attemptCount < 4) {
+                    throw new Error('transient failure');
+                }
+                return fakeEmbed(text);
+            },
+            now: 0,
+        };
+        const messages = [];
+
+        await runReindex(vaultRoot, db, flakyDeps, { noteTitle: 'Flaky' }, (msg) => messages.push(msg));
+
+        const finalOutcome = messages.find((m) => m.path === 'Flaky.md' && m.outcome === 'reindexed');
+        expect(finalOutcome).toBeDefined();
+        expect(messages.filter((m) => m.outcome === 'attempt_failed')).toHaveLength(3);
+    });
+
+    it('reports failed in the summary once retries are exhausted', async () => {
+        const vaultRoot = makeTempVault();
+        writeNote(vaultRoot, 'AlwaysBroken.md', 'note', 1000);
+        const db = makeTestDb();
+        const brokenDeps = {
+            ...baseDeps(),
+            embed: async () => { throw new Error('always fails'); },
+            now: 0,
+        };
+        const messages = [];
+
+        await runReindex(vaultRoot, db, brokenDeps, { noteTitle: 'AlwaysBroken' }, (msg) => messages.push(msg));
+
+        const summaryMsg = messages.find((m) => m.summary);
+        expect(summaryMsg.summary).toEqual({ reindexed: 0, skipped: 0, failed: 1 });
+    });
 });

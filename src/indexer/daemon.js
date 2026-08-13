@@ -328,3 +328,50 @@ export function spawnFswatch(vaultRoot, onPath) {
     });
     return child;
 }
+
+async function attemptPathUntilSettled(vaultRoot, db, path, deps, now, onMessage) {
+    try {
+        const result = await processPath(vaultRoot, db, path, deps);
+        db.prepare('DELETE FROM index_queue WHERE path = ?').run(path);
+        const outcome = result.status === 'reindexed' ? 'reindexed' : 'skipped';
+        onMessage({ path, outcome });
+        return outcome;
+    } catch (err) {
+        const { permanentlyFailed, attempts } = recordAndLogFailure(db, path, err, now, deps.backoffSchedule);
+        onMessage({ path, outcome: 'attempt_failed', attempts, error: err.message });
+        if (permanentlyFailed) {
+            onMessage({ path, outcome: 'failed' });
+            return 'failed';
+        }
+        // An IPC-triggered reindex retries immediately rather than waiting out the real backoff
+        // delay, since a caller is actively blocked on this connection watching it happen.
+        return attemptPathUntilSettled(vaultRoot, db, path, deps, now, onMessage);
+    }
+}
+
+export async function runReindex(vaultRoot, db, deps, options = {}, onMessage = () => {}) {
+    const { noteTitle = null } = options;
+    const now = deps.now ?? Date.now();
+
+    getContextLogger().info('reindex requested', {
+        scope: noteTitle !== null ? 'note' : 'vault',
+        note_title: noteTitle,
+    });
+
+    const paths = noteTitle !== null
+        ? [ `${noteTitle}.md` ]
+        : walkVaultForMarkdown(vaultRoot).map((absPath) => toVaultRelativePath(vaultRoot, absPath));
+
+    for (const path of paths) {
+        enqueuePath(db, path, now);
+    }
+
+    const counts = { reindexed: 0, skipped: 0, failed: 0 };
+    for (const path of paths) {
+        const outcome = await attemptPathUntilSettled(vaultRoot, db, path, deps, now, onMessage);
+        counts[outcome] += 1;
+    }
+
+    getContextLogger().info('reindex complete', counts);
+    onMessage({ summary: counts });
+}
