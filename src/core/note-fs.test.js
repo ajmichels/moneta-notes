@@ -36,6 +36,28 @@ describe('titleToPath / pathToTitle', () => {
         const title = 'Weekly Notes/2026-W32';
         expect(pathToTitle(vaultRoot, titleToPath(vaultRoot, title))).toBe(title);
     });
+
+    it('rejects a title whose ../ segments escape the vault', () => {
+        const vaultRoot = makeTempVault();
+        expect(() => titleToPath(vaultRoot, '../../../../tmp/pwned')).toThrow(/outside the vault/);
+    });
+
+    it('rejects a title that escapes by exactly one level', () => {
+        const vaultRoot = makeTempVault();
+        expect(() => titleToPath(vaultRoot, '../pwned')).toThrow(/outside the vault/);
+    });
+
+    it('rejects an absolute-looking title (still resolved relative to vaultRoot, but rejects if it escapes)', () => {
+        const vaultRoot = makeTempVault();
+        expect(titleToPath(vaultRoot, '/etc/passwd')).toBe(join(vaultRoot, 'etc', 'passwd.md'));
+    });
+
+    it('allows a title that legitimately contains ".." as part of a longer segment', () => {
+        const vaultRoot = makeTempVault();
+        expect(titleToPath(vaultRoot, 'Notes on 1..2 scaling')).toBe(
+            join(vaultRoot, 'Notes on 1..2 scaling.md'),
+        );
+    });
 });
 
 describe('stripMdExtension', () => {

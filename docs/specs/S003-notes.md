@@ -173,7 +173,10 @@ else to log it as.
 
 - **Path/title validation against the "flat vault structure" convention** — deliberately not
   enforced. `note_write`/`note_rename` accept any title/path; the convention (root + `Weekly Notes/` +
-  `Daily Notes/`, no other nesting) stays social/documented, not tool-enforced.
+  `Daily Notes/`, no other nesting) stays social/documented, not tool-enforced. This is unrelated to
+  vault *containment*, which is enforced: [S010](S010-shared-utilities.md)'s `titleToPath` rejects any
+  title that resolves outside `vaultRoot` (e.g. `../` traversal), since every title-taking tool here
+  routes through it.
 - **Tag extraction from frontmatter or inline `#hashtags`** — S004.
 - **How a rename's delete+create file events get picked up and reindexed** — S005 (indexing-daemon).
 - **`note_rename`'s MCP tool schema and its addition to the README's tool table** — S007.

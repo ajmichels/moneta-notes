@@ -34,7 +34,15 @@ This spec was split out after implementing S006 surfaced two real problems with 
 ## Contract
 
 - **`titleToPath(vaultRoot, title) -> string`** — `join(vaultRoot, `${title}.md`)`. The one place a
-  title becomes a real filesystem path.
+  title becomes a real filesystem path. **Throws if the resulting path resolves outside
+  `vaultRoot`** (a title containing `../` segments that walk past the vault root, e.g.
+  `../../../../tmp/pwned`) — checked via `relative(vaultRoot, candidate)` starting with `..`. Every
+  title-taking tool (`note_read`, `note_write`, `note_edit`, `note_append`, `note_rename`, `grep`'s
+  `note_title` scope) routes through this function on both the CLI and MCP surfaces, so this is the
+  single choke point for vault containment — nothing else needs its own check. This is a
+  containment guarantee, not a style rule: it's distinct from the "flat vault structure" convention
+  ([S003](S003-notes.md)), which stays intentionally unenforced — a title can still nest into
+  arbitrary subfolders, it just can't resolve outside `vaultRoot` entirely.
 - **`pathToTitle(vaultRoot, filePath) -> string`** — the inverse: an **absolute** filesystem path
   (e.g. from a directory walk or a ripgrep match) becomes a title. Normalizes path separators to `/`
   before stripping the `.md` extension, so the result is always identical regardless of platform path
