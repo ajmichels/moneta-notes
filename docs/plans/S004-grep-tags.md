@@ -84,6 +84,11 @@ layer, per CLAUDE.md.
   - `syncNoteTags(db, noteId, tagNames) -> void`
   - `tagList(db) -> Array<{ tag, notesWithTag }>`
   - `tagNotes(db, tagName) -> Array<{ noteTitle, fileLineCount }>`
+- **Logging** (S008, S004 "Logging"): `grep.js` calls `getContextLogger()` from `../logger.js` for
+  exactly one thing — a `warn` inside `assertRipgrepAvailable` immediately before its "ripgrep not
+  found" throw (Task 1). No logging anywhere in `tags.js` — `tagList`/`tagNotes` have no failure mode
+  beyond what SQL already throws, and `extractTags`/`syncNoteTags` are pure/DB-upsert functions with
+  no diagnostic-worthy silent behavior of their own.
 - **Known, deliberate small duplication**: `grep.js` needs a filesystem-absolute-path → note-title
   transform (vault-root-relative, strip `.md`), and `tags.js` needs a DB-stored-relative-path →
   note-title transform (strip `.md` — the DB already stores vault-relative paths per S001, so no
@@ -104,15 +109,20 @@ layer, per CLAUDE.md.
 **Interfaces:**
 - Produces: `assertRipgrepAvailable(env = process.env) -> void`, throwing a descriptive error
   (`ripgrep not found — install via \`brew install ripgrep\``) when `rg` can't be resolved, used
-  internally by every later `grep()` task.
+  internally by every later `grep()` task. Also calls `getContextLogger().warn('ripgrep not found on
+  PATH')` immediately before that throw (S004 "Logging").
 
 - [ ] **Step 1: Write the failing test**
 
 Create `src/core/grep.test.js`:
 
 ```js
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { assertRipgrepAvailable } from './grep.js';
+import { getLogger, runWithLogger } from '../logger.js';
 
 describe('assertRipgrepAvailable', () => {
     it('does not throw when rg is resolvable on PATH', () => {
@@ -121,6 +131,31 @@ describe('assertRipgrepAvailable', () => {
 
     it('throws an actionable error when rg is not on PATH', () => {
         expect(() => assertRipgrepAvailable({ PATH: '' })).toThrow(/ripgrep not found/);
+    });
+
+    it('logs a warn line via the context logger before throwing', async () => {
+        const logDir = mkdtempSync(join(tmpdir(), 'mnotes-grep-test-log-'));
+        const logger = getLogger('mcp-server', logDir);
+
+        expect(() =>
+            runWithLogger(logger, () => assertRipgrepAvailable({ PATH: '' })),
+        ).toThrow(/ripgrep not found/);
+
+        await vi.waitFor(() => {
+            const line = readFileSync(join(logDir, 'mcp-server.log'), 'utf8').trim();
+            expect(line).toContain('WARN  [mcp-server] ripgrep not found on PATH');
+        });
+        rmSync(logDir, { recursive: true, force: true });
+    });
+
+    it('does not log when rg is resolvable (no enclosing context either way)', () => {
+        const logDir = mkdtempSync(join(tmpdir(), 'mnotes-grep-test-log-'));
+        const logger = getLogger('mcp-server', logDir);
+
+        runWithLogger(logger, () => assertRipgrepAvailable());
+
+        expect(existsSync(join(logDir, 'mcp-server.log'))).toBe(false);
+        rmSync(logDir, { recursive: true, force: true });
     });
 });
 ```
@@ -136,12 +171,14 @@ Create `src/core/grep.js`:
 
 ```js
 import { execFileSync } from 'node:child_process';
+import { getContextLogger } from '../logger.js';
 
 export function assertRipgrepAvailable(env = process.env) {
     try {
         execFileSync('rg', [ '--version' ], { env, stdio: 'ignore' });
     } catch (error) {
         if (error.code === 'ENOENT') {
+            getContextLogger().warn('ripgrep not found on PATH');
             throw new Error('ripgrep not found — install via `brew install ripgrep`');
         }
         throw error;
@@ -236,12 +273,14 @@ Update `src/core/grep.js`:
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
+import { getContextLogger } from '../logger.js';
 
 export function assertRipgrepAvailable(env = process.env) {
     try {
         execFileSync('rg', [ '--version' ], { env, stdio: 'ignore' });
     } catch (error) {
         if (error.code === 'ENOENT') {
+            getContextLogger().warn('ripgrep not found on PATH');
             throw new Error('ripgrep not found — install via `brew install ripgrep`');
         }
         throw error;
@@ -1540,7 +1579,8 @@ git commit -m "feat(tags): add tagNotes query with parent-includes-child matchin
 - **Spec coverage**: every behavior called out in `docs/specs/S004-grep-tags.md` has a task —
   fixed-string default / regex opt-in (Task 4), smart-case (Task 5), `note_title` scoping (Task 6),
   the 10-line-match cap with true-total reporting (Task 7), the `*.md` glob restriction (Task 3), a
-  clear "rg not found" error (Task 1); frontmatter + inline `#hashtag` extraction merged with no
+  clear "rg not found" error with its accompanying `warn`-level context log (Task 1, per S004
+  "Logging"); frontmatter + inline `#hashtag` extraction merged with no
   source distinction (Tasks 9–10), the numeric-only-tag rejection (Task 11), code-fence/inline-code
   exclusion (Task 12), the `COLLATE NOCASE` upsert-preserving-first-seen-casing storage behavior
   (Task 13), exact-match `tag_list` (Task 14), and parent-includes-child `tag_notes` (Task 15).
