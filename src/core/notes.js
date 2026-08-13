@@ -179,3 +179,58 @@ export function noteWrite(vaultRoot, title, { hash = null, metadata = null, cont
 
     return updateNote(filePath, title, hash, metadata, content, force);
 }
+
+function countOccurrences(haystack, needle) {
+    if (needle === '') {
+        return 0;
+    }
+    return haystack.split(needle).length - 1;
+}
+
+export function noteEdit(vaultRoot, title, { hash, oldTxt, newTxt, metadata = null } = {}) {
+    if (!hash) {
+        throw new Error(`note_edit: hash is required for "${title}"`);
+    }
+
+    const filePath = titleToPath(vaultRoot, title);
+    const currentRaw = readRawNote(filePath, title);
+    const currentHash = hashContent(currentRaw);
+
+    if (currentHash !== hash) {
+        throw new Error(
+            `note_edit: hash mismatch for "${title}" — note has changed since last read `
+            + `(expected ${hash}, found ${currentHash}). Read the note again before editing.`,
+        );
+    }
+
+    const { data: existingMetadata, content: existingBody } = matter(currentRaw);
+    const occurrences = countOccurrences(existingBody, oldTxt);
+
+    if (occurrences === 0) {
+        throw new Error(`note_edit: old_txt not found in "${title}"`);
+    }
+    if (occurrences > 1) {
+        throw new Error(
+            `note_edit: old_txt matches ${occurrences} times in "${title}" — ambiguous edit, `
+            + 'provide more surrounding context',
+        );
+    }
+
+    const newBody = existingBody.replace(oldTxt, newTxt);
+    const currentLineCount = countLines(existingBody);
+    const newLineCount = countLines(newBody);
+
+    if (newLineCount < currentLineCount * SIZE_DROP_THRESHOLD) {
+        throw new Error(
+            `note_edit: size-drop guard tripped for "${title}" — new content is ${newLineCount} `
+            + `lines, down from ${currentLineCount} (below ${SIZE_DROP_THRESHOLD * 100}% threshold)`,
+        );
+    }
+
+    const data = withComputedId(mergeMetadata(existingMetadata, metadata), metadata, title);
+    const raw = matter.stringify(newBody, data);
+
+    writeFileSync(filePath, raw, 'utf8');
+
+    return { title, hash: hashContent(raw), line_count: newLineCount };
+}

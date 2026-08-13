@@ -2,7 +2,9 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { titleToPath, pathToTitle, hashContent, countLines, noteRead, noteWrite } from './notes.js';
+import {
+    titleToPath, pathToTitle, hashContent, countLines, noteRead, noteWrite, noteEdit,
+} from './notes.js';
 import { getLogger, runWithLogger } from '../logger.js';
 
 const tempDirs = [];
@@ -336,5 +338,89 @@ describe('noteWrite size-drop guard', () => {
         });
 
         expect(result.line_count).toBe(5);
+    });
+});
+
+describe('noteEdit', () => {
+    it('replaces old_txt with new_txt when it matches exactly once', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Editable', { content: 'the quick fox' });
+
+        const result = noteEdit(vaultRoot, 'Editable', {
+            hash: created.hash,
+            oldTxt: 'quick',
+            newTxt: 'slow',
+        });
+
+        expect(noteRead(vaultRoot, 'Editable').content).toBe('the slow fox');
+        expect(result.hash).toBe(noteRead(vaultRoot, 'Editable').content_hash);
+    });
+
+    it('merges metadata using the same semantics as note_write', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Edit Meta', {
+            metadata: { status: 'draft', tags: [ 'a' ] },
+            content: 'body text',
+        });
+
+        noteEdit(vaultRoot, 'Edit Meta', {
+            hash: created.hash,
+            oldTxt: 'body',
+            newTxt: 'edited',
+            metadata: { status: null },
+        });
+
+        expect(noteRead(vaultRoot, 'Edit Meta').metadata).toEqual({ id: 'Edit Meta', tags: [ 'a' ] });
+    });
+
+    it('throws when old_txt is not found', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'No Match', { content: 'hello world' });
+
+        expect(() =>
+            noteEdit(vaultRoot, 'No Match', { hash: created.hash, oldTxt: 'goodbye', newTxt: 'x' }),
+        ).toThrow(/not found/i);
+    });
+
+    it('throws when old_txt matches more than once', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Ambiguous', { content: 'foo bar foo' });
+
+        expect(() =>
+            noteEdit(vaultRoot, 'Ambiguous', { hash: created.hash, oldTxt: 'foo', newTxt: 'baz' }),
+        ).toThrow(/ambiguous|matches \d+ times/i);
+    });
+
+    it('throws when hash is missing', () => {
+        const vaultRoot = makeTempVault();
+        noteWrite(vaultRoot, 'No Hash', { content: 'body' });
+
+        expect(() => noteEdit(vaultRoot, 'No Hash', { oldTxt: 'body', newTxt: 'x' })).toThrow(
+            /hash is required/i,
+        );
+    });
+
+    it('throws a staleness error on hash mismatch', () => {
+        const vaultRoot = makeTempVault();
+        noteWrite(vaultRoot, 'Stale Edit', { content: 'body' });
+
+        expect(() =>
+            noteEdit(vaultRoot, 'Stale Edit', { hash: 'wrong', oldTxt: 'body', newTxt: 'x' }),
+        ).toThrow(/hash mismatch|changed since/i);
+    });
+
+    it('enforces the size-drop guard with no force override available', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Collapse', {
+            content: 'l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10',
+        });
+
+        expect(() =>
+            noteEdit(vaultRoot, 'Collapse', {
+                hash: created.hash,
+                oldTxt: 'l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10',
+                newTxt: 'l1',
+            }),
+        ).toThrow(/size-drop|below/i);
     });
 });
