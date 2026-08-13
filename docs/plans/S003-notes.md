@@ -112,6 +112,13 @@ standing in for the vault root (no mocking, per CLAUDE.md).
 - Exact tool semantics (hash rules, metadata merge rules, size-drop guard, `id` computation) per
   `docs/specs/S003-notes.md`, cross-referenced against `docs/specs/S007-mcp-server.md` where S003's
   prose is ambiguous (see "Design decisions" above).
+- **Logging** (S008, S003 "Logging"): mutation outcomes are fully covered by `logAudit` at the
+  boundary layer (`S006`/`S007`) — this file does not duplicate that via `getContextLogger()`, it just
+  throws descriptive errors as above. The one exception, introduced in Task 3's `withComputedId`
+  helper and reused by every task through Task 8: a `debug` line when a caller-supplied `id` in
+  *that call's own* `metadata` argument gets silently overwritten with the computed value — something
+  `audit.log` wouldn't otherwise capture. `import { getContextLogger } from '../logger.js';` at the
+  top of `notes.js`.
 
 ---
 
@@ -463,7 +470,8 @@ git commit -m "feat(notes): add note_read with frontmatter parsing and line-rang
   hash, line_count }` — **create path only** (`hash === null`). The update path (`hash` provided)
   throws a placeholder "not yet implemented" error in this task and is built out in Task 4 — mirrors
   S001's Task 9→10 pattern of landing one branch of a function per task with an explicit note about
-  what's deferred.
+  what's deferred. Also produces `withComputedId(baseMetadata, callerMetadata, title)` (S003
+  "Logging"), reused unchanged by every later task in this plan.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -499,6 +507,36 @@ describe('noteWrite (create)', () => {
         expect(onDisk.metadata).toEqual({ id: '2026-W32', tags: [ 'weekly' ] });
     });
 
+    it('logs a debug line via the context logger when a caller-supplied id is overwritten', async () => {
+        const vaultRoot = makeTempVault();
+        const logDir = mkdtempSync(join(tmpdir(), 'mnotes-notes-test-log-'));
+        const logger = getLogger('mcp-server', logDir);
+
+        runWithLogger(logger, () =>
+            noteWrite(vaultRoot, 'Logged Id', { metadata: { id: 'bogus' }, content: 'body' }));
+
+        await vi.waitFor(() => {
+            const line = readFileSync(join(logDir, 'mcp-server.log'), 'utf8').trim();
+            expect(line).toContain('DEBUG [mcp-server] overwrote caller-supplied id');
+            expect(line).toContain('note_title="Logged Id"');
+            expect(line).toContain('supplied_id="bogus"');
+            expect(line).toContain('computed_id="Logged Id"');
+        });
+        rmSync(logDir, { recursive: true, force: true });
+    });
+
+    it('does not log when no metadata is given (nothing caller-supplied to overwrite)', async () => {
+        const vaultRoot = makeTempVault();
+        const logDir = mkdtempSync(join(tmpdir(), 'mnotes-notes-test-log-'));
+        const logger = getLogger('mcp-server', logDir);
+
+        runWithLogger(logger, () => noteWrite(vaultRoot, 'No Metadata', { content: 'body' }));
+
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(existsSync(join(logDir, 'mcp-server.log'))).toBe(false);
+        rmSync(logDir, { recursive: true, force: true });
+    });
+
     it('creates parent folders for a folder-prefixed title', () => {
         const vaultRoot = makeTempVault();
         noteWrite(vaultRoot, 'Daily Notes/2026-08-05', { content: 'daily body' });
@@ -518,6 +556,10 @@ describe('noteWrite (create)', () => {
 });
 ```
 
+Extend `src/core/notes.test.js`'s top-level imports for the two new tests above: `vi` from `'vitest'`
+(alongside `describe, it, expect, afterEach`), `readFileSync, existsSync` from `'node:fs'` (alongside
+the already-imported `mkdtempSync, rmSync`), and `getLogger, runWithLogger` from `'../logger.js'`.
+
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `pnpm vitest run src/core/notes.test.js`
@@ -532,6 +574,7 @@ import { join, relative, dirname } from 'node:path';
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import matter from 'gray-matter';
+import { getContextLogger } from '../logger.js';
 
 // ... titleToPath, pathToTitle, hashContent, countLines, noteRead unchanged from Task 2 ...
 
@@ -540,8 +583,24 @@ function computeId(title) {
     return segments[segments.length - 1];
 }
 
+// `callerMetadata` is the metadata object passed to *this* call (null when the tool has no
+// metadata param, e.g. append/rename) — distinct from `baseMetadata`, which may already be a
+// merge of existing + caller metadata (S003 "Logging": only a caller-supplied `id` in this call's
+// own input is worth flagging, not the routine case of an existing id carrying forward unchanged).
+function withComputedId(baseMetadata, callerMetadata, title) {
+    const computedId = computeId(title);
+    if (callerMetadata && Object.prototype.hasOwnProperty.call(callerMetadata, 'id')) {
+        getContextLogger().debug('overwrote caller-supplied id', {
+            note_title: title,
+            supplied_id: callerMetadata.id,
+            computed_id: computedId,
+        });
+    }
+    return { ...(baseMetadata ?? {}), id: computedId };
+}
+
 function createNote(filePath, title, metadata, content) {
-    const data = { ...(metadata ?? {}), id: computeId(title) };
+    const data = withComputedId(metadata, metadata, title);
     const raw = matter.stringify(content, data);
 
     mkdirSync(dirname(filePath), { recursive: true });
@@ -752,7 +811,7 @@ function updateNote(filePath, title, hash, metadata, content) {
     }
 
     const { data: existingMetadata } = matter(currentRaw);
-    const data = { ...mergeMetadata(existingMetadata, metadata), id: computeId(title) };
+    const data = withComputedId(mergeMetadata(existingMetadata, metadata), metadata, title);
     const raw = matter.stringify(content, data);
 
     writeFileSync(filePath, raw, 'utf8');
@@ -898,7 +957,7 @@ function updateNote(filePath, title, hash, metadata, content, force) {
         );
     }
 
-    const data = { ...mergeMetadata(existingMetadata, metadata), id: computeId(title) };
+    const data = withComputedId(mergeMetadata(existingMetadata, metadata), metadata, title);
     const raw = matter.stringify(content, data);
 
     writeFileSync(filePath, raw, 'utf8');
@@ -1107,7 +1166,7 @@ export function noteEdit(vaultRoot, title, { hash, oldTxt, newTxt, metadata = nu
         );
     }
 
-    const data = { ...mergeMetadata(existingMetadata, metadata), id: computeId(title) };
+    const data = withComputedId(mergeMetadata(existingMetadata, metadata), metadata, title);
     const raw = matter.stringify(newBody, data);
 
     writeFileSync(filePath, raw, 'utf8');
@@ -1219,7 +1278,7 @@ export function noteAppend(vaultRoot, title, hash, content) {
     const { data: existingMetadata, content: existingBody } = matter(currentRaw);
     const newBody = existingBody === '' ? content : `${existingBody}\n${content}`;
 
-    const data = { ...existingMetadata, id: computeId(title) };
+    const data = withComputedId(existingMetadata, null, title);
     const raw = matter.stringify(newBody, data);
 
     writeFileSync(filePath, raw, 'utf8');
@@ -1376,7 +1435,7 @@ export function noteRename(vaultRoot, oldTitle, newTitle, hash) {
     }
 
     const { data: existingMetadata, content: body } = matter(currentRaw);
-    const data = { ...existingMetadata, id: computeId(newTitle) };
+    const data = withComputedId(existingMetadata, null, newTitle);
     const raw = matter.stringify(body, data);
 
     mkdirSync(dirname(newPath), { recursive: true });
@@ -1413,7 +1472,8 @@ git commit -m "feat(notes): add note_rename with id rewrite and hard target-exis
   with no `force`), `note_append` (hash-required, no metadata, no guard), `note_rename` (move + `id`
   rewrite + hard no-force target-exists error) — has a dedicated task and passing tests. The
   system-managed `id` field (computed, never caller-settable, silently overwritten if supplied) is
-  covered in Tasks 3, 4, 7, and 8 (every mutation path that touches frontmatter).
+  covered in Tasks 3, 4, 7, and 8 (every mutation path that touches frontmatter), including the
+  `withComputedId` debug-logging behavior added per S003's "Logging" section and S008.
 - **Deliberate deviation from the orienting brief**: the task brief for this plan suggested wiring
   `core/db.js` into `notes.js` and using a DB fixture in tests (to track `content_hash`/`line_count`/
   `mtime` on the `notes` row). Reading `docs/specs/S003-notes.md` directly shows this is wrong for this
