@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, utimesSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { shouldRotate, rotateLogFile } from './log-rotator.js';
+import { shouldRotate, rotateLogFile, rotateLogDirectory } from './log-rotator.js';
 
 const tempDirs = [];
 
@@ -103,5 +103,38 @@ describe('rotateLogFile', () => {
         expect(existsSync(`${filePath}.6`)).toBe(false);
         expect(readFileSync(`${filePath}.5`, 'utf8')).toBe('rotated-4');
         expect(readFileSync(`${filePath}.1`, 'utf8')).toBe('active content');
+    });
+});
+
+describe('rotateLogDirectory', () => {
+    it('rotates only files that exceed the policy thresholds', () => {
+        const dir = makeTempDir();
+        const bigFile = join(dir, 'indexer.log');
+        const smallFile = join(dir, 'mcp-server.log');
+        writeFileSync(bigFile, Buffer.alloc(2048));
+        writeFileSync(smallFile, 'small');
+
+        rotateLogDirectory(
+            dir,
+            [ 'indexer.log', 'mcp-server.log' ],
+            { maxSizeBytes: 1024, maxAgeMs: Infinity, keepCount: 5 },
+        );
+
+        expect(readFileSync(bigFile, 'utf8')).toBe('');
+        expect(existsSync(`${bigFile}.1`)).toBe(true);
+        expect(readFileSync(smallFile, 'utf8')).toBe('small');
+        expect(existsSync(`${smallFile}.1`)).toBe(false);
+    });
+
+    it('skips files that do not exist yet without throwing', () => {
+        const dir = makeTempDir();
+
+        expect(() =>
+            rotateLogDirectory(
+                dir,
+                [ 'audit.log' ],
+                { maxSizeBytes: 1024, maxAgeMs: Infinity, keepCount: 5 },
+            ),
+        ).not.toThrow();
     });
 });

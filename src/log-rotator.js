@@ -1,4 +1,5 @@
 import { existsSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 export function shouldRotate(filePath, policy) {
     if (!existsSync(filePath)) {
@@ -29,4 +30,21 @@ export function rotateLogFile(filePath, keepCount) {
     }
 
     writeFileSync(filePath, '');
+}
+
+export const DEFAULT_ROTATION_POLICY = {
+    maxSizeBytes: 10 * 1024 * 1024,
+    maxAgeMs: 7 * 24 * 60 * 60 * 1000,
+    keepCount: 5,
+};
+
+export const LOG_FILE_NAMES = [ 'indexer.log', 'mcp-server.log', 'audit.log' ];
+
+export function rotateLogDirectory(logDir, fileNames = LOG_FILE_NAMES, policy = DEFAULT_ROTATION_POLICY) {
+    for (const fileName of fileNames) {
+        const filePath = join(logDir, fileName);
+        if (shouldRotate(filePath, policy)) {
+            rotateLogFile(filePath, policy.keepCount);
+        }
+    }
 }
