@@ -138,6 +138,15 @@ defaults), explicitly out of scope for this plan — see Self-Review Notes.
   human ever runs the script.
 - `scripts/install.sh` assumes `pnpm install` has already run (S009 states this explicitly) —
   dependency installation itself is out of scope here.
+- **Logging** (S008, S009 "Logging"): `src/config.js` calls `getContextLogger()` from `./logger.js`
+  (config.js lives directly under `src/`, so no `../` needed) — never `getLogger` directly, no
+  file/component decisions here. Three call sites, all inside `loadConfig`: a `debug` line when no
+  `config.toml` exists at all (Task 3), a `debug` line naming the top-level `overridden_keys` once a
+  file is found and merged (Task 4), and a `warn` line per unrecognized key found in the parsed file
+  that isn't part of the schema above (Task 6, added alongside the existing malformed-TOML hard
+  error). `scripts/install.sh`/`scripts/uninstall.sh` are explicitly **out of scope** for this pass —
+  they're bash, never touch `src/logger.js`, and S009's own "Logging" section says so directly; none
+  of Part B below changes.
 
 ---
 
@@ -370,17 +379,20 @@ git commit -m "feat(config): add defaultConfigPath pointing at ~/.config/mnotes/
 - Produces: `loadConfig(configPath = defaultConfigPath()) -> object`. This task only implements the
   no-file branch; a non-null but currently-unhandled file throws a placeholder error, filled in by
   Task 4 — mirrors the one-branch-per-task pattern `S001`'s Task 9→10 and `S003`'s Task 3→4 already
-  established in this project's plans.
+  established in this project's plans. Also adds this plan's first `getContextLogger()` call site
+  (S009 "Logging"): a `debug` line in the no-file branch, since a missing `config.toml` is the
+  expected, common case (a user who accepted every install-time default), not a warning.
 
 - [ ] **Step 1: Write the failing test**
 
 Add near the top of `src/config.test.js` (new imports and a temp-dir helper):
 
 ```js
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { afterEach } from 'vitest';
+import { afterEach, vi } from 'vitest';
 import { loadConfig } from './config.js';
+import { getLogger, runWithLogger } from './logger.js';
 
 const tempDirs = [];
 
@@ -406,13 +418,29 @@ describe('loadConfig: no file on disk', () => {
 
         expect(loadConfig(configPath)).toEqual(buildDefaultConfig());
     });
+
+    it('logs a debug line via the context logger noting no config.toml was found', async () => {
+        const logDir = mkdtempSync(join(tmpdir(), 'mnotes-config-test-log-'));
+        const logger = getLogger('mcp-server', logDir);
+        const configPath = makeTempConfigPath();
+
+        runWithLogger(logger, () => loadConfig(configPath));
+
+        await vi.waitFor(() => {
+            const line = readFileSync(join(logDir, 'mcp-server.log'), 'utf8').trim();
+            expect(line).toContain('DEBUG [mcp-server] no config.toml found, using built-in defaults');
+        });
+        rmSync(logDir, { recursive: true, force: true });
+    });
 });
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `pnpm vitest run src/config.test.js`
-Expected: FAIL — `loadConfig is not a function`.
+Expected: FAIL — `loadConfig is not a function`, and the logging test fails for the same reason (once
+`loadConfig` exists but before Step 3's `getContextLogger()` call is added, it would instead fail
+because `mcp-server.log` is never written).
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -420,11 +448,13 @@ Update `src/config.js` — add:
 
 ```js
 import { existsSync } from 'node:fs';
+import { getContextLogger } from './logger.js';
 
 export function loadConfig(configPath = defaultConfigPath()) {
     const defaults = buildDefaultConfig();
 
     if (!existsSync(configPath)) {
+        getContextLogger().debug('no config.toml found, using built-in defaults');
         return defaults;
     }
 
@@ -457,7 +487,11 @@ git commit -m "feat(config): add loadConfig no-file-on-disk branch"
 - Consumes: `existsSync`/`buildDefaultConfig` from Task 3.
 - Produces: `loadConfig`'s file-exists branch — parses the file with `smol-toml` and deep-merges the
   result over `buildDefaultConfig()`. This task proves the simplest case (one overridden top-level
-  scalar key); nested-section merging is proven explicitly in Task 5.
+  scalar key); nested-section merging is proven explicitly in Task 5. Also adds this plan's second
+  `getContextLogger()` call site (S009 "Logging"): a `debug` line once a file is found and parsed,
+  with `{ overridden_keys: Object.keys(overrides) }` — the *top-level* keys actually present in the
+  parsed TOML (e.g. `['search']` for a `[search]`-only override, not the fully-qualified
+  `'search.limit_default'`), never the overridden values themselves.
 
 **Why `smol-toml`:** the installed Node version is 24 (confirmed: `node --version` → `v24.14.0`,
 matching S001's `node:sqlite` target); Node core has no built-in TOML parser at this version — unlike
@@ -491,6 +525,22 @@ describe('loadConfig: sparse top-level override', () => {
         expect(config.embedding_model).toBe('Qwen3-Embedding-0.6B');
         expect(config.search.limit_default).toBe(20);
     });
+
+    it('logs a debug line via the context logger naming the overridden top-level keys', async () => {
+        const logDir = mkdtempSync(join(tmpdir(), 'mnotes-config-test-log-'));
+        const logger = getLogger('mcp-server', logDir);
+        const configPath = makeTempConfigPath();
+        writeFileSync(configPath, 'vault_path = "/custom/vault/path"\n', 'utf8');
+
+        runWithLogger(logger, () => loadConfig(configPath));
+
+        await vi.waitFor(() => {
+            const line = readFileSync(join(logDir, 'mcp-server.log'), 'utf8').trim();
+            expect(line).toContain('DEBUG [mcp-server] loaded config overrides');
+            expect(line).toContain('overridden_keys=vault_path');
+        });
+        rmSync(logDir, { recursive: true, force: true });
+    });
 });
 ```
 
@@ -498,7 +548,8 @@ describe('loadConfig: sparse top-level override', () => {
 
 Run: `pnpm vitest run src/config.test.js`
 Expected: FAIL — `loadConfig` currently throws `"reading an existing config.toml file is not yet
-implemented"` for any existing file.
+implemented"` for any existing file, which also means the new logging test fails (no
+`mcp-server.log` is ever written on that path).
 
 - [ ] **Step 4: Write minimal implementation**
 
@@ -509,6 +560,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'smol-toml';
+import { getContextLogger } from './logger.js';
 
 // ... defaultVaultPath, defaultDbPath, buildDefaultConfig, defaultConfigPath unchanged from Tasks 1-2 ...
 
@@ -532,11 +584,14 @@ export function loadConfig(configPath = defaultConfigPath()) {
     const defaults = buildDefaultConfig();
 
     if (!existsSync(configPath)) {
+        getContextLogger().debug('no config.toml found, using built-in defaults');
         return defaults;
     }
 
     const raw = readFileSync(configPath, 'utf8');
     const overrides = parse(raw);
+
+    getContextLogger().debug('loaded config overrides', { overridden_keys: Object.keys(overrides) });
 
     return deepMerge(defaults, overrides);
 }
@@ -628,7 +683,7 @@ git commit -m "test(config): cover nested-section merge and wholesale array repl
 
 ---
 
-### Task 6: `loadConfig()` — malformed TOML is a hard error; empty file is a no-op
+### Task 6: `loadConfig()` — malformed TOML is a hard error; empty file is a no-op; warn on unrecognized keys
 
 **Files:**
 - Modify: `src/config.js`
@@ -640,7 +695,15 @@ git commit -m "test(config): cover nested-section merge and wholesale array repl
   error) on invalid TOML syntax — CLAUDE.md's "fail loudly," same shape `S002-search`'s malformed-FTS5
   handling and `S003-notes`'s hash-mismatch errors already use in this project. A zero-byte
   `config.toml` (e.g. `touch`ed but never written to) parses to `{}` and is not an error — it's the
-  degenerate case of "no overrides," equivalent to no file at all.
+  degenerate case of "no overrides," equivalent to no file at all. Also adds this plan's third and
+  final `getContextLogger()` call site (S009 "Logging") and the `findUnrecognizedKeys` helper that
+  powers it: a `warn` line, once per unrecognized key (context `{ key }`, a dotted path for keys nested
+  under a known section, e.g. `search.limt_default`), for any key present in the parsed file that
+  doesn't exist anywhere in `buildDefaultConfig()`'s schema — the one genuinely diagnostic case, since
+  a typoed key would otherwise silently fall through to the built-in default with no trail. This
+  doesn't change `deepMerge`'s behavior at all (an unrecognized key still merges into the returned
+  object exactly as before — S009 doesn't ask for stricter rejection, only for a warning trail), it
+  only adds a read-only pass over `overrides` before returning.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -662,6 +725,50 @@ describe('loadConfig: malformed TOML and empty file', () => {
         expect(loadConfig(configPath)).toEqual(buildDefaultConfig());
     });
 });
+
+describe('loadConfig: unrecognized keys', () => {
+    it('logs a warn line per unrecognized key without rejecting the load', async () => {
+        const logDir = mkdtempSync(join(tmpdir(), 'mnotes-config-test-log-'));
+        const logger = getLogger('mcp-server', logDir);
+        const configPath = makeTempConfigPath();
+        writeFileSync(
+            configPath,
+            [ 'database_path = "/oops"', '', '[search]', 'limt_default = 50' ].join('\n'),
+            'utf8',
+        );
+
+        const config = runWithLogger(logger, () => loadConfig(configPath));
+
+        expect(config.vault_path).toBe(buildDefaultConfig().vault_path);
+        expect(config.search.limit_default).toBe(20);
+
+        await vi.waitFor(() => {
+            const lines = readFileSync(join(logDir, 'mcp-server.log'), 'utf8').trim().split('\n');
+            expect(lines.some(line =>
+                line.includes('WARN  [mcp-server] unrecognized config key') && line.includes('key="database_path"'),
+            )).toBe(true);
+            expect(lines.some(line =>
+                line.includes('WARN  [mcp-server] unrecognized config key') && line.includes('key="search.limt_default"'),
+            )).toBe(true);
+        });
+        rmSync(logDir, { recursive: true, force: true });
+    });
+
+    it('does not warn when every key in the file matches the schema', async () => {
+        const logDir = mkdtempSync(join(tmpdir(), 'mnotes-config-test-log-'));
+        const logger = getLogger('mcp-server', logDir);
+        const configPath = makeTempConfigPath();
+        writeFileSync(configPath, '[search]\nlimit_default = 50\n', 'utf8');
+
+        runWithLogger(logger, () => loadConfig(configPath));
+
+        await vi.waitFor(() => {
+            const lines = readFileSync(join(logDir, 'mcp-server.log'), 'utf8').trim().split('\n');
+            expect(lines.some(line => line.includes('unrecognized config key'))).toBe(false);
+        });
+        rmSync(logDir, { recursive: true, force: true });
+    });
+});
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -670,17 +777,34 @@ Run: `pnpm vitest run src/config.test.js`
 Expected: FAIL — the malformed-TOML test fails because `smol-toml`'s raw parser error propagates
 unwrapped (its message doesn't necessarily contain the file path); the empty-file test may already
 pass (`parse('')` returns `{}`, and `deepMerge(defaults, {})` is a no-op) — run it anyway to confirm
-that continues to hold once the `try`/`catch` below is added.
+that continues to hold once the `try`/`catch` below is added. The new "unrecognized keys" tests fail
+because `mcp-server.log` never contains an `unrecognized config key` line (no `findUnrecognizedKeys`
+call exists yet) — the "does not warn" test technically passes vacuously at this stage but is written
+now, not after Step 3, so it's a real regression guard once the warn path exists.
 
 - [ ] **Step 3: Write minimal implementation**
 
-Update `src/config.js` — wrap the parse call:
+Update `src/config.js` — add `findUnrecognizedKeys` and wrap the parse call:
 
 ```js
+function findUnrecognizedKeys(base, override, prefix = '') {
+    const unrecognized = [];
+    for (const [ key, value ] of Object.entries(override)) {
+        const path = prefix ? `${prefix}.${key}` : key;
+        if (!(key in base)) {
+            unrecognized.push(path);
+        } else if (isPlainObject(value) && isPlainObject(base[key])) {
+            unrecognized.push(...findUnrecognizedKeys(base[key], value, path));
+        }
+    }
+    return unrecognized;
+}
+
 export function loadConfig(configPath = defaultConfigPath()) {
     const defaults = buildDefaultConfig();
 
     if (!existsSync(configPath)) {
+        getContextLogger().debug('no config.toml found, using built-in defaults');
         return defaults;
     }
 
@@ -692,6 +816,12 @@ export function loadConfig(configPath = defaultConfigPath()) {
     } catch (err) {
         throw new Error(`loadConfig: malformed TOML in "${configPath}": ${err.message}`);
     }
+
+    for (const key of findUnrecognizedKeys(defaults, overrides)) {
+        getContextLogger().warn('unrecognized config key', { key });
+    }
+
+    getContextLogger().debug('loaded config overrides', { overridden_keys: Object.keys(overrides) });
 
     return deepMerge(defaults, overrides);
 }
@@ -1327,7 +1457,14 @@ git commit -m "feat(uninstall): delete Logs, Application Support, and Config dir
   create-only-if-something-differs, never-touch-an-existing-file, and array-wholesale-replace
   behaviors S009 specifies are each covered by a task and test (Tasks 3–6, 10). Both LaunchAgents
   (daemon + S008's log-rotation agent), all eight numbered install steps, and all five numbered
-  uninstall steps have a dedicated task with a manual verification checklist (Tasks 7–15).
+  uninstall steps have a dedicated task with a manual verification checklist (Tasks 7–15). All three
+  `getContextLogger()` call sites from S009's own "Logging" section — the no-file-found `debug`
+  (Task 3), the found-and-merged `debug` with `overridden_keys` (Task 4), and the per-unrecognized-key
+  `warn` (Task 6, alongside its new `findUnrecognizedKeys` helper) — are each covered by a task and a
+  dedicated logging test, following the `getLogger`/`runWithLogger`/`vi.waitFor`/temp-log-dir pattern
+  `S002`/`S003`/`S004`'s plans already established. `scripts/install.sh`/`scripts/uninstall.sh` get no
+  logging additions in this pass — they're bash, never import `src/logger.js`, per S009's "Logging"
+  section — so Part B (Tasks 7–15) is untouched by this round of edits.
 - **Config value cross-check performed up front**: the table near the top of this plan verifies every
   `config.toml` key against the hardcoded stand-in constant the corresponding S002/S003/S004/S005/S008
   plan already introduced. All twelve tunables match in value; four differ only in *unit*
@@ -1386,6 +1523,15 @@ git commit -m "feat(uninstall): delete Logs, Application Support, and Config dir
      plist-rendering task (Task 12) has a hard dependency on the template files existing (Tasks 7–8),
      matching every other plan's precedent of building dependencies before their consumers (e.g.
      `S001`'s FK-dependency table-creation order).
+  6. **`overridden_keys` logs top-level TOML keys only, not fully-qualified dotted leaf paths.**
+     S009's "Logging" section says "just the key names actually present in `config.toml`," which this
+     plan reads as the keys/table names one level deep in the parsed object (`['search']` for a
+     `[search]`-only override), not a recursive flatten down to every overridden leaf. The
+     `warn`-level unrecognized-key line (Task 6) goes the other way and *does* use a dotted path
+     (`search.limt_default`) — deliberately, since S009's own example (`limt_default`) is a key nested
+     under `[search]`, and a bare `key=search` on an unrecognized-key warning would point at the wrong
+     level (the section itself is a real, recognized key; it's the key inside it that's the typo).
+     Flagged here as a judgment call, not a literal spec requirement either way.
 - **Placeholder scan**: no TODOs/TBDs; every task has complete, runnable code (JS or bash) or a
   complete XML plist. Task 3's "reading an existing config.toml file is not yet implemented" stub is
   explicitly closed out by Task 4, mirroring the same one-branch-per-task pattern `S001`'s Task 9→10
