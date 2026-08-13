@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb } from '../core/db.js';
 import { getLogger, runWithLogger } from '../logger.js';
-import { enqueuePath, dequeueNextPath, processPath, deleteNoteByPath } from './daemon.js';
+import { enqueuePath, dequeueNextPath, processPath, deleteNoteByPath, recordFailure } from './daemon.js';
 
 const tempDirs = [];
 
@@ -277,5 +277,53 @@ describe('deleteNoteByPath', () => {
     it('is a safe no-op for a path with no matching notes row', () => {
         const db = makeTestDb();
         expect(() => deleteNoteByPath(db, 'NoSuchNote.md')).not.toThrow();
+    });
+});
+
+describe('recordFailure', () => {
+    it('schedules the first retry 30s out and increments attempts to 1', () => {
+        const db = makeTestDb();
+        enqueuePath(db, 'Flaky.md', 1000);
+
+        const result = recordFailure(db, 'Flaky.md', 1000);
+
+        expect(result).toEqual({ permanentlyFailed: false, attempts: 1 });
+        const row = db.prepare('SELECT * FROM index_queue WHERE path = ?').get('Flaky.md');
+        expect(row.attempts).toBe(1);
+        expect(row.next_attempt_at).toBe(1000 + 30000);
+    });
+
+    it('follows the full 30s/2m/10m schedule across three consecutive failures', () => {
+        const db = makeTestDb();
+        enqueuePath(db, 'Flaky.md', 0);
+
+        recordFailure(db, 'Flaky.md', 0);
+        const second = recordFailure(db, 'Flaky.md', 0);
+        expect(second.attempts).toBe(2);
+        let row = db.prepare('SELECT next_attempt_at FROM index_queue WHERE path = ?').get('Flaky.md');
+        expect(row.next_attempt_at).toBe(120000);
+
+        const third = recordFailure(db, 'Flaky.md', 0);
+        expect(third.attempts).toBe(3);
+        row = db.prepare('SELECT next_attempt_at FROM index_queue WHERE path = ?').get('Flaky.md');
+        expect(row.next_attempt_at).toBe(600000);
+    });
+
+    it('removes the row and reports permanentlyFailed after the 4th attempt', () => {
+        const db = makeTestDb();
+        enqueuePath(db, 'Flaky.md', 0);
+
+        recordFailure(db, 'Flaky.md', 0);
+        recordFailure(db, 'Flaky.md', 0);
+        recordFailure(db, 'Flaky.md', 0);
+        const fourth = recordFailure(db, 'Flaky.md', 0);
+
+        expect(fourth).toEqual({ permanentlyFailed: true, attempts: 4 });
+        expect(db.prepare('SELECT * FROM index_queue WHERE path = ?').get('Flaky.md')).toBeUndefined();
+    });
+
+    it('is a safe no-op for a path with no matching queue row', () => {
+        const db = makeTestDb();
+        expect(recordFailure(db, 'NotQueued.md', 0)).toEqual({ permanentlyFailed: false, attempts: 0 });
     });
 });

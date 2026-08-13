@@ -64,6 +64,30 @@ function replaceFtsRow(db, noteId, title, body) {
     db.prepare('INSERT INTO notes_fts (rowid, title, body) VALUES (?, ?, ?)').run(noteId, title, body);
 }
 
+export const DEFAULT_BACKOFF_SCHEDULE_MS = [ 30 * 1000, 2 * 60 * 1000, 10 * 60 * 1000 ];
+
+// index_queue.next_attempt_at/enqueued_at are epoch milliseconds throughout (matching
+// enqueuePath/dequeueNextPath above) — unlike notes.mtime/updated_at, which are epoch seconds.
+export function recordFailure(db, path, now = Date.now(), backoffSchedule = DEFAULT_BACKOFF_SCHEDULE_MS) {
+    const row = db.prepare('SELECT attempts FROM index_queue WHERE path = ?').get(path);
+    if (!row) {
+        return { permanentlyFailed: false, attempts: 0 };
+    }
+
+    const attempts = row.attempts + 1;
+    const maxAttempts = backoffSchedule.length + 1;
+
+    if (attempts >= maxAttempts) {
+        db.prepare('DELETE FROM index_queue WHERE path = ?').run(path);
+        return { permanentlyFailed: true, attempts };
+    }
+
+    const nextAttemptAt = now + backoffSchedule[attempts - 1];
+    db.prepare('UPDATE index_queue SET attempts = ?, next_attempt_at = ? WHERE path = ?')
+        .run(attempts, nextAttemptAt, path);
+    return { permanentlyFailed: false, attempts };
+}
+
 export function deleteNoteByPath(db, path) {
     const note = db.prepare('SELECT id FROM notes WHERE path = ?').get(path);
     if (!note) {
