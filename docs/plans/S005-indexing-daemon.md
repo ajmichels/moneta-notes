@@ -104,6 +104,25 @@ mocked" philosophy while keeping the bulk of the suite fast via injected fakes a
   `max-depth: 2`, `max-nested-callbacks: 3`, `max-params: 5` (`eslint.config.js`) — multi-field
   dependencies are always passed as a single `deps`/`options` object, mirroring `S002`/`S003`'s
   pattern.
+- **Logging** (S008, S005 "Logging"): `src/indexer/daemon.js` is the one `runWithLogger` **root** in
+  this codebase — `main()` (Task 19) wraps its own body in `runWithLogger(getLogger('indexer',
+  defaultLogDir()), () => main())` at the very top of the module, before anything else runs, so every
+  `getContextLogger()` call in `daemon.js`/`embed.js` for the life of the process — including
+  `core/db.js`'s own `openDb` schema-check logging (S001, inherited for free, not duplicated here) —
+  lands in one `indexer.log` under that single context. `startDaemon` (what `main()` actually calls,
+  but also called directly and un-wrapped by its own tests) logs `daemon started` as its first
+  statement, before `openDb`. Every other event below — `watermark catch-up complete`, `existence
+  check complete`, `fswatch watcher started`, the queue-drainer's per-path outcomes (`skipping
+  unchanged path` at `debug`, `reindexed note` at `info`, `reindex attempt failed` at `warn`, `reindex
+  permanently failed` at `error`), the embedding pipeline's `embedding pipeline loaded`/`embedding
+  pipeline unloaded`, and the IPC boundary's `reindex requested`/`reindex complete` — is added at its
+  exact call site per task below, using the precise event names/levels/context keys from S005's
+  "Logging" section verbatim (snake_case context keys: `note_title`, `chunk_count`, `attempt`,
+  `next_attempt_at`, `error_message`, etc.), never invented ad hoc. No `logAudit` calls anywhere in
+  this plan (S005 "Logging": daemon-internal reindexing isn't a caller-initiated mutation in the
+  audit-log sense). This pass also removes Task 13's originally-drafted injected `deps.logger`
+  pino-style parameter — written before S008 settled on its final `AsyncLocalStorage`-based design —
+  in favor of `getContextLogger()` everywhere; see Self-Review Notes.
 
 ---
 
@@ -390,11 +409,22 @@ git commit -m "feat(indexer): wire the real Qwen3 tokenizer for offset-mapped to
 - Produces: `createEmbedder(options = {}) -> { embed(text), isLoaded(), unload() }`. `options.
   pipelineFactory(modelId, { dtype }) -> Promise<(text) -> Promise<Float32Array>>` is injected — the
   pipeline is not created until the first `embed()` call, and is reused (not reloaded) across
-  subsequent calls.
+  subsequent calls. Also produces the `getContextLogger().info('embedding pipeline loaded', { dtype
+  })` call site (S005 "Logging") fired the moment `ensureLoaded()` actually invokes
+  `pipelineFactory` (first use, or the first use after an idle-unload — never on a cache hit), and the
+  `getContextLogger().info('embedding pipeline unloaded', { idle_minutes })` call site fired when the
+  idle timer itself fires (Task 5 exercises the timer wiring; the log line lands here since this is
+  where the callback is defined). The explicit `unload()` method below is a distinct, undocumented-by
+  -S005 manual escape hatch (used by this task's own tests to force a reload) — it does not log,
+  since S005's "Logging" only defines an event for the idle-*timeout* unload, not a manual one.
 
 - [ ] **Step 1: Write the failing tests**
 
-Add to `src/indexer/embed.test.js` (new import):
+Extend the top-level imports in `src/indexer/embed.test.js`: add `vi` to the existing `import {
+describe, it, expect } from 'vitest';`, and add two new import statements — `import { mkdtempSync,
+rmSync, readFileSync } from 'node:fs';`, `import { tmpdir } from 'node:os';`, `import { join } from
+'node:path';`, and `import { getLogger, runWithLogger } from '../logger.js';` — needed for this
+task's logging test below.
 
 ```js
 import { createEmbedder } from './embed.js';
@@ -443,19 +473,38 @@ describe('createEmbedder: lazy load', () => {
         await embedder.embed('again');
         expect(factory.calls()).toBe(2);
     });
+
+    it('logs an info line via the context logger when the pipeline first loads', async () => {
+        const logDir = mkdtempSync(join(tmpdir(), 'mnotes-embed-test-log-'));
+        const logger = getLogger('indexer', logDir);
+        const factory = fakePipelineFactory();
+        const embedder = createEmbedder({ pipelineFactory: factory, dtype: 'q8' });
+
+        await runWithLogger(logger, () => embedder.embed('hello'));
+
+        await vi.waitFor(() => {
+            const line = readFileSync(join(logDir, 'indexer.log'), 'utf8').trim();
+            expect(line).toContain('INFO  [indexer] embedding pipeline loaded');
+            expect(line).toContain('dtype="q8"');
+        });
+        rmSync(logDir, { recursive: true, force: true });
+    });
 });
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `pnpm vitest run src/indexer/embed.test.js`
-Expected: FAIL — `createEmbedder` is not exported yet.
+Expected: FAIL — `createEmbedder` is not exported yet; the logging test also fails since
+`indexer.log` is never written.
 
 - [ ] **Step 3: Write minimal implementation**
 
 Update `src/indexer/embed.js` — add:
 
 ```js
+import { getContextLogger } from '../logger.js';
+
 const DEFAULT_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_DTYPE = 'q8';
 
@@ -475,6 +524,7 @@ export function createEmbedder(options = {}) {
     async function ensureLoaded() {
         if (extractor === null) {
             extractor = await pipelineFactory(modelId, { dtype });
+            getContextLogger().info('embedding pipeline loaded', { dtype });
         }
         return extractor;
     }
@@ -486,6 +536,7 @@ export function createEmbedder(options = {}) {
         unloadTimer = scheduleUnload(() => {
             extractor = null;
             unloadTimer = null;
+            getContextLogger().info('embedding pipeline unloaded', { idle_minutes: idleTimeoutMs / (60 * 1000) });
         }, idleTimeoutMs);
     }
 
@@ -824,7 +875,11 @@ git commit -m "feat(indexer): add index_queue enqueue/dequeue helpers"
   'deleted' }>`. This task only implements the mtime-match short-circuit (S005 step 1's first branch):
   if a `notes` row already exists for `path` and its stored `mtime` equals the file's current mtime,
   return `{ status: 'unchanged' }` without reading file content at all. Every other branch throws "not
-  yet implemented" — filled in by Tasks 9 and 11.
+  yet implemented" — filled in by Tasks 9 and 11. Also adds `import { getContextLogger } from
+  '../logger.js';` (first use in `daemon.js`) and this branch's `getContextLogger().debug('skipping
+  unchanged path', { note_title })` call (S005 "Logging") — Task 9 adds the same call to its other
+  unchanged branch (hash-compare), so `note_title` (derived from `path` once, up front) is computed
+  before either branch can return, not duplicated per branch.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -891,14 +946,17 @@ Update `src/indexer/daemon.js` — add imports and `processPath`:
 import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import { noteRead } from '../core/notes.js';
+import { getContextLogger } from '../logger.js';
 
 export async function processPath(vaultRoot, db, path, deps) {
     const absPath = join(vaultRoot, path);
+    const title = path.replace(/\.md$/, '');
     const stats = statSync(absPath);
     const currentMtime = Math.floor(stats.mtimeMs / 1000);
 
     const existing = db.prepare('SELECT id, mtime, content_hash FROM notes WHERE path = ?').get(path);
     if (existing && existing.mtime === currentMtime) {
+        getContextLogger().debug('skipping unchanged path', { note_title: title });
         return { status: 'unchanged' };
     }
 
@@ -933,9 +991,18 @@ git commit -m "feat(indexer): add processPath skip-unchanged mtime short-circuit
   is byte-identical despite a changed mtime, e.g. a `touch`), and, when the hash actually changed,
   S001's idempotent-reindex procedure in full: `notes` upsert, delete+reinsert `chunks`/
   `chunk_vectors`, delete+reinsert the `notes_fts` row, and `syncNoteTags`. Introduces the private
-  helpers `upsertNoteRow`, `replaceChunks`, `replaceFtsRow`.
+  helpers `upsertNoteRow`, `replaceChunks`, `replaceFtsRow`. Also adds the hash-unchanged branch's own
+  `getContextLogger().debug('skipping unchanged path', { note_title })` call (S005 "Logging",
+  mirroring Task 8's mtime-match branch) and the `getContextLogger().info('reindexed note', {
+  note_title, chunk_count })` call fired right before the final `{ status: 'reindexed' }` return —
+  `chunk_count` is `embeddedChunks.length`, only known at that point in the function.
 
 - [ ] **Step 1: Write the failing tests**
+
+Extend the top-level imports in `src/indexer/daemon.test.js`: add `vi` to the existing `import {
+describe, it, expect, afterEach } from 'vitest';`, add `readFileSync` to the existing `node:fs`
+import, and add `import { getLogger, runWithLogger } from '../logger.js';` — needed for this task's
+logging test below.
 
 Add to `src/indexer/daemon.test.js`:
 
@@ -1005,13 +1072,33 @@ describe('processPath: content changed', () => {
         const freshHit = db.prepare("SELECT rowid FROM notes_fts WHERE notes_fts MATCH 'replaced'").get();
         expect(freshHit.rowid).toBe(note.id);
     });
+
+    it('logs an info line via the context logger with the note title and chunk count', async () => {
+        const vaultRoot = makeTempVault();
+        const db = makeTestDb();
+        const logDir = mkdtempSync(join(tmpdir(), 'mnotes-daemon-test-log-'));
+        const logger = getLogger('indexer', logDir);
+        writeNote(vaultRoot, 'Logged.md', 'body text here', 1000);
+
+        const result = await runWithLogger(logger, () => processPath(vaultRoot, db, 'Logged.md', baseDeps()));
+
+        expect(result).toEqual({ status: 'reindexed' });
+        await vi.waitFor(() => {
+            const line = readFileSync(join(logDir, 'indexer.log'), 'utf8').trim();
+            expect(line).toContain('INFO  [indexer] reindexed note');
+            expect(line).toContain('note_title="Logged"');
+            expect(line).toContain('chunk_count=1');
+        });
+        rmSync(logDir, { recursive: true, force: true });
+    });
 });
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `pnpm vitest run src/indexer/daemon.test.js`
-Expected: FAIL — the content-changed branch currently throws "not yet implemented".
+Expected: FAIL — the content-changed branch currently throws "not yet implemented"; the logging test
+also fails since `indexer.log` is never written.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -1069,19 +1156,21 @@ function replaceFtsRow(db, noteId, title, body) {
 export async function processPath(vaultRoot, db, path, deps) {
     const { chunkText, embed, embeddingModel, embeddingVersion, now = Date.now() } = deps;
     const absPath = join(vaultRoot, path);
+    const title = path.replace(/\.md$/, '');
     const stats = statSync(absPath);
     const currentMtime = Math.floor(stats.mtimeMs / 1000);
 
     const existing = db.prepare('SELECT id, mtime, content_hash FROM notes WHERE path = ?').get(path);
     if (existing && existing.mtime === currentMtime) {
+        getContextLogger().debug('skipping unchanged path', { note_title: title });
         return { status: 'unchanged' };
     }
 
-    const title = path.replace(/\.md$/, '');
     const read = noteRead(vaultRoot, title);
 
     if (existing && existing.content_hash === read.content_hash) {
         db.prepare('UPDATE notes SET mtime = ?, updated_at = ? WHERE id = ?').run(currentMtime, Math.floor(now / 1000), existing.id);
+        getContextLogger().debug('skipping unchanged path', { note_title: title });
         return { status: 'unchanged' };
     }
 
@@ -1098,6 +1187,7 @@ export async function processPath(vaultRoot, db, path, deps) {
     replaceFtsRow(db, noteId, title, read.content);
     syncNoteTags(db, noteId, extractTags(read.content, read.metadata));
 
+    getContextLogger().info('reindexed note', { note_title: title, chunk_count: embeddedChunks.length });
     return { status: 'reindexed' };
 }
 ```
@@ -1298,6 +1388,7 @@ export function deleteNoteByPath(db, path) {
 export async function processPath(vaultRoot, db, path, deps) {
     const { chunkText, embed, embeddingModel, embeddingVersion, now = Date.now() } = deps;
     const absPath = join(vaultRoot, path);
+    const title = path.replace(/\.md$/, '');
 
     let stats;
     try {
@@ -1313,10 +1404,10 @@ export async function processPath(vaultRoot, db, path, deps) {
     const currentMtime = Math.floor(stats.mtimeMs / 1000);
     const existing = db.prepare('SELECT id, mtime, content_hash FROM notes WHERE path = ?').get(path);
     if (existing && existing.mtime === currentMtime) {
+        getContextLogger().debug('skipping unchanged path', { note_title: title });
         return { status: 'unchanged' };
     }
 
-    const title = path.replace(/\.md$/, '');
     let read;
     try {
         read = noteRead(vaultRoot, title);
@@ -1330,6 +1421,7 @@ export async function processPath(vaultRoot, db, path, deps) {
 
     if (existing && existing.content_hash === read.content_hash) {
         db.prepare('UPDATE notes SET mtime = ?, updated_at = ? WHERE id = ?').run(currentMtime, Math.floor(now / 1000), existing.id);
+        getContextLogger().debug('skipping unchanged path', { note_title: title });
         return { status: 'unchanged' };
     }
 
@@ -1346,9 +1438,16 @@ export async function processPath(vaultRoot, db, path, deps) {
     replaceFtsRow(db, noteId, title, read.content);
     syncNoteTags(db, noteId, extractTags(read.content, read.metadata));
 
+    getContextLogger().info('reindexed note', { note_title: title, chunk_count: embeddedChunks.length });
     return { status: 'reindexed' };
 }
 ```
+
+Note this task's `{ status: 'deleted' }` branches deliberately don't call `getContextLogger()` at all —
+S005's "Logging" section defines no event for a mid-process deletion (only the live-`fswatch`
+existence-recheck path, S005's own description of the debounce-settle behavior, and Task 14's startup
+`existenceCheck` produce deletions in normal operation; this branch only fires on the rare
+enqueue-then-file-vanished race).
 
 Note the deliberate divergence from S005's prose ("cascading to `chunks`/`chunk_vectors`/`note_tags`
 per S001's `ON DELETE CASCADE`") — S001's own schema section states plainly that `vec0` doesn't
@@ -1475,6 +1574,13 @@ export function recordFailure(db, path, now = Date.now(), backoffSchedule = DEFA
 }
 ```
 
+`recordFailure` itself stays free of logging — it doesn't have the failing `Error` in hand (only its
+callers, in their own `catch` blocks, do), and it's called from two different sites (Task 13's
+`drainQueueOnce`, Task 17's `runReindex`). S005's "Logging" `reindex attempt failed`/`reindex
+permanently failed` events are added once, in Task 13's `recordAndLogFailure` wrapper, and reused
+unchanged by Task 17 — the same "introduce once, reuse across call sites" shape `S003-notes`'s plan
+used for `withComputedId`.
+
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `pnpm vitest run src/indexer/daemon.test.js`
@@ -1496,32 +1602,31 @@ git commit -m "feat(indexer): add recordFailure with 30s/2m/10m backoff and exha
 - Modify: `src/indexer/daemon.test.js`
 
 **Interfaces:**
-- Consumes: `dequeueNextPath`, `processPath`, `recordFailure` from prior tasks; an optional injected
-  `logger` (matching `src/logger.js`'s `pino`-style `.info()`/`.warn()`/`.error()` interface from S008
-  — defaults to a no-op object so earlier-style callers don't need one).
+- Consumes: `dequeueNextPath`, `processPath`, `recordFailure` from prior tasks.
 - Produces: `drainQueueOnce(vaultRoot, db, deps) -> Promise<{ reindexed, skipped, failed }>` — dequeues
   and processes every currently-eligible `index_queue` row exactly once each (rows still in backoff
   are left for a later pass), removing a row on success and deferring to `recordFailure` on a thrown
   error. A path that resolves to `{ status: 'deleted' }` counts toward `skipped` (no re-embedding work
   happened, matching the spirit of S005's "unchanged files are still cheap" framing for the
-  full-vault reindex summary, which only defines three buckets) — see Self-Review Notes.
+  full-vault reindex summary, which only defines three buckets) — see Self-Review Notes. Also produces
+  the private `recordAndLogFailure(db, path, err, now, backoffSchedule)` helper (S005 "Logging"),
+  which wraps `recordFailure` and adds the `getContextLogger().warn('reindex attempt failed', {
+  note_title, attempt, next_attempt_at, error_message })` / `getContextLogger().error('reindex
+  permanently failed', { note_title, attempts, error_message })` call sites — reused unchanged by Task
+  17's `runReindex`. This supersedes an earlier draft of this task that took a `pino`-style injected
+  `logger` in `deps` (written before S008 settled on its final `AsyncLocalStorage`/`getContextLogger()`
+  design); that parameter is dropped here in favor of the context logger, matching every other task in
+  this plan.
 
 - [ ] **Step 1: Write the failing tests**
+
+Extend the top-level imports in `src/indexer/daemon.test.js`: `vi`, `readFileSync`, and `getLogger,
+runWithLogger` were already added in Task 9 — no further additions needed here.
 
 Add to `src/indexer/daemon.test.js` (new import):
 
 ```js
 import { drainQueueOnce } from './daemon.js';
-
-function fakeLogger() {
-    const calls = { info: [], warn: [], error: [] };
-    return {
-        info: (...args) => calls.info.push(args),
-        warn: (...args) => calls.warn.push(args),
-        error: (...args) => calls.error.push(args),
-        calls,
-    };
-}
 ```
 
 ```js
@@ -1540,9 +1645,11 @@ describe('drainQueueOnce', () => {
         expect(db.prepare('SELECT COUNT(*) AS count FROM index_queue').get().count).toBe(0);
     });
 
-    it('leaves a permanently-failed path out of the queue and logs an error', async () => {
+    it('logs a warn per attempt and an error line via the context logger on permanent failure', async () => {
         const vaultRoot = makeTempVault();
         const db = makeTestDb();
+        const logDir = mkdtempSync(join(tmpdir(), 'mnotes-daemon-test-log-'));
+        const logger = getLogger('indexer', logDir);
         writeNote(vaultRoot, 'Broken.md', 'body', 1000);
         enqueuePath(db, 'Broken.md', 0);
         const brokenDeps = {
@@ -1550,18 +1657,32 @@ describe('drainQueueOnce', () => {
             embed: async () => { throw new Error('embedding failed'); },
             now: 0,
         };
-        const logger = fakeLogger();
 
         // Exhaust all 4 attempts across 4 drain passes (each pass processes eligible rows once;
         // backoff means a failed row isn't eligible again until its next_attempt_at, so this test
-        // drives recordFailure directly to reach exhaustion deterministically within one pass).
-        for (let i = 0; i < 4; i += 1) {
-            db.prepare('UPDATE index_queue SET next_attempt_at = 0').run();
-            await drainQueueOnce(vaultRoot, db, { ...brokenDeps, logger });
-        }
+        // forces next_attempt_at back to 0 between passes to reach exhaustion deterministically).
+        await runWithLogger(logger, async () => {
+            for (let i = 0; i < 4; i += 1) {
+                db.prepare('UPDATE index_queue SET next_attempt_at = 0').run();
+                await drainQueueOnce(vaultRoot, db, brokenDeps);
+            }
+        });
 
         expect(db.prepare('SELECT * FROM index_queue WHERE path = ?').get('Broken.md')).toBeUndefined();
-        expect(logger.calls.error.length).toBeGreaterThan(0);
+        await vi.waitFor(() => {
+            const lines = readFileSync(join(logDir, 'indexer.log'), 'utf8').trim().split('\n');
+            const warnLines = lines.filter((line) => line.includes('WARN  [indexer] reindex attempt failed'));
+            const errorLines = lines.filter((line) => line.includes('ERROR [indexer] reindex permanently failed'));
+            expect(warnLines.length).toBe(3);
+            expect(warnLines[0]).toContain('note_title="Broken"');
+            expect(warnLines[0]).toContain('attempt=1');
+            expect(warnLines[0]).toContain('error_message="embedding failed"');
+            expect(errorLines).toHaveLength(1);
+            expect(errorLines[0]).toContain('note_title="Broken"');
+            expect(errorLines[0]).toContain('attempts=4');
+            expect(errorLines[0]).toContain('error_message="embedding failed"');
+        });
+        rmSync(logDir, { recursive: true, force: true });
     });
 
     it('returns zero counts when the queue is empty', async () => {
@@ -1578,17 +1699,39 @@ describe('drainQueueOnce', () => {
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `pnpm vitest run src/indexer/daemon.test.js`
-Expected: FAIL — `drainQueueOnce` is not exported yet.
+Expected: FAIL — `drainQueueOnce` is not exported yet; the logging test also fails since
+`indexer.log` is never written.
 
 - [ ] **Step 3: Write minimal implementation**
 
 Update `src/indexer/daemon.js` — add:
 
 ```js
-const noopLogger = { info() {}, warn() {}, error() {} };
+function recordAndLogFailure(db, path, err, now, backoffSchedule) {
+    const { permanentlyFailed, attempts } = recordFailure(db, path, now, backoffSchedule);
+    const noteTitle = path.replace(/\.md$/, '');
+
+    if (permanentlyFailed) {
+        getContextLogger().error('reindex permanently failed', {
+            note_title: noteTitle,
+            attempts,
+            error_message: err.message,
+        });
+    } else {
+        const row = db.prepare('SELECT next_attempt_at FROM index_queue WHERE path = ?').get(path);
+        getContextLogger().warn('reindex attempt failed', {
+            note_title: noteTitle,
+            attempt: attempts,
+            next_attempt_at: row.next_attempt_at,
+            error_message: err.message,
+        });
+    }
+
+    return { permanentlyFailed, attempts };
+}
 
 export async function drainQueueOnce(vaultRoot, db, deps) {
-    const { now = Date.now(), logger = noopLogger } = deps;
+    const { now = Date.now() } = deps;
     let reindexed = 0;
     let skipped = 0;
     let failed = 0;
@@ -1600,18 +1743,13 @@ export async function drainQueueOnce(vaultRoot, db, deps) {
             db.prepare('DELETE FROM index_queue WHERE path = ?').run(path);
             if (result.status === 'reindexed') {
                 reindexed += 1;
-                logger.info({ path, outcome: 'reindexed' });
             } else {
                 skipped += 1;
-                logger.info({ path, outcome: result.status });
             }
         } catch (err) {
-            const { permanentlyFailed, attempts } = recordFailure(db, path, now, deps.backoffSchedule);
+            const { permanentlyFailed } = recordAndLogFailure(db, path, err, now, deps.backoffSchedule);
             if (permanentlyFailed) {
                 failed += 1;
-                logger.error({ path, attempts, error: err.message, outcome: 'permanent-failure' });
-            } else {
-                logger.warn({ path, attempts, error: err.message, outcome: 'retry-scheduled' });
             }
         }
         path = dequeueNextPath(db, now);
@@ -1620,6 +1758,11 @@ export async function drainQueueOnce(vaultRoot, db, deps) {
     return { reindexed, skipped, failed };
 }
 ```
+
+`processPath` already logs `skipping unchanged path` (`debug`) and `reindexed note` (`info`) itself
+(Tasks 8/9) — `drainQueueOnce` doesn't duplicate either, it only adds the failure-path logging that
+`processPath` can't produce on its own (it throws instead of returning on failure, so the log call
+belongs at the `catch` site, not inside `processPath`).
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -1647,7 +1790,12 @@ git commit -m "feat(indexer): add drainQueueOnce wiring dequeue, processPath, an
   -> number` (enqueues every `.md` file whose mtime is newer than `MAX(notes.updated_at)`, returns the
   count enqueued — `0` watermark on an empty `notes` table naturally indexes the whole vault on first
   run, per S005), and `existenceCheck(db, vaultRoot) -> number` (deletes, via `deleteNoteByPath`, any
-  `notes` row whose file no longer exists on disk; returns the count deleted).
+  `notes` row whose file no longer exists on disk; returns the count deleted). Each also fires its own
+  completion log line right before returning (S005 "Logging"): `getContextLogger().info('watermark
+  catch-up complete', { watermark, enqueued_count })` and `getContextLogger().info('existence check
+  complete', { deleted_count })` respectively — no dedicated test for either in this task (both are
+  low-stakes `info` lines with no failure mode of their own; the "important/error-path" logging tests
+  in this plan live in Tasks 9, 13, and 19).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1763,6 +1911,7 @@ export function watermarkCatchup(db, vaultRoot, now = Date.now()) {
             enqueuedCount += 1;
         }
     }
+    getContextLogger().info('watermark catch-up complete', { watermark, enqueued_count: enqueuedCount });
     return enqueuedCount;
 }
 
@@ -1774,6 +1923,7 @@ export function existenceCheck(db, vaultRoot) {
             deletedCount += 1;
         }
     }
+    getContextLogger().info('existence check complete', { deleted_count: deletedCount });
     return deletedCount;
 }
 ```
@@ -1945,7 +2095,12 @@ git commit -m "feat(indexer): add createDebouncer for unified per-path fswatch d
   `spawnFswatch(vaultRoot, onPath) -> ChildProcess` (spawns the real system `fswatch -r <vaultRoot>`
   binary, streaming each emitted path — one per line — to `onPath`). The one real-binary integration
   test here proves it detects an actual file write; it does not test debounce (Task 15) or the
-  recheck-after-settle logic (Task 19), which are independently covered elsewhere.
+  recheck-after-settle logic (Task 19), which are independently covered elsewhere. `spawnFswatch` also
+  fires `getContextLogger().info('fswatch watcher started')` (S005 "Logging") right after the real
+  `spawn()` call succeeds — this is the one event in this plan that only ever fires on the real
+  binary's startup path, never in a faked-watcher test (Task 19's `startDaemon` test substitutes its
+  own `createWatcher`, which never calls `spawnFswatch` at all), so it's covered by this task's own
+  real-binary test only implicitly (no separate logging assertion added — see Self-Review Notes).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2016,6 +2171,7 @@ export function assertFswatchAvailable(env = process.env) {
 export function spawnFswatch(vaultRoot, onPath) {
     assertFswatchAvailable();
     const child = spawn('fswatch', [ '-r', vaultRoot ]);
+    getContextLogger().info('fswatch watcher started');
     const rl = createInterface({ input: child.stdout });
     rl.on('line', (line) => {
         const path = line.trim();
@@ -2048,16 +2204,27 @@ git commit -m "feat(indexer): add assertFswatchAvailable and spawnFswatch"
 - Modify: `src/indexer/daemon.test.js`
 
 **Interfaces:**
-- Consumes: `enqueuePath`, `processPath`, `recordFailure`, `walkVaultForMarkdown`,
-  `toVaultRelativePath` from prior tasks.
+- Consumes: `enqueuePath`, `processPath`, `walkVaultForMarkdown`, `toVaultRelativePath` from prior
+  tasks, and Task 13's `recordAndLogFailure` (reused unchanged — the same warn/error logging on a
+  failed attempt applies whether the attempt happened via the background queue drainer or an
+  IPC-triggered reindex).
 - Produces: `runReindex(vaultRoot, db, deps, options = {}, onMessage = () => {}) -> Promise<void>`,
   where `options` is `{ noteTitle = null }`. With no `noteTitle`, walks the whole vault and enqueues
   every `.md` path (S005: "not just changed ones"); with a `noteTitle`, scopes to that one path. Each
-  path is driven through `processPath`/`recordFailure` until it reaches a final state (success or
+  path is driven through `processPath`/`recordAndLogFailure` until it reaches a final state (success or
   retries exhausted), calling `onMessage` once per attempt outcome and once more with a final
   `{ summary: { reindexed, skipped, failed } }`. Deliberately socket-free — `onMessage` is a plain
   callback, so this is testable without opening a real connection; Task 18 wires a real socket around
-  it.
+  it. Also produces this task's two S005 "Logging" IPC-boundary call sites: `getContextLogger().info
+  ('reindex requested', { scope, note_title })` at the very top (`scope` is `'note'` when `noteTitle`
+  is given, `'vault'` otherwise; `note_title` is `null` — and so omitted from the formatted line,
+  per `src/logger.js`'s own null-context-value handling — for a vault-scoped request) and
+  `getContextLogger().info('reindex complete', { reindexed, skipped, failed })` right before the final
+  `onMessage({ summary })` call. `runReindex` is where both events naturally live even though the
+  actual socket transport is Task 18's concern — it's the one place that already knows the resolved
+  `scope`/`noteTitle` and computes the final summary, and it's exercised by IPC requests, by nothing
+  else, so `S005-indexing-daemon.md`'s "IPC reindex request received"/"IPC reindex summary sent"
+  framing applies to it directly.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2154,6 +2321,11 @@ export async function runReindex(vaultRoot, db, deps, options = {}, onMessage = 
     const { noteTitle = null } = options;
     const now = deps.now ?? Date.now();
 
+    getContextLogger().info('reindex requested', {
+        scope: noteTitle !== null ? 'note' : 'vault',
+        note_title: noteTitle,
+    });
+
     const paths = noteTitle !== null
         ? [ `${noteTitle}.md` ]
         : walkVaultForMarkdown(vaultRoot).map((absPath) => toVaultRelativePath(vaultRoot, absPath));
@@ -2176,7 +2348,7 @@ export async function runReindex(vaultRoot, db, deps, options = {}, onMessage = 
                 onMessage({ path, outcome });
                 break;
             } catch (err) {
-                const { permanentlyFailed, attempts } = recordFailure(db, path, now, deps.backoffSchedule);
+                const { permanentlyFailed, attempts } = recordAndLogFailure(db, path, err, now, deps.backoffSchedule);
                 onMessage({ path, outcome: 'attempt_failed', attempts, error: err.message });
                 if (permanentlyFailed) {
                     outcome = 'failed';
@@ -2196,6 +2368,7 @@ export async function runReindex(vaultRoot, db, deps, options = {}, onMessage = 
         }
     }
 
+    getContextLogger().info('reindex complete', { reindexed, skipped, failed });
     onMessage({ summary: { reindexed, skipped, failed } });
 }
 ```
@@ -2360,8 +2533,9 @@ git commit -m "feat(indexer): add Unix socket IPC server for the reindex protoco
 - Modify: `src/indexer/daemon.test.js`
 
 **Interfaces:**
-- Consumes: every prior task's exports, plus `openDb` (S001), `getLogger`/`defaultLogDir` (S008),
-  `chunkText`/`loadTokenizer`/`tokenizeWithOffsets`/`embed` (this plan's `embed.js`, Tasks 1–6).
+- Consumes: every prior task's exports, plus `openDb` (S001), `getLogger`/`defaultLogDir`/
+  `runWithLogger` (S008), `chunkText`/`loadTokenizer`/`tokenizeWithOffsets`/`embed` (this plan's
+  `embed.js`, Tasks 1–6).
 - Produces: `startDaemon(options = {}) -> Promise<{ stop() }>`, wiring S005's full startup sequence in
   order: open the DB (schema check/rebuild via `openDb`'s `reindexRequired`), run `watermarkCatchup` +
   `existenceCheck`, start the fswatch watcher (debouncer + recheck-on-settle: file exists → enqueue,
@@ -2370,11 +2544,23 @@ git commit -m "feat(indexer): add Unix socket IPC server for the reindex protoco
   injectable — this task's own test substitutes fast fakes for the watcher and the embed/chunk
   functions (both already covered by dedicated real-binary/real-model tests in Tasks 3, 6, and 16), so
   the test stays fast and deterministic while still exercising real startup-catchup, real queue
-  draining, and a real IPC round-trip end to end.
+  draining, and a real IPC round-trip end to end. `startDaemon` fires `getContextLogger().info('daemon
+  started')` as its very first statement, before `openDb` (S005 "Logging": "before the schema check").
+  `openDb`'s own schema-check/rebuild logging (S001, already shipped) inherits whatever
+  `runWithLogger` context is active when `startDaemon` is called — this task adds no second log line
+  for it. Also produces `main()` — the actual process entry point this whole plan has been building
+  toward — and the module-level `runWithLogger(getLogger('indexer', defaultLogDir()), () => main())`
+  root call, guarded so it only fires when `daemon.js` is executed directly (e.g. by `launchd`, out of
+  scope here per S009), never when it's `import`ed by this test file or by a future CLI (S006). Real
+  `vaultRoot`/`dbPath` resolution from `config.toml` is `S009`'s job, not this plan's (see this plan's
+  existing "Explicitly out of scope" framing) — `main()` here is deliberately minimal, reading them
+  from two placeholder env vars, flagged in Self-Review Notes rather than silently assumed.
 
 - [ ] **Step 1: Write the failing test**
 
-Add to `src/indexer/daemon.test.js` (new import):
+Extend the top-level imports in `src/indexer/daemon.test.js`: `vi`, `readFileSync`, `getLogger`, and
+`runWithLogger` were already added in Task 9 — no further additions needed for the imports those
+provide. Add one new import for this task:
 
 ```js
 import { startDaemon } from './daemon.js';
@@ -2425,13 +2611,42 @@ describe('startDaemon', () => {
 
         await daemon.stop();
     });
+
+    it('logs "daemon started" via the context logger before opening the DB', async () => {
+        const vaultRoot = makeTempVault();
+        const socketDir = makeTempVault();
+        const socketPath = join(socketDir, 'daemon.sock');
+        const logDir = mkdtempSync(join(tmpdir(), 'mnotes-daemon-test-log-'));
+        const logger = getLogger('indexer', logDir);
+
+        const daemon = await runWithLogger(logger, () => startDaemon({
+            vaultRoot,
+            dbPath: ':memory:',
+            socketPath,
+            createWatcher: () => ({ stop() {} }),
+            chunkText: fakeChunkText,
+            embed: fakeEmbed,
+            embeddingModel: 'test-model',
+            embeddingVersion: 'v1',
+            drainIntervalMs: null,
+        }));
+
+        await vi.waitFor(() => {
+            const line = readFileSync(join(logDir, 'indexer.log'), 'utf8').trim();
+            expect(line).toContain('INFO  [indexer] daemon started');
+        });
+
+        await daemon.stop();
+        rmSync(logDir, { recursive: true, force: true });
+    });
 });
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `pnpm vitest run src/indexer/daemon.test.js`
-Expected: FAIL — `startDaemon` is not exported yet.
+Expected: FAIL — `startDaemon` is not exported yet; the logging test also fails since `indexer.log`
+is never written.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -2439,7 +2654,7 @@ Update `src/indexer/daemon.js` — add imports and `startDaemon`:
 
 ```js
 import { openDb } from '../core/db.js';
-import { getLogger, defaultLogDir } from '../logger.js';
+import { getLogger, defaultLogDir, runWithLogger } from '../logger.js';
 import { chunkText as realChunkText, loadTokenizer, tokenizeWithOffsets as realTokenizeWithOffsets, embed as realEmbed } from './embed.js';
 
 const DEFAULT_EMBEDDING_MODEL = 'Qwen3-Embedding-0.6B';
@@ -2451,7 +2666,6 @@ export async function startDaemon(options = {}) {
         vaultRoot,
         dbPath,
         socketPath = defaultSocketPath(),
-        logDir = defaultLogDir(),
         embeddingModel = DEFAULT_EMBEDDING_MODEL,
         embeddingVersion = DEFAULT_EMBEDDING_VERSION,
         embed = realEmbed,
@@ -2459,7 +2673,11 @@ export async function startDaemon(options = {}) {
         drainIntervalMs = DEFAULT_DRAIN_INTERVAL_MS,
     } = options;
 
-    const logger = getLogger('indexer', logDir);
+    getContextLogger().info('daemon started');
+
+    // openDb's own schema-check/rebuild logging ("schema created" / "schema version mismatch,
+    // rebuilding", S001) fires from inside this call and lands in the same runWithLogger context
+    // main() established — no second log line added here (S005 "Logging").
     const { db, reindexRequired } = openDb(dbPath);
 
     let chunkText = options.chunkText;
@@ -2468,22 +2686,24 @@ export async function startDaemon(options = {}) {
         chunkText = (body) => realChunkText(body, (text) => realTokenizeWithOffsets(tokenizer, text));
     }
 
-    const deps = { chunkText, embed, embeddingModel, embeddingVersion, logger };
+    const deps = { chunkText, embed, embeddingModel, embeddingVersion };
 
-    if (reindexRequired) {
-        logger.info({ msg: 'schema rebuilt, running full catch-up' });
-        watermarkCatchup(db, vaultRoot);
-    } else {
-        watermarkCatchup(db, vaultRoot);
+    watermarkCatchup(db, vaultRoot);
+    if (!reindexRequired) {
         existenceCheck(db, vaultRoot);
     }
+    // A schema rebuild (reindexRequired) resets the watermark to 0 as part of that rebuild, so
+    // watermarkCatchup alone already re-enqueues the entire vault — existenceCheck would find
+    // nothing to delete against a freshly-rebuilt, currently-empty notes table, so it's skipped.
 
     const watcher = (createWatcher ?? defaultCreateWatcher)(vaultRoot, db);
 
     let drainTimer = null;
     if (drainIntervalMs !== null) {
         drainTimer = setInterval(() => {
-            drainQueueOnce(vaultRoot, db, deps).catch((err) => logger.error({ error: err.message }));
+            drainQueueOnce(vaultRoot, db, deps).catch(
+                (err) => getContextLogger().error('queue drain failed', { error_message: err.message }),
+            );
         }, drainIntervalMs);
     } else {
         await drainQueueOnce(vaultRoot, db, deps);
@@ -2524,6 +2744,28 @@ function defaultCreateWatcher(vaultRoot, db) {
         },
     };
 }
+
+// The actual process entry point — everything above is built as an importable, independently
+// testable function, but a real `launchd`-managed daemon process needs something that runs on
+// `node src/indexer/daemon.js` with no caller supplying options. Real vaultRoot/dbPath resolution
+// from `config.toml` is S009's job (this plan hardcodes every other default already, per its own
+// "Explicitly out of scope" section) — main() here reads two placeholder env vars instead, flagged
+// in Self-Review Notes as a deliberate placeholder pending S009's config loader.
+export async function main() {
+    return startDaemon({
+        vaultRoot: process.env.MNOTES_VAULT_ROOT,
+        dbPath: process.env.MNOTES_DB_PATH,
+    });
+}
+
+// S005 "Logging": daemon.js is a runWithLogger root — this is the one place in the whole process
+// that establishes the AsyncLocalStorage context, before anything else runs. Every getContextLogger()
+// call anywhere in daemon.js/embed.js, for the lifetime of the process, resolves against this same
+// context. Guarded so `import`ing daemon.js (this test file, and eventually S006's CLI) never
+// triggers a real daemon startup as a side effect of the import itself.
+if (import.meta.url === `file://${process.argv[1]}`) {
+    runWithLogger(getLogger('indexer', defaultLogDir()), () => main());
+}
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -2557,8 +2799,43 @@ git commit -m "feat(indexer): wire startDaemon's full startup sequence"
   tokens/~15% overlap against the model's own tokenizer (Tasks 1–3), the lazy-load/10-minute-idle
   -unload/q8-dtype embedding pipeline lifecycle (Tasks 4–6), and the newline-delimited-JSON Unix socket
   protocol for both the no-title (full vault, streamed per-path, final summary) and title-scoped
-  (blocks through the retry cycle on the same connection) `reindex` requests (Tasks 17–18) each have a
-  dedicated task and passing tests.
+  (blocks through the retry cycle on the same connection) `reindex` requests (Tasks 17–18), and every
+  event S005's "Logging" section defines — `daemon started` (Task 19, `main()`'s `runWithLogger` root),
+  `watermark catch-up complete`/`existence check complete` (Task 14), `fswatch watcher started` (Task
+  16), the queue drainer's `skipping unchanged path`/`reindexed note`/`reindex attempt failed`/`reindex
+  permanently failed` (Tasks 8–9, 13), `embedding pipeline loaded`/`embedding pipeline unloaded` (Task
+  4), and `reindex requested`/`reindex complete` (Task 17) — each have a dedicated task and passing
+  tests.
+- **Logging pass** (S008, S005 "Logging" — added after this plan's initial draft, in the same pass that
+  added a "## Logging" section to every not-yet-implemented spec): every one of S005's twelve named
+  events is wired to its exact call site with the spec's exact event name, level, and snake_case
+  context keys, not invented ad hoc — see the bullet above for the task breakdown. Three of the twelve
+  get a dedicated logging test (Task 9's `reindexed note`, Task 13's `reindex attempt failed`/`reindex
+  permanently failed`, Task 19's `daemon started`) as the "important/error-path" subset; the rest
+  (`watermark catch-up complete`, `existence check complete`, `fswatch watcher started`, `skipping
+  unchanged path`, `embedding pipeline loaded`/`unloaded`, `reindex requested`/`complete`) are lower
+  -stakes `info`/`debug` lines covered by their call site's own existing behavioral test, not a
+  separate logging-specific one — matching the density judgment call `S002-search`'s plan already made
+  for its one `debug` line. This pass also **removed Task 13's originally-drafted injected `deps.logger`
+  parameter** (a `pino`-style `.info()`/`.warn()`/`.error()` object, written before S008 settled on its
+  final `AsyncLocalStorage`/`getContextLogger()`/`runWithLogger` design) and the `logger.info({ msg:
+  'schema rebuilt, running full catch-up' })` line Task 19 originally had in `startDaemon` (a *second*
+  log line for the schema-rebuild event, which S005 "Logging" explicitly says not to add — `openDb`'s
+  own S001 logging already covers it, inherited for free via the shared `runWithLogger` context).
+  `startDaemon`'s `catch` on a failed `drainQueueOnce` interval tick still logs defensively, just via
+  `getContextLogger().error('queue drain failed', ...)` now instead of the removed injected `logger`
+  — this isn't one of S005's twelve named events, it's pre-existing defensive error handling carried
+  forward under the new logging mechanism.
+- **`main()` is new in this pass**: no earlier draft of this plan had an actual process entry point —
+  every task stopped at the importable, test-friendly `startDaemon(options)`. S005 "Logging" requires
+  `daemon.js` to be a `runWithLogger` root "at process start," which presumes something runs when the
+  file is executed directly. Task 19 now adds a minimal `main()` plus the `import.meta.url ===
+  file://${process.argv[1]}` guard so real invocation (`launchd`, eventually) and `import`ing the
+  module (this test file, S006's future CLI) stay clearly separate. `main()`'s `vaultRoot`/`dbPath`
+  resolution is a deliberate placeholder (two env vars) — this plan's own "Explicitly out of scope"
+  section already defers real `config.toml`-driven configuration to `S009-config-and-install`, and this
+  placeholder doesn't change that; it exists only so `runWithLogger(..., () => main())` has something
+  concrete to wrap, per this pass's task, not as a claim that config loading is now in scope here.
 - **Task count exceeds the initial 12–18 estimate** (19 tasks: 6 in `embed.js`, 13 in `daemon.js`) —
   flagged deliberately rather than force-fit into the original range. S005 is explicitly the largest,
   most cross-cutting spec (the only one touching every other table in S001, plus two real external
