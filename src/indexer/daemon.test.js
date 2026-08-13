@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb } from '../core/db.js';
 import { getLogger, runWithLogger } from '../logger.js';
-import { enqueuePath, dequeueNextPath, processPath } from './daemon.js';
+import { enqueuePath, dequeueNextPath, processPath, deleteNoteByPath } from './daemon.js';
 
 const tempDirs = [];
 
@@ -230,5 +230,52 @@ describe('processPath: idempotent reprocessing', () => {
         const note = db.prepare('SELECT id FROM notes WHERE path = ?').get('Repeat.md');
         const chunkCount = db.prepare('SELECT COUNT(*) AS count FROM chunks WHERE note_id = ?').get(note.id).count;
         expect(chunkCount).toBe(1);
+    });
+});
+
+describe('processPath: missing file', () => {
+    it('cleans up an existing notes row and returns deleted when the file is gone', async () => {
+        const vaultRoot = makeTempVault();
+        const db = makeTestDb();
+        writeNote(vaultRoot, 'Gone.md', 'will be deleted', 1000);
+        await processPath(vaultRoot, db, 'Gone.md', baseDeps());
+        rmSync(join(vaultRoot, 'Gone.md'));
+
+        const result = await processPath(vaultRoot, db, 'Gone.md', baseDeps());
+
+        expect(result).toEqual({ status: 'deleted' });
+        expect(db.prepare('SELECT id FROM notes WHERE path = ?').get('Gone.md')).toBeUndefined();
+    });
+
+    it('returns deleted (no-op) for a stale queue entry with no matching notes row at all', async () => {
+        const vaultRoot = makeTempVault();
+        const db = makeTestDb();
+
+        const result = await processPath(vaultRoot, db, 'NeverExisted.md', baseDeps());
+
+        expect(result).toEqual({ status: 'deleted' });
+    });
+});
+
+describe('deleteNoteByPath', () => {
+    it('removes chunks, chunk_vectors, notes_fts, and note_tags for the note', async () => {
+        const vaultRoot = makeTempVault();
+        const db = makeTestDb();
+        writeNote(vaultRoot, 'Full.md', '#project note body', 1000);
+        await processPath(vaultRoot, db, 'Full.md', baseDeps());
+        const note = db.prepare('SELECT id FROM notes WHERE path = ?').get('Full.md');
+
+        deleteNoteByPath(db, 'Full.md');
+
+        expect(db.prepare('SELECT * FROM notes WHERE id = ?').get(note.id)).toBeUndefined();
+        expect(db.prepare('SELECT * FROM chunks WHERE note_id = ?').all(note.id)).toHaveLength(0);
+        expect(db.prepare('SELECT * FROM chunk_vectors').all()).toHaveLength(0);
+        expect(db.prepare("SELECT rowid FROM notes_fts WHERE notes_fts MATCH 'project'").get()).toBeUndefined();
+        expect(db.prepare('SELECT * FROM note_tags WHERE note_id = ?').all(note.id)).toHaveLength(0);
+    });
+
+    it('is a safe no-op for a path with no matching notes row', () => {
+        const db = makeTestDb();
+        expect(() => deleteNoteByPath(db, 'NoSuchNote.md')).not.toThrow();
     });
 });

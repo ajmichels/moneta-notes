@@ -64,20 +64,52 @@ function replaceFtsRow(db, noteId, title, body) {
     db.prepare('INSERT INTO notes_fts (rowid, title, body) VALUES (?, ?, ?)').run(noteId, title, body);
 }
 
+export function deleteNoteByPath(db, path) {
+    const note = db.prepare('SELECT id FROM notes WHERE path = ?').get(path);
+    if (!note) {
+        return;
+    }
+    const chunkIds = db.prepare('SELECT id FROM chunks WHERE note_id = ?').all(note.id).map((r) => r.id);
+    for (const chunkId of chunkIds) {
+        db.prepare('DELETE FROM chunk_vectors WHERE rowid = ?').run(chunkId);
+    }
+    db.prepare('DELETE FROM notes_fts WHERE rowid = ?').run(note.id);
+    db.prepare('DELETE FROM notes WHERE id = ?').run(note.id); // cascades chunks, note_tags (S001 FKs)
+}
+
 export async function processPath(vaultRoot, db, path, deps) {
     const { chunkText, embed, embeddingModel, embeddingVersion, now = Date.now() } = deps;
     const absPath = join(vaultRoot, path);
     const title = path.replace(/\.md$/, '');
-    const stats = statSync(absPath);
-    const currentMtime = Math.floor(stats.mtimeMs / 1000);
 
+    let stats;
+    try {
+        stats = statSync(absPath);
+    } catch (err) {
+        if (err.code === 'ENOENT') {
+            deleteNoteByPath(db, path);
+            return { status: 'deleted' };
+        }
+        throw err;
+    }
+
+    const currentMtime = Math.floor(stats.mtimeMs / 1000);
     const existing = db.prepare('SELECT id, mtime, content_hash FROM notes WHERE path = ?').get(path);
     if (existing && existing.mtime === currentMtime) {
         getContextLogger().debug('skipping unchanged path', { note_title: title });
         return { status: 'unchanged' };
     }
 
-    const read = noteRead(vaultRoot, title);
+    let read;
+    try {
+        read = noteRead(vaultRoot, title);
+    } catch (err) {
+        if (/not found/i.test(err.message)) {
+            deleteNoteByPath(db, path);
+            return { status: 'deleted' };
+        }
+        throw err;
+    }
 
     if (existing && existing.content_hash === read.content_hash) {
         db.prepare('UPDATE notes SET mtime = ?, updated_at = ? WHERE id = ?')
