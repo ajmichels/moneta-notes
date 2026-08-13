@@ -1,8 +1,9 @@
-import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, utimesSync } from 'node:fs';
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync, utimesSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb } from '../core/db.js';
+import { getLogger, runWithLogger } from '../logger.js';
 import { enqueuePath, dequeueNextPath, processPath } from './daemon.js';
 
 const tempDirs = [];
@@ -97,5 +98,91 @@ describe('processPath: skip-unchanged', () => {
         const result = await processPath(vaultRoot, db, 'A.md', baseDeps());
 
         expect(result).toEqual({ status: 'unchanged' });
+    });
+});
+
+describe('processPath: content changed', () => {
+    it('updates mtime only when the hash is unchanged despite a newer mtime (e.g. touch)', async () => {
+        const vaultRoot = makeTempVault();
+        const db = makeTestDb();
+        writeNote(vaultRoot, 'A.md', 'stable body', 1000);
+        const raw = 'stable body';
+        const { hashContent } = await import('../core/notes.js');
+        db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('A.md', hashContent(raw), 1, 500, 500);
+        utimesSync(join(vaultRoot, 'A.md'), 2000, 2000);
+
+        const result = await processPath(vaultRoot, db, 'A.md', baseDeps());
+
+        expect(result).toEqual({ status: 'unchanged' });
+        const row = db.prepare('SELECT mtime FROM notes WHERE path = ?').get('A.md');
+        expect(row.mtime).toBe(2000);
+    });
+
+    it('reindexes a brand-new note: notes row, chunks, chunk_vectors, notes_fts, tags', async () => {
+        const vaultRoot = makeTempVault();
+        const db = makeTestDb();
+        writeNote(vaultRoot, 'New Note.md', '---\ntags:\n  - project\n---\nhello world', 1000);
+
+        const result = await processPath(vaultRoot, db, 'New Note.md', baseDeps());
+
+        expect(result).toEqual({ status: 'reindexed' });
+
+        const note = db.prepare('SELECT * FROM notes WHERE path = ?').get('New Note.md');
+        expect(note.mtime).toBe(1000);
+
+        const chunkRows = db.prepare('SELECT * FROM chunks WHERE note_id = ?').all(note.id);
+        expect(chunkRows).toHaveLength(1);
+
+        const vectorRow = db.prepare('SELECT rowid FROM chunk_vectors WHERE rowid = ?').get(chunkRows[0].id);
+        expect(vectorRow).toBeDefined();
+
+        const ftsHit = db.prepare("SELECT rowid FROM notes_fts WHERE notes_fts MATCH 'hello'").get();
+        expect(ftsHit.rowid).toBe(note.id);
+
+        const tagRow = db.prepare(`
+            SELECT t.name FROM tags t JOIN note_tags nt ON nt.tag_id = t.id WHERE nt.note_id = ?
+        `).get(note.id);
+        expect(tagRow.name).toBe('project');
+    });
+
+    it('replaces stale chunks/fts/tags rather than appending on a content change', async () => {
+        const vaultRoot = makeTempVault();
+        const db = makeTestDb();
+        writeNote(vaultRoot, 'Changing.md', 'original body', 1000);
+        await processPath(vaultRoot, db, 'Changing.md', baseDeps());
+
+        writeNote(vaultRoot, 'Changing.md', 'replaced body entirely', 2000);
+        const result = await processPath(vaultRoot, db, 'Changing.md', baseDeps());
+
+        expect(result).toEqual({ status: 'reindexed' });
+        const note = db.prepare('SELECT id FROM notes WHERE path = ?').get('Changing.md');
+        const chunkRows = db.prepare('SELECT * FROM chunks WHERE note_id = ?').all(note.id);
+        expect(chunkRows).toHaveLength(1);
+
+        const staleHit = db.prepare("SELECT rowid FROM notes_fts WHERE notes_fts MATCH 'original'").get();
+        expect(staleHit).toBeUndefined();
+        const freshHit = db.prepare("SELECT rowid FROM notes_fts WHERE notes_fts MATCH 'replaced'").get();
+        expect(freshHit.rowid).toBe(note.id);
+    });
+
+    it('logs an info line via the context logger with the note title and chunk count', async () => {
+        const vaultRoot = makeTempVault();
+        const db = makeTestDb();
+        const logDir = mkdtempSync(join(tmpdir(), 'mnotes-daemon-test-log-'));
+        const logger = getLogger('indexer', logDir);
+        writeNote(vaultRoot, 'Logged.md', 'body text here', 1000);
+
+        const result = await runWithLogger(logger, () => processPath(vaultRoot, db, 'Logged.md', baseDeps()));
+
+        expect(result).toEqual({ status: 'reindexed' });
+        await vi.waitFor(() => {
+            const line = readFileSync(join(logDir, 'indexer.log'), 'utf8').trim();
+            expect(line).toContain('INFO  [indexer] reindexed note');
+            expect(line).toContain('note_title="Logged"');
+            expect(line).toContain('chunk_count=1');
+        });
+        rmSync(logDir, { recursive: true, force: true });
     });
 });

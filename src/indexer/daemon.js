@@ -1,5 +1,7 @@
 import { statSync } from 'node:fs';
 import { join } from 'node:path';
+import { noteRead } from '../core/notes.js';
+import { extractTags, syncNoteTags } from '../core/tags.js';
 import { getContextLogger } from '../logger.js';
 
 export function enqueuePath(db, path, now = Date.now()) {
@@ -19,7 +21,51 @@ export function dequeueNextPath(db, now = Date.now()) {
     return row ? row.path : null;
 }
 
-export async function processPath(vaultRoot, db, path) {
+function upsertNoteRow(db, path, contentHash, lineCount, mtime, updatedAt) {
+    db.prepare(`
+        INSERT INTO notes (path, content_hash, line_count, mtime, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(path) DO UPDATE SET
+            content_hash = excluded.content_hash,
+            line_count = excluded.line_count,
+            mtime = excluded.mtime,
+            updated_at = excluded.updated_at
+    `).run(path, contentHash, lineCount, mtime, updatedAt);
+    return db.prepare('SELECT id FROM notes WHERE path = ?').get(path).id;
+}
+
+function replaceChunks(db, noteId, embeddedChunks, embeddingModel, embeddingVersion) {
+    const staleChunkIds = db.prepare('SELECT id FROM chunks WHERE note_id = ?').all(noteId).map((r) => r.id);
+    for (const chunkId of staleChunkIds) {
+        db.prepare('DELETE FROM chunk_vectors WHERE rowid = ?').run(chunkId);
+    }
+    db.prepare('DELETE FROM chunks WHERE note_id = ?').run(noteId);
+
+    const insertChunk = db.prepare(`
+        INSERT INTO chunks (note_id, chunk_index, char_start, char_end, token_count, embedding_model, embedding_version)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    const insertVector = db.prepare('INSERT INTO chunk_vectors (rowid, embedding) VALUES (CAST(? AS INTEGER), ?)');
+
+    for (const chunk of embeddedChunks) {
+        insertChunk.run(
+            noteId, chunk.chunkIndex, chunk.charStart, chunk.charEnd, chunk.tokenCount,
+            embeddingModel, embeddingVersion,
+        );
+        const chunkId = db.prepare(
+            'SELECT id FROM chunks WHERE note_id = ? AND chunk_index = ?',
+        ).get(noteId, chunk.chunkIndex).id;
+        insertVector.run(chunkId, Buffer.from(chunk.vector.buffer));
+    }
+}
+
+function replaceFtsRow(db, noteId, title, body) {
+    db.prepare('DELETE FROM notes_fts WHERE rowid = ?').run(noteId);
+    db.prepare('INSERT INTO notes_fts (rowid, title, body) VALUES (?, ?, ?)').run(noteId, title, body);
+}
+
+export async function processPath(vaultRoot, db, path, deps) {
+    const { chunkText, embed, embeddingModel, embeddingVersion, now = Date.now() } = deps;
     const absPath = join(vaultRoot, path);
     const title = path.replace(/\.md$/, '');
     const stats = statSync(absPath);
@@ -31,5 +77,30 @@ export async function processPath(vaultRoot, db, path) {
         return { status: 'unchanged' };
     }
 
-    throw new Error('processPath: content-changed branch not yet implemented');
+    const read = noteRead(vaultRoot, title);
+
+    if (existing && existing.content_hash === read.content_hash) {
+        db.prepare('UPDATE notes SET mtime = ?, updated_at = ? WHERE id = ?')
+            .run(currentMtime, Math.floor(now / 1000), existing.id);
+        getContextLogger().debug('skipping unchanged path', { note_title: title });
+        return { status: 'unchanged' };
+    }
+
+    const chunkDescriptors = chunkText(read.content);
+    const embeddedChunks = [];
+    for (const descriptor of chunkDescriptors) {
+        const chunkBody = read.content.slice(descriptor.charStart, descriptor.charEnd);
+        const vector = await embed(chunkBody);
+        embeddedChunks.push({ ...descriptor, vector });
+    }
+
+    const noteId = upsertNoteRow(
+        db, path, read.content_hash, read.total_lines, currentMtime, Math.floor(now / 1000),
+    );
+    replaceChunks(db, noteId, embeddedChunks, embeddingModel, embeddingVersion);
+    replaceFtsRow(db, noteId, title, read.content);
+    syncNoteTags(db, noteId, extractTags(read.content, read.metadata));
+
+    getContextLogger().info('reindexed note', { note_title: title, chunk_count: embeddedChunks.length });
+    return { status: 'reindexed' };
 }
