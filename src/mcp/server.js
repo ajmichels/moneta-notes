@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { openDb, SCHEMA_VERSION } from '../core/db.js';
+import { SCHEMA_VERSION } from '../core/db.js';
 import { getAuditLogger, getLogger, defaultLogDir } from '../logger.js';
 import { embed } from '../indexer/embed.js';
 import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_VERSION } from '../indexer/daemon.js';
@@ -182,11 +182,10 @@ export async function main() {
     const mcpLogger = getLogger('mcp-server', defaultLogDir());
 
     assertSchemaCurrent(dbPath);
-    const { db } = openDb(dbPath);
     const auditLogger = getAuditLogger(defaultLogDir());
 
     const server = createServer({
-        db,
+        dbPath,
         vaultRoot,
         embed,
         embeddingModel: DEFAULT_EMBEDDING_MODEL,

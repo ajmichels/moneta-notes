@@ -2,10 +2,24 @@ import { search } from '../core/search.js';
 import { grep } from '../core/grep.js';
 import { tagList, tagNotes } from '../core/tags.js';
 import { noteRead, noteWrite, noteEdit, noteAppend, noteRename } from '../core/notes.js';
+import { openDb } from '../core/db.js';
 import { logAudit, runWithLogger } from '../logger.js';
 import {
     formatSearchTable, formatGrepTable, formatTagListTable, formatTagNotesTable, formatJson,
 } from '../format.js';
+
+// Opens a fresh connection per call rather than reusing one held for the life of the process — a
+// long-lived MCP server process was observed to stop seeing writes committed by the indexer daemon
+// after running for a while (root cause unconfirmed, but reproducing per-call sidesteps the whole
+// class of bug and matches the CLI's already-reliable one-connection-per-invocation behavior).
+async function withDb(dbPath, fn) {
+    const { db } = openDb(dbPath);
+    try {
+        return await fn(db);
+    } finally {
+        db.close();
+    }
+}
 
 export async function callTool(auditLogger, mcpLogger, toolName, input, fn) {
     const noteTitle = input.note_title ?? input.old_title ?? null;
@@ -37,11 +51,13 @@ export async function callTool(auditLogger, mcpLogger, toolName, input, fn) {
 }
 
 export async function searchTool(deps, input) {
-    const { db, embed, embeddingModel, embeddingVersion } = deps;
+    const { dbPath, embed, embeddingModel, embeddingVersion } = deps;
     const { query, mode = 'hybrid', limit = 20 } = input;
 
     return callTool(deps.auditLogger, deps.mcpLogger, 'search', input, async () => {
-        const results = await search(db, { query, mode, limit, embed, embeddingModel, embeddingVersion });
+        const results = await withDb(dbPath, (db) => (
+            search(db, { query, mode, limit, embed, embeddingModel, embeddingVersion })
+        ));
         return formatSearchTable(results, mode);
     });
 }
@@ -57,16 +73,16 @@ export async function grepTool(deps, input) {
 }
 
 export async function tagListTool(deps, input) {
-    const { db } = deps;
+    const { dbPath } = deps;
     return callTool(deps.auditLogger, deps.mcpLogger, 'tag_list', input,
-        async () => formatTagListTable(tagList(db)));
+        async () => formatTagListTable(await withDb(dbPath, (db) => tagList(db))));
 }
 
 export async function tagNotesTool(deps, input) {
-    const { db } = deps;
+    const { dbPath } = deps;
     const { tag } = input;
     return callTool(deps.auditLogger, deps.mcpLogger, 'tag_notes', input,
-        async () => formatTagNotesTable(tagNotes(db, tag)));
+        async () => formatTagNotesTable(await withDb(dbPath, (db) => tagNotes(db, tag))));
 }
 
 export async function noteReadTool(deps, input) {
@@ -112,14 +128,17 @@ export async function noteAppendTool(deps, input) {
 }
 
 export async function noteRenameTool(deps, input) {
-    const { vaultRoot, db } = deps;
+    const { vaultRoot, dbPath } = deps;
     const { old_title: oldTitle, new_title: newTitle, hash } = input;
 
     return callTool(deps.auditLogger, deps.mcpLogger, 'note_rename', input, async () => {
-        // Passes deps.db (mirrors cli/main.js's runRename) so the search index is updated in
-        // place immediately — noteRename's write-through db param exists specifically to avoid a
-        // rename briefly disappearing from search while waiting on the daemon's fswatch loop.
-        const result = noteRename(vaultRoot, oldTitle, newTitle, hash, db ?? null);
+        // Passes a freshly-opened db (mirrors cli/main.js's runRename) so the search index is
+        // updated in place immediately — noteRename's write-through db param exists specifically
+        // to avoid a rename briefly disappearing from search while waiting on the daemon's
+        // fswatch loop.
+        const result = dbPath
+            ? await withDb(dbPath, (db) => noteRename(vaultRoot, oldTitle, newTitle, hash, db))
+            : noteRename(vaultRoot, oldTitle, newTitle, hash, null);
         return formatJson(result);
     });
 }

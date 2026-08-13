@@ -94,11 +94,16 @@ function baseDeps() {
     };
 }
 
+function makeTempDbPath() {
+    return join(makeTempDir(), 'index.sqlite');
+}
+
 describe('createServer', () => {
     it('registers all 9 tools, listable over a real (in-memory) MCP connection', async () => {
-        const { db } = openDb(':memory:');
+        const dbPath = makeTempDbPath();
+        openDb(dbPath).db.close();
 
-        const client = await connectedClient({ db, ...baseDeps() });
+        const client = await connectedClient({ dbPath, ...baseDeps() });
         const { tools } = await client.listTools();
 
         expect(tools.map((t) => t.name).sort()).toEqual([
@@ -108,13 +113,15 @@ describe('createServer', () => {
     });
 
     it('round-trips a real search tool call end-to-end through the client', async () => {
-        const { db } = openDb(':memory:');
+        const dbPath = makeTempDbPath();
+        const { db } = openDb(dbPath);
         db.prepare(
             'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
         ).run('A.md', 'h', 3, 1000, 1000);
         db.prepare('INSERT INTO notes_fts (rowid, title, body) VALUES (?, ?, ?)').run(1, 'A', 'hello world');
+        db.close();
 
-        const client = await connectedClient({ db, ...baseDeps() });
+        const client = await connectedClient({ dbPath, ...baseDeps() });
         const result = await client.callTool({
             name: 'search',
             arguments: { query: 'hello', mode: 'fulltext', reason: 'end-to-end test' },
@@ -125,9 +132,10 @@ describe('createServer', () => {
     });
 
     it('rejects a tool call missing the required reason argument', async () => {
-        const { db } = openDb(':memory:');
+        const dbPath = makeTempDbPath();
+        openDb(dbPath).db.close();
 
-        const client = await connectedClient({ db, ...baseDeps() });
+        const client = await connectedClient({ dbPath, ...baseDeps() });
         const result = await client.callTool({ name: 'tag_list', arguments: {} });
 
         expect(result.isError).toBe(true);
@@ -135,9 +143,10 @@ describe('createServer', () => {
     });
 
     it('logs a stdio transport disconnected line via mcpLogger when the connection closes', async () => {
-        const { db } = openDb(':memory:');
+        const dbPath = makeTempDbPath();
+        openDb(dbPath).db.close();
         const logDir = makeTempDir();
-        const deps = { db, ...baseDeps(), mcpLogger: getLogger('mcp-server', logDir) };
+        const deps = { dbPath, ...baseDeps(), mcpLogger: getLogger('mcp-server', logDir) };
 
         const client = await connectedClient(deps);
         await client.close();

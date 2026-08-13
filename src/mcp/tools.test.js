@@ -179,47 +179,74 @@ describe('callTool', () => {
     });
 });
 
+function makeTempDbPath() {
+    return join(makeTempDir('db'), 'index.sqlite');
+}
+
 describe('searchTool', () => {
     it('returns a pipe-delimited table for a fulltext hit', async () => {
-        const { db } = openDb(':memory:');
+        const dbPath = makeTempDbPath();
+        const { db } = openDb(dbPath);
         const noteId = insertNote(db, { path: 'Recipe.md', lineCount: 5 });
         insertFtsRow(db, noteId, 'Recipe', 'a note about knowledge graphs');
+        db.close();
 
         const result = await searchTool(
-            makeDeps({ db, embed: fakeEmbed, embeddingModel: 'm', embeddingVersion: 'v1' }),
+            makeDeps({ dbPath, embed: fakeEmbed, embeddingModel: 'm', embeddingVersion: 'v1' }),
             { query: 'graphs', mode: 'fulltext', limit: 20, reason: 'testing search' },
         );
 
         expect(result.isError).toBeUndefined();
         expect(result.content[0].text).toBe('note_title|file_line_count\nRecipe|5\n');
-        db.close();
     });
 
     it('maps a thrown search() error (malformed FTS5 syntax) to isError: true', async () => {
-        const { db } = openDb(':memory:');
+        const dbPath = makeTempDbPath();
+        openDb(dbPath).db.close();
 
         const result = await searchTool(
-            makeDeps({ db, embed: fakeEmbed, embeddingModel: 'm', embeddingVersion: 'v1' }),
+            makeDeps({ dbPath, embed: fakeEmbed, embeddingModel: 'm', embeddingVersion: 'v1' }),
             { query: '"unterminated', mode: 'fulltext', limit: 20, reason: 'testing search' },
         );
 
         expect(result.isError).toBe(true);
         expect(result.content[0].text).toMatch(/malformed/i);
-        db.close();
     });
 
     it('defaults mode to hybrid and includes rank columns when omitted', async () => {
-        const { db } = openDb(':memory:');
+        const dbPath = makeTempDbPath();
+        const { db } = openDb(dbPath);
         const noteId = insertNote(db, { path: 'Both.md' });
         insertFtsRow(db, noteId, 'Both', 'graph search');
+        db.close();
 
         const result = await searchTool(
-            makeDeps({ db, embed: fakeEmbed, embeddingModel: 'm', embeddingVersion: 'v1' }),
+            makeDeps({ dbPath, embed: fakeEmbed, embeddingModel: 'm', embeddingVersion: 'v1' }),
             { query: 'graph', reason: 'testing default mode' },
         );
 
         expect(result.content[0].text).toContain('fulltext_rank|semantic_rank');
-        db.close();
+    });
+
+    it('sees a note written by a separate connection after the tool\'s deps were created '
+        + '(regression: a stale shared connection previously missed writes from other processes)',
+    async () => {
+        const dbPath = makeTempDbPath();
+        openDb(dbPath).db.close();
+        const deps = makeDeps({ dbPath, embed: fakeEmbed, embeddingModel: 'm', embeddingVersion: 'v1' });
+
+        // Simulates the indexer daemon writing to the same file via its own connection, after
+        // this tool's deps (and dbPath) already existed.
+        const { db: writer } = openDb(dbPath);
+        const noteId = insertNote(writer, { path: 'Late.md', lineCount: 2 });
+        insertFtsRow(writer, noteId, 'Late', 'a note written after deps existed');
+        writer.close();
+
+        const result = await searchTool(deps, {
+            query: 'written', mode: 'fulltext', limit: 20, reason: 'testing freshness',
+        });
+
+        expect(result.content[0].text).toContain('Late|2');
     });
 });
 
@@ -253,29 +280,31 @@ describe('grepTool', () => {
 
 describe('tagListTool', () => {
     it('returns a pipe-delimited table of tag/notes_with_tag', async () => {
-        const { db } = openDb(':memory:');
+        const dbPath = makeTempDbPath();
+        const { db } = openDb(dbPath);
         const noteId = insertNote(db, { path: 'A.md' });
         syncNoteTags(db, noteId, [ 'project' ]);
+        db.close();
 
-        const result = await tagListTool(makeDeps({ db }), { reason: 'testing tag_list' });
+        const result = await tagListTool(makeDeps({ dbPath }), { reason: 'testing tag_list' });
 
         expect(result.content[0].text).toBe('tag|notes_with_tag\nproject|1\n');
-        db.close();
     });
 });
 
 describe('tagNotesTool', () => {
     it('returns a pipe-delimited table of matching notes, parent-includes-child', async () => {
-        const { db } = openDb(':memory:');
+        const dbPath = makeTempDbPath();
+        const { db } = openDb(dbPath);
         const noteId = insertNote(db, { path: 'A.md', lineCount: 3 });
         syncNoteTags(db, noteId, [ 'project/api-migration' ]);
+        db.close();
 
         const result = await tagNotesTool(
-            makeDeps({ db }), { tag: 'project', reason: 'testing tag_notes' },
+            makeDeps({ dbPath }), { tag: 'project', reason: 'testing tag_notes' },
         );
 
         expect(result.content[0].text).toBe('note_title|file_line_count\nA|3\n');
-        db.close();
     });
 });
 
@@ -474,15 +503,17 @@ describe('noteRenameTool', () => {
         expect(result.content[0].text).toMatch(/already exists/i);
     });
 
-    it('updates the search index in place when deps.db is provided (write-through)', async () => {
+    it('updates the search index in place when deps.dbPath is provided (write-through)', async () => {
         const vaultRoot = makeTempVault({});
-        const { db } = openDb(':memory:');
-        const deps = makeDeps({ vaultRoot, db });
+        const dbPath = makeTempDbPath();
+        const { db } = openDb(dbPath);
+        const deps = makeDeps({ vaultRoot, dbPath });
         const created = await noteWriteTool(
             deps,
             { note_title: 'Indexed', hash: null, content: 'body', reason: 'setup' },
         );
         insertNote(db, { path: 'Indexed.md' });
+        db.close();
         const { hash } = JSON.parse(created.content[0].text);
 
         const result = await noteRenameTool(
@@ -491,8 +522,9 @@ describe('noteRenameTool', () => {
         );
 
         expect(result.isError).toBeUndefined();
-        const row = db.prepare('SELECT path FROM notes WHERE path = ?').get('Renamed.md');
+        const { db: verify } = openDb(dbPath);
+        const row = verify.prepare('SELECT path FROM notes WHERE path = ?').get('Renamed.md');
         expect(row.path).toBe('Renamed.md');
-        db.close();
+        verify.close();
     });
 });
