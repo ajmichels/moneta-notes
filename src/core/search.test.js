@@ -246,3 +246,81 @@ describe('search: hybrid mode', () => {
         db.close();
     });
 });
+
+describe('search: tie-breaking by mtime', () => {
+    it('breaks an exact BM25 tie by mtime descending (fulltext mode)', async () => {
+        const { db } = openDb(':memory:');
+        const olderId = insertNote(db, { path: 'Older.md', mtime: 1000 });
+        const newerId = insertNote(db, { path: 'Newer.md', mtime: 2000 });
+        insertFtsRow(db, olderId, 'Older', 'shared term shared term');
+        insertFtsRow(db, newerId, 'Newer', 'shared term shared term');
+
+        const results = await search(db, { query: 'shared term', mode: 'fulltext', limit: 20 });
+
+        expect(results.map((r) => r.note_title)).toEqual([ 'Newer', 'Older' ]);
+        db.close();
+    });
+
+    it('breaks an exact cosine-distance tie by mtime descending (semantic mode)', async () => {
+        const { db } = openDb(':memory:');
+        const olderId = insertNote(db, { path: 'Older.md', mtime: 1000 });
+        const newerId = insertNote(db, { path: 'Newer.md', mtime: 2000 });
+        insertChunkWithVector(db, olderId, { seed: 0.5 });
+        insertChunkWithVector(db, newerId, { seed: 0.5 });
+
+        const results = await search(db, {
+            query: 'anything',
+            mode: 'semantic',
+            limit: 20,
+            embed: fakeEmbed(0.5),
+            embeddingModel: 'test-model',
+            embeddingVersion: 'v1',
+        });
+
+        expect(results.map((r) => r.note_title)).toEqual([ 'Newer', 'Older' ]);
+        db.close();
+    });
+
+    it('breaks an exact RRF score tie by mtime descending (hybrid mode)', async () => {
+        const { db } = openDb(':memory:');
+        const olderId = insertNote(db, { path: 'Older.md', mtime: 1000 });
+        const newerId = insertNote(db, { path: 'Newer.md', mtime: 2000 });
+        insertFtsRow(db, olderId, 'Older', 'shared term');
+        insertFtsRow(db, newerId, 'Newer', 'shared term');
+
+        const results = await search(db, {
+            query: 'shared term',
+            mode: 'hybrid',
+            limit: 20,
+            embed: fakeEmbed(0.1),
+            embeddingModel: 'test-model',
+            embeddingVersion: 'v1',
+        });
+
+        expect(results.map((r) => r.note_title)).toEqual([ 'Newer', 'Older' ]);
+        db.close();
+    });
+});
+
+describe('search: limit validation', () => {
+    it.each([
+        [ 0 ],
+        [ -1 ],
+        [ 101 ],
+        [ 1.5 ],
+    ])('rejects an out-of-range or non-integer limit (%j)', async (limit) => {
+        const { db } = openDb(':memory:');
+        await expect(search(db, { query: 'x', mode: 'fulltext', limit })).rejects.toThrow(/limit/);
+        db.close();
+    });
+
+    it('accepts the boundary values 1 and 100', async () => {
+        const { db } = openDb(':memory:');
+        const noteId = insertNote(db, { path: 'A.md' });
+        insertFtsRow(db, noteId, 'A', 'term');
+
+        await expect(search(db, { query: 'term', mode: 'fulltext', limit: 1 })).resolves.not.toThrow();
+        await expect(search(db, { query: 'term', mode: 'fulltext', limit: 100 })).resolves.not.toThrow();
+        db.close();
+    });
+});

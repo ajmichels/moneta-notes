@@ -18,6 +18,14 @@ function validateQuery(query) {
     }
 }
 
+const MAX_LIMIT = 100;
+
+function validateLimit(limit) {
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LIMIT) {
+        throw new Error(`search: limit must be an integer between 1 and ${MAX_LIMIT}, got ${limit}`);
+    }
+}
+
 function fulltextSearch(db, query, limit) {
     const rows = db.prepare(`
         SELECT n.id AS note_id, n.path, n.line_count AS file_line_count, n.mtime,
@@ -28,6 +36,8 @@ function fulltextSearch(db, query, limit) {
         ORDER BY bm25(notes_fts)
         LIMIT ?
     `).all(query, computeOverfetch(limit));
+
+    rows.sort((a, b) => a.score - b.score || b.mtime - a.mtime);
 
     return rows.map((row, index) => ({
         noteId: row.note_id,
@@ -116,7 +126,7 @@ async function semanticSearch(db, query, limit, { embed, embeddingModel, embeddi
     const bestDistanceByNote = collapseToBestChunkPerNote(rawRows);
     const notesById = hydrateNotes(db, [ ...bestDistanceByNote.keys() ]);
 
-    return [ ...bestDistanceByNote.entries() ].map(([ noteId, distance ], index) => {
+    const collapsed = [ ...bestDistanceByNote.entries() ].map(([ noteId, distance ]) => {
         const note = notesById.get(noteId);
         return {
             noteId,
@@ -124,9 +134,12 @@ async function semanticSearch(db, query, limit, { embed, embeddingModel, embeddi
             fileLineCount: note.file_line_count,
             mtime: note.mtime,
             distance,
-            rank: index + 1,
         };
     });
+
+    collapsed.sort((a, b) => a.distance - b.distance || b.mtime - a.mtime);
+
+    return collapsed.map((row, index) => ({ ...row, rank: index + 1 }));
 }
 
 function toSemanticOutput(results, limit) {
@@ -173,7 +186,7 @@ function mergeHybrid(fulltextResults, semanticResults, limit) {
         };
     });
 
-    merged.sort((a, b) => b.score - a.score);
+    merged.sort((a, b) => b.score - a.score || b.mtime - a.mtime);
     return merged.slice(0, limit);
 }
 
@@ -189,6 +202,7 @@ function toHybridOutput(results) {
 export async function search(db, options = {}) {
     const { query, mode = 'hybrid', limit = DEFAULT_LIMIT } = options;
     validateQuery(query);
+    validateLimit(limit);
 
     if (mode === 'fulltext') {
         return toFulltextOutput(fulltextSearch(db, query, limit), limit);
