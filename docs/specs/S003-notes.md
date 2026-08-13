@@ -110,11 +110,34 @@ content_hash), `reason<string>`.
   are otherwise untouched. This is the natural consequence of `id` being stored in the file, not a
   special case to work around.
 - Implemented as a filesystem-level move (`old_title`'s file is read, hash-checked, `id` rewritten,
-  written to the new path, old path removed) — `core/notes.js` does not touch the SQLite index
-  directly. The rename shows up to the indexing daemon as an ordinary file delete + create pair (per
-  the README's indexing architecture: "a manual edit in NeoVim, an MCP `note_write`, or a `git`
-  version restore all end up as a file-change event"), and S001's `path UNIQUE` + upsert design
-  handles the resulting delete-old-row/insert-new-row cleanly either way.
+  written to the new path, old path removed), same as before. Additionally, `noteRename` takes an
+  optional `db` argument (a `node:sqlite` handle, same shape `core/search.js`'s `search(db, ...)`
+  already accepts) — when supplied, it write-throughs the rename into the index synchronously in the
+  same call: the existing `notes` row (found by the old path) is `UPDATE`d in place to the new
+  path/content_hash/line_count/mtime, keeping its original `id`, and `notes_fts` is refreshed
+  (delete+insert by that same rowid, matching S005's `replaceFtsRow` convention) with the new title
+  and unchanged body. `chunks`/`chunk_vectors` are never touched — the note's body didn't change, so
+  there's nothing to re-embed. `mtime` is read back from a real `statSync` of the freshly-written
+  file (not `Date.now()`), so it matches what S005's `processPath` will observe on disk and hits its
+  `existing.mtime === currentMtime` short-circuit rather than a wasted hash comparison.
+  If the note wasn't indexed yet (no matching `notes` row for the old path), this is a silent no-op —
+  the daemon's fswatch fallback picks up the new path as an ordinary create. If no `db` is passed at
+  all (or one is passed but the caller never wired one up), the rename behaves exactly as before,
+  filesystem-only, and fully depends on the fswatch fallback below.
+- **Why write-through instead of relying on fswatch alone:** the old design left renamed notes
+  briefly missing from search (~15s debounce + up to 2s drain interval on the delete side) and forced
+  a full re-embed of unchanged content on the create side (see S005's committed rename-handling
+  section). `noteRename` is the one call site that knows the old→new path mapping with certainty, so
+  applying it directly avoids both.
+- **fswatch fallback still exists and is now secondary, not primary:** a rename performed outside
+  this API (Obsidian's own rename, `mv`, a `git` restore, or `note_rename` called without a `db`)
+  still shows up to the indexing daemon as an ordinary file delete + create pair (per the README's
+  indexing architecture: "a manual edit in NeoVim, an MCP `note_write`, or a `git` version restore
+  all end up as a file-change event"). S001's `path UNIQUE` + upsert design handles the resulting
+  delete-old-row/insert-new-row cleanly in that case, same as before this change. See S005's
+  "Rename write-through vs. fswatch fallback" for the full mechanics, including why the fallback
+  path is already a safe no-op when the write-through has already run (old path no longer matches
+  any row; new path's mtime/hash already matches what the write-through recorded).
 - No size-drop guard (body content is unchanged).
 - Returns `{ title, hash, line_count }` — `title` is `new_title`, `hash` is the post-rename hash
   (reflecting the rewritten `id`).

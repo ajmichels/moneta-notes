@@ -1,11 +1,12 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import {
     titleToPath, pathToTitle, hashContent, countLines, noteRead, noteWrite, noteEdit, noteAppend,
     noteRename,
 } from './notes.js';
+import { openDb } from './db.js';
 import { getLogger, runWithLogger } from '../logger.js';
 
 const tempDirs = [];
@@ -545,5 +546,117 @@ describe('noteRename', () => {
     it('throws Note not found when old_title does not exist', () => {
         const vaultRoot = makeTempVault();
         expect(() => noteRename(vaultRoot, 'Ghost', 'Renamed', 'abc123')).toThrow(/not found/i);
+    });
+});
+
+describe('noteRename with db write-through', () => {
+    function insertIndexedNote(db, path, { title = path.replace(/\.md$/, ''), body = 'indexed body' } = {}) {
+        db.prepare(`
+            INSERT INTO notes (path, content_hash, line_count, mtime, updated_at)
+            VALUES (?, 'stale-hash', 1, 1000, 1000)
+        `).run(path);
+        const noteId = db.prepare('SELECT id FROM notes WHERE path = ?').get(path).id;
+        db.prepare('INSERT INTO notes_fts (rowid, title, body) VALUES (?, ?, ?)').run(noteId, title, body);
+        db.prepare(`
+            INSERT INTO chunks (note_id, chunk_index, char_start, char_end, token_count, embedding_model, embedding_version)
+            VALUES (?, 0, 0, 10, 5, 'test-model', 'v1')
+        `).run(noteId);
+        const chunkId = db.prepare('SELECT id FROM chunks WHERE note_id = ?').get(noteId).id;
+        const vector = new Float32Array(1024).fill(0.5);
+        db.prepare('INSERT INTO chunk_vectors (rowid, embedding) VALUES (CAST(? AS INTEGER), ?)')
+            .run(chunkId, Buffer.from(vector.buffer));
+        return noteId;
+    }
+
+    it('updates the existing notes row in place, preserving its id', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Old Name', { content: 'body unchanged' });
+        const { db } = openDb(':memory:');
+        const noteId = insertIndexedNote(db, 'Old Name.md');
+
+        const result = noteRename(vaultRoot, 'Old Name', 'New Name', created.hash, db);
+
+        const row = db.prepare('SELECT id, path, content_hash, line_count FROM notes WHERE id = ?').get(noteId);
+        expect(row.id).toBe(noteId);
+        expect(row.path).toBe('New Name.md');
+        expect(row.content_hash).toBe(result.hash);
+        expect(db.prepare('SELECT path FROM notes WHERE path = ?').get('Old Name.md')).toBeUndefined();
+    });
+
+    // notes_fts is a contentless FTS5 table (content='') — it never returns stored column text on
+    // a plain SELECT, only via MATCH against its inverted index (mirrors how search.js queries it).
+    it('refreshes the notes_fts title/body under the same rowid', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Old Name', { content: 'freshbody' });
+        const { db } = openDb(':memory:');
+        const noteId = insertIndexedNote(db, 'Old Name.md', { title: 'Old Name', body: 'stalebody' });
+
+        noteRename(vaultRoot, 'Old Name', 'New Name', created.hash, db);
+
+        const matchesRowid = (query) => db.prepare(
+            'SELECT rowid FROM notes_fts WHERE notes_fts MATCH ?',
+        ).all(query).some((row) => row.rowid === noteId);
+
+        expect(matchesRowid('New')).toBe(true);
+        expect(matchesRowid('Old')).toBe(false);
+        expect(matchesRowid('freshbody')).toBe(true);
+        expect(matchesRowid('stalebody')).toBe(false);
+    });
+
+    it('leaves chunks/chunk_vectors untouched (no re-embed on rename)', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Old Name', { content: 'body' });
+        const { db } = openDb(':memory:');
+        const noteId = insertIndexedNote(db, 'Old Name.md');
+        const chunkBefore = db.prepare('SELECT id FROM chunks WHERE note_id = ?').get(noteId);
+        const vectorBefore = db.prepare('SELECT embedding FROM chunk_vectors WHERE rowid = ?').get(chunkBefore.id);
+
+        noteRename(vaultRoot, 'Old Name', 'New Name', created.hash, db);
+
+        const chunkAfter = db.prepare('SELECT id FROM chunks WHERE note_id = ?').get(noteId);
+        const vectorAfter = db.prepare('SELECT embedding FROM chunk_vectors WHERE rowid = ?').get(chunkAfter.id);
+        expect(chunkAfter.id).toBe(chunkBefore.id);
+        expect(Buffer.from(vectorAfter.embedding)).toEqual(Buffer.from(vectorBefore.embedding));
+    });
+
+    it('records the renamed file\'s actual on-disk mtime, not just "now"', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Old Name', { content: 'body' });
+        const { db } = openDb(':memory:');
+        const noteId = insertIndexedNote(db, 'Old Name.md');
+
+        noteRename(vaultRoot, 'Old Name', 'New Name', created.hash, db);
+
+        const row = db.prepare('SELECT mtime FROM notes WHERE id = ?').get(noteId);
+        const diskMtime = Math.floor(statSync(titleToPath(vaultRoot, 'New Name')).mtimeMs / 1000);
+        expect(row.mtime).toBe(diskMtime);
+    });
+
+    it('is a no-op on the index when the note was never indexed', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Never Indexed', { content: 'body' });
+        const { db } = openDb(':memory:');
+
+        expect(() => noteRename(vaultRoot, 'Never Indexed', 'Renamed', created.hash, db)).not.toThrow();
+        expect(db.prepare('SELECT * FROM notes').all()).toEqual([]);
+    });
+
+    it('does not touch the db at all when no db is passed', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Old Name', { content: 'body' });
+
+        expect(() => noteRename(vaultRoot, 'Old Name', 'New Name', created.hash)).not.toThrow();
+    });
+
+    it('still throws on hash mismatch before touching the db, leaving the index row untouched', () => {
+        const vaultRoot = makeTempVault();
+        noteWrite(vaultRoot, 'Stale Rename', { content: 'body' });
+        const { db } = openDb(':memory:');
+        const noteId = insertIndexedNote(db, 'Stale Rename.md');
+
+        expect(() => noteRename(vaultRoot, 'Stale Rename', 'Renamed', 'wrong-hash', db)).toThrow(
+            /hash mismatch|changed since/i,
+        );
+        expect(db.prepare('SELECT path FROM notes WHERE id = ?').get(noteId).path).toBe('Stale Rename.md');
     });
 });

@@ -1,6 +1,6 @@
 import { join, relative, dirname } from 'node:path';
 import { createHash } from 'node:crypto';
-import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, statSync } from 'node:fs';
 import matter from 'gray-matter';
 import { getContextLogger } from '../logger.js';
 
@@ -274,7 +274,31 @@ export function noteAppend(vaultRoot, title, hash, content) {
     return { title, hash: hashContent(raw), line_count: countLines(newBody) };
 }
 
-export function noteRename(vaultRoot, oldTitle, newTitle, hash) {
+// Write-through counterpart to the daemon's delete-old-row/insert-new-row reconciliation
+// (S005 processPath): updates the existing `notes` row in place under its original id, so
+// chunks/chunk_vectors carry over untouched (no re-embed) and the note never actually disappears
+// from search mid-rename. A no-op if the note wasn't indexed yet — the daemon's fswatch fallback
+// picks up the new path as an ordinary create in that case.
+function applyRenameToIndex(db, oldRelPath, newRelPath, newPath, note) {
+    const { title, contentHash, lineCount, body, now } = note;
+    const existing = db.prepare('SELECT id FROM notes WHERE path = ?').get(oldRelPath);
+    if (!existing) {
+        return;
+    }
+
+    const mtime = Math.floor(statSync(newPath).mtimeMs / 1000);
+    const updatedAt = Math.floor(now / 1000);
+
+    db.prepare(`
+        UPDATE notes SET path = ?, content_hash = ?, line_count = ?, mtime = ?, updated_at = ?
+        WHERE id = ?
+    `).run(newRelPath, contentHash, lineCount, mtime, updatedAt, existing.id);
+
+    db.prepare('DELETE FROM notes_fts WHERE rowid = ?').run(existing.id);
+    db.prepare('INSERT INTO notes_fts (rowid, title, body) VALUES (?, ?, ?)').run(existing.id, title, body);
+}
+
+export function noteRename(vaultRoot, oldTitle, newTitle, hash, db = null) {
     if (!hash) {
         throw new Error(`note_rename: hash is required for "${oldTitle}"`);
     }
@@ -306,5 +330,14 @@ export function noteRename(vaultRoot, oldTitle, newTitle, hash) {
     writeFileSync(newPath, raw, 'utf8');
     unlinkSync(oldPath);
 
-    return { title: newTitle, hash: hashContent(raw), line_count: countLines(body) };
+    const newHash = hashContent(raw);
+    const lineCount = countLines(body);
+
+    if (db !== null) {
+        applyRenameToIndex(db, `${oldTitle}.md`, `${newTitle}.md`, newPath, {
+            title: newTitle, contentHash: newHash, lineCount, body, now: Date.now(),
+        });
+    }
+
+    return { title: newTitle, hash: newHash, line_count: lineCount };
 }

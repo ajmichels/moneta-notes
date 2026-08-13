@@ -66,6 +66,35 @@ daemon crashes before a pending debounce fires, that specific change is simply p
 startup's watermark catch-up (the file's mtime is still newer than what's recorded in `notes`) — no
 separate recovery logic needed for this case.
 
+### Rename write-through vs. fswatch fallback
+
+`fswatch` here is invoked with no event-type flags, so it never tells the daemon "this was a rename"
+— a rename surfaces as two independent path-change lines (old path, new path), each debouncing on its
+own per the unified per-path design above. Left entirely to that generic handling, a rename costs a
+note ~15–17s of disappearing from search (old path's delete fires before the new path's create has
+even settled) plus a full unnecessary re-embed of content that didn't actually change (per S003, only
+the `id` frontmatter line changes on rename, but that's enough to change `content_hash`, which used to
+look like "real" changed content to this pipeline).
+
+S003's `note_rename` now closes that gap directly: when called with a `db` handle, it applies the
+rename to the `notes`/`notes_fts` rows synchronously, in place, under the note's existing `id` —
+before either `fswatch` event has even had a chance to fire. `fswatch`'s two events still show up
+later, on their own schedule, but by the time they settle, they're chasing a state that's already
+correct:
+
+- **Old path settles** (file doesn't exist) → the daemon's existence recheck deletes-by-path as
+  usual. But `note_rename` already moved that row's `path` column to the new path, so this lookup
+  matches nothing — a harmless no-op, not a deletion of the renamed note.
+- **New path settles** (file exists) → enqueued into `index_queue` as usual. When the drainer's
+  skip-unchanged check runs, it's comparing the file's on-disk mtime/hash against a `notes` row that
+  `note_rename` already updated to match that exact file — so it resolves as "unchanged" (mtime
+  short-circuit, or at worst a hash-match `mtime`-only bump) and never reaches re-chunk/re-embed.
+
+This makes the write-through purely additive: the fswatch-driven path above is unmodified and remains
+the only mechanism for renames that don't go through `note_rename` with a `db` handle (Obsidian's own
+rename, a bare `mv`, a `git` checkout that moves a file). Those still cost the full delete+create cycle
+described above, same as before this change.
+
 ### Queue drainer
 
 Processes `index_queue` rows one at a time (serial, not parallel — simpler, and avoids concurrent

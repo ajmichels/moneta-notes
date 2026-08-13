@@ -1,6 +1,19 @@
 Read `README.md` first for the full architecture and tool specs — this file is about *how* to build
 it, not *what* to build.
 
+## `docs/specs/` vs. `docs/plans/`
+
+- **`docs/specs/S0xx-*.md` are living documentation.** They're the contract for what each subsystem
+  does and *why* — update them in place as behavior changes (don't leave them describing stale
+  behavior, and don't fork a new spec number for a change to something already specified).
+- **`docs/plans/S0xx-*.md` are disposable.** They're step-by-step execution checklists written for
+  agentic implementation of a spec, not a reference anyone should need afterward — any rationale
+  worth keeping belongs in the corresponding spec, not the plan. Checkbox state in these files isn't
+  reliably maintained during implementation, so don't use it to judge completion — verify against the
+  actual repo (does the code exist, does it match the spec, do the tests pass) instead.
+- **Once a plan's spec is implemented and verified, delete the plan file.** Keeping it around past
+  that point only invites drift between plan and reality.
+
 ## Language & Runtime
 
 - **Plain JavaScript. No TypeScript.** No `tsc`, no `.ts`/`.d.ts` files, no build step for the JS
