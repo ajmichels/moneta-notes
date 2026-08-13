@@ -180,3 +180,69 @@ describe('search: semantic mode', () => {
         db.close();
     });
 });
+
+describe('search: hybrid mode', () => {
+    it('defaults to hybrid mode when mode is omitted', async () => {
+        const { db } = openDb(':memory:');
+        const noteId = insertNote(db, { path: 'Both.md' });
+        insertFtsRow(db, noteId, 'Both', 'graph search');
+        insertChunkWithVector(db, noteId, { seed: 0.5 });
+
+        const results = await search(db, {
+            query: 'graph',
+            limit: 20,
+            embed: fakeEmbed(0.5),
+            embeddingModel: 'test-model',
+            embeddingVersion: 'v1',
+        });
+
+        expect(results[0].note_title).toBe('Both');
+        expect(results[0].fulltext_rank).toBe(1);
+        expect(results[0].semantic_rank).toBe(1);
+        db.close();
+    });
+
+    it('includes a note found by only one side, with the other rank null', async () => {
+        const { db } = openDb(':memory:');
+        const fulltextOnlyId = insertNote(db, { path: 'FulltextOnly.md' });
+        insertFtsRow(db, fulltextOnlyId, 'FulltextOnly', 'graph search');
+        // no chunk/vector row for this note — it can never appear on the semantic side
+
+        const results = await search(db, {
+            query: 'graph',
+            mode: 'hybrid',
+            limit: 20,
+            embed: fakeEmbed(0.1),
+            embeddingModel: 'test-model',
+            embeddingVersion: 'v1',
+        });
+
+        expect(results[0].note_title).toBe('FulltextOnly');
+        expect(results[0].fulltext_rank).toBe(1);
+        expect(results[0].semantic_rank).toBeNull();
+        db.close();
+    });
+
+    it('ranks a note appearing on both sides above one appearing on only one side', async () => {
+        const { db } = openDb(':memory:');
+        const bothId = insertNote(db, { path: 'Both.md', mtime: 1000 });
+        const fulltextOnlyId = insertNote(db, { path: 'FulltextOnly.md', mtime: 1000 });
+        insertFtsRow(db, bothId, 'Both', 'graph graph graph');
+        insertFtsRow(db, fulltextOnlyId, 'FulltextOnly', 'graph graph graph graph graph');
+        insertChunkWithVector(db, bothId, { seed: 0.5 });
+
+        const results = await search(db, {
+            query: 'graph',
+            mode: 'hybrid',
+            limit: 20,
+            embed: fakeEmbed(0.5),
+            embeddingModel: 'test-model',
+            embeddingVersion: 'v1',
+        });
+
+        // fulltextOnlyId ranks #1 on the fulltext side alone (more term occurrences), but bothId
+        // contributes RRF terms from *both* sides, which outweighs a single #1 vs. a #2 + a #1.
+        expect(results[0].note_title).toBe('Both');
+        db.close();
+    });
+});

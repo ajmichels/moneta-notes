@@ -136,8 +136,58 @@ function toSemanticOutput(results, limit) {
     }));
 }
 
+const RRF_K = 60;
+
+function computeRrfScore(fulltextRank, semanticRank) {
+    let score = 0;
+    if (fulltextRank !== undefined) {
+        score += 1 / (RRF_K + fulltextRank);
+    }
+    if (semanticRank !== undefined) {
+        score += 1 / (RRF_K + semanticRank);
+    }
+    return score;
+}
+
+function mergeHybrid(fulltextResults, semanticResults, limit) {
+    const fulltextRankById = new Map(fulltextResults.map((r) => [ r.noteId, r.rank ]));
+    const semanticRankById = new Map(semanticResults.map((r) => [ r.noteId, r.rank ]));
+
+    const byId = new Map();
+    for (const r of [ ...fulltextResults, ...semanticResults ]) {
+        if (!byId.has(r.noteId)) {
+            byId.set(r.noteId, r);
+        }
+    }
+
+    const merged = [ ...byId.values() ].map((r) => {
+        const fulltextRank = fulltextRankById.get(r.noteId);
+        const semanticRank = semanticRankById.get(r.noteId);
+        return {
+            noteTitle: r.noteTitle,
+            fileLineCount: r.fileLineCount,
+            mtime: r.mtime,
+            fulltextRank: fulltextRank ?? null,
+            semanticRank: semanticRank ?? null,
+            score: computeRrfScore(fulltextRank, semanticRank),
+        };
+    });
+
+    merged.sort((a, b) => b.score - a.score);
+    return merged.slice(0, limit);
+}
+
+function toHybridOutput(results) {
+    return results.map((r) => ({
+        note_title: r.noteTitle,
+        file_line_count: r.fileLineCount,
+        fulltext_rank: r.fulltextRank,
+        semantic_rank: r.semanticRank,
+    }));
+}
+
 export async function search(db, options = {}) {
-    const { query, mode, limit = DEFAULT_LIMIT } = options;
+    const { query, mode = 'hybrid', limit = DEFAULT_LIMIT } = options;
     validateQuery(query);
 
     if (mode === 'fulltext') {
@@ -146,6 +196,11 @@ export async function search(db, options = {}) {
     if (mode === 'semantic') {
         return toSemanticOutput(await semanticSearch(db, query, limit, options), limit);
     }
+    if (mode === 'hybrid') {
+        const fulltextResults = fulltextSearch(db, query, limit);
+        const semanticResults = await semanticSearch(db, query, limit, options);
+        return toHybridOutput(mergeHybrid(fulltextResults, semanticResults, limit));
+    }
 
-    throw new Error(`search: mode "${mode}" is not yet implemented`);
+    throw new Error(`search: unknown mode "${mode}"`);
 }
