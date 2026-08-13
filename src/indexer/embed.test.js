@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { getLogger, runWithLogger } from '../logger.js';
-import { chunkText, loadTokenizer, tokenizeWithOffsets, createEmbedder } from './embed.js';
+import { chunkText, loadTokenizer, tokenizeWithOffsets, createEmbedder, embed } from './embed.js';
 
 function fakePipelineFactory() {
     let calls = 0;
@@ -200,4 +200,13 @@ describe('createEmbedder: idle unload', () => {
 
         expect(cancelled).toEqual([ 'timer-1' ]);
     });
+});
+
+describe('embed: real pipeline (slow, network on first run)', () => {
+    it('returns a normalized 1024-dim Float32Array for real text', async () => {
+        const vector = await embed('hello world');
+
+        expect(vector).toBeInstanceOf(Float32Array);
+        expect(vector.length).toBe(1024);
+    }, 120000);
 });

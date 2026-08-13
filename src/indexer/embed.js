@@ -1,4 +1,4 @@
-import { AutoTokenizer } from '@huggingface/transformers';
+import { AutoTokenizer, pipeline } from '@huggingface/transformers';
 import { getContextLogger } from '../logger.js';
 
 const DEFAULT_CHUNK_SIZE = 512;
@@ -147,4 +147,25 @@ export function createEmbedder(options = {}) {
     }
 
     return { embed, isLoaded, unload };
+}
+
+async function defaultPipelineFactory(modelId, { dtype }) {
+    const extractor = await pipeline('feature-extraction', modelId, { dtype });
+    return async (text) => {
+        const output = await extractor(text, { pooling: 'mean', normalize: true });
+        return Float32Array.from(output.data);
+    };
+}
+
+let sharedEmbedder = null;
+
+export function getSharedEmbedder() {
+    if (sharedEmbedder === null) {
+        sharedEmbedder = createEmbedder({ pipelineFactory: defaultPipelineFactory });
+    }
+    return sharedEmbedder;
+}
+
+export async function embed(text) {
+    return getSharedEmbedder().embed(text);
 }
