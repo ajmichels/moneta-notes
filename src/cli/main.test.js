@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync as readAudi
 import { Readable } from 'node:stream';
 import {
     dispatch, resolveVaultRoot, resolveDbPath, registerCommand, runSearch, runGrep, runTags, runRead,
-    runWrite, runEdit, runAppend, runRename,
+    runWrite, runEdit, runAppend, runRename, runStats,
 } from './main.js';
 import { openDb } from '../core/db.js';
 import { syncNoteTags } from '../core/tags.js';
@@ -488,6 +488,38 @@ describe('runRename', () => {
             expect(lastLine).toContain('outcome=error');
             expect(lastLine).toMatch(/error_message=".*already exists.*"/i);
         });
+        db.close();
+    });
+});
+
+describe('runStats', () => {
+    it('formats computeStats output plus daemon status', async () => {
+        const dbPath = join(makeTempVault(), 'index.db');
+        const { db } = openDb(dbPath);
+
+        const result = await runStats(
+            [],
+            { db, dbPath, embeddingModel: 'm', embeddingVersion: 'v1', socketPath: join(makeTempVault(), 'nobody.sock') },
+        );
+
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout).toContain('note_count: 0');
+        expect(result.stdout).toContain('daemon_running: false');
+        db.close();
+    });
+});
+
+describe('dispatch: reindex and stats are registered', () => {
+    it('routes "reindex" through runReindexCommand and "stats" through runStats', async () => {
+        const dbPath = join(makeTempVault(), 'index.db');
+        const { db } = openDb(dbPath);
+
+        const statsResult = await dispatch(
+            [ 'stats' ],
+            { db, dbPath, embeddingModel: 'm', embeddingVersion: 'v1', socketPath: join(makeTempVault(), 'nobody.sock') },
+        );
+
+        expect(statsResult.exitCode).toBe(0);
         db.close();
     });
 });

@@ -8,9 +8,15 @@ import { search, explainSearch } from '../core/search.js';
 import { grep } from '../core/grep.js';
 import { tagList, tagNotes } from '../core/tags.js';
 import { noteRead, titleToPath, noteWrite, noteEdit, noteAppend, noteRename } from '../core/notes.js';
-import { logAudit } from '../logger.js';
+import { logAudit, getAuditLogger, defaultLogDir } from '../logger.js';
+import { openDb } from '../core/db.js';
+import { defaultSocketPath } from '../indexer/daemon.js';
+import { embed as realEmbed } from '../indexer/embed.js';
+import { computeStats, checkDaemonRunning } from './stats.js';
+import { runReindexCommand } from './reindex.js';
 import {
-    formatSearchTable, formatExplain, formatGrepTable, formatTagListTable, formatTagNotesTable, formatJson,
+    formatSearchTable, formatExplain, formatGrepTable, formatTagListTable, formatTagNotesTable,
+    formatStats, formatJson,
 } from '../format.js';
 
 export function resolveVaultRoot(env = process.env) {
@@ -334,8 +340,40 @@ export async function runRename(args, deps) {
 
 registerCommand('rename', runRename);
 
+export async function runStats(args, deps) {
+    const { values } = parseArgs({ args, options: { json: { type: 'boolean', default: false } } });
+    const stats = computeStats(deps.db, deps.dbPath, deps.embeddingModel, deps.embeddingVersion);
+    const daemonRunning = await checkDaemonRunning(deps.socketPath);
+    return { stdout: formatStats(stats, { json: values.json, daemonRunning }), stderr: '', exitCode: 0 };
+}
+
+registerCommand('reindex', runReindexCommand);
+registerCommand('stats', runStats);
+
+// Must match indexer/daemon.js's own DEFAULT_EMBEDDING_MODEL/VERSION (S005) — neither is exported
+// from that module, so this is a deliberate, flagged duplication pending S009's config.js, which
+// will supply both from one place.
+const DEFAULT_EMBEDDING_MODEL = 'Qwen3-Embedding-0.6B';
+const DEFAULT_EMBEDDING_VERSION = 'q8-v1';
+
+function buildRealDeps() {
+    const vaultRoot = resolveVaultRoot();
+    const dbPath = resolveDbPath();
+    const { db } = openDb(dbPath);
+    return {
+        vaultRoot,
+        dbPath,
+        db,
+        embed: realEmbed,
+        embeddingModel: DEFAULT_EMBEDDING_MODEL,
+        embeddingVersion: DEFAULT_EMBEDDING_VERSION,
+        auditLogger: getAuditLogger(defaultLogDir()),
+        socketPath: defaultSocketPath(),
+    };
+}
+
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-    main().then((exitCode) => {
+    main(process.argv.slice(2), buildRealDeps()).then((exitCode) => {
         process.exitCode = exitCode;
     });
 }
