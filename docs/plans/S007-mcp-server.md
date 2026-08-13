@@ -99,6 +99,20 @@ a private/undocumented introspection API.
 - **Every MCP tool takes a required `reason<string>` argument**, logged via S008's `logAudit`, never
   used to gate behavior beyond that (CLAUDE.md) — enforced at the protocol boundary by `zod`'s
   `inputSchema` (Task 14) and consumed only by `callTool`'s audit-logging call (Task 12).
+- **Logging** (S008, S007 "Logging"): two independent things, per the spec's own split, both landing in
+  `mcp-server.log`/`audit.log` under `defaultLogDir()`. (1) **Server lifecycle**: `server.js`'s own
+  `getLogger('mcp-server', defaultLogDir())` instance (Task 14) logs `info` `"server started"` on boot
+  and `info` `"stdio transport connected"`/`"stdio transport disconnected"` as the client attaches/
+  detaches; protocol-level errors (malformed JSON-RPC framing, an unsupported request) go to the same
+  logger — this plan routes every one of them through the SDK's single `Protocol#onerror` hook at
+  `error` (the SDK doesn't expose a separate warn-tier hook to split on, so there's no finer-grained
+  `warn` case to wire up here; flagged as a judgment call in Self-Review, not silently assumed). (2)
+  **Per-tool-call wrapping**: that same `mcpLogger` instance, threaded through `deps.mcpLogger`
+  alongside `deps.auditLogger`, wraps every handler's `fn` in `runWithLogger(mcpLogger, fn)` inside
+  `callTool` (Task 12), so any `getContextLogger()` call inside the `core/` function a handler invokes
+  lands in `mcp-server.log`; separately, `callTool` already fires `logAudit` for **every** tool call
+  regardless of outcome (Task 12) — the MCP-vs-CLI asymmetry S006/S008 establish, since the CLI only
+  audits mutations.
 - **Don't add MCP resources** (CLAUDE.md) — this plan registers only tools and the prompt stub, never
   `server.registerResource` or equivalent.
 - **Don't show raw RRF/BM25/cosine scores anywhere in tool output** (CLAUDE.md) — trivially satisfied
@@ -1356,20 +1370,26 @@ git commit -m "feat(mcp): add note_rename tool handler"
 
 ---
 
-### Task 12: Audit logging — extend `callTool`, thread `auditLogger` through every handler
+### Task 12: Audit logging + context-logger wrapping — extend `callTool`, thread `auditLogger`/`mcpLogger` through every handler
 
 **Files:**
 - Modify: `src/mcp/tools.js`
 - Modify: `src/mcp/tools.test.js`
 
 **Interfaces:**
-- Consumes: `logAudit` from `src/logger.js` (S008 — `entry = { tool, noteTitle, source, reason,
-  outcome, errorMessage }`, `source: 'mcp'` always here).
-- Produces: `callTool`'s signature changes to `callTool(auditLogger, toolName, input, fn) ->
-  Promise<{ content, isError? }>` — every successful *and* failed call now writes exactly one audit
-  log entry (S008's "outcome: success/error" — a failed mutation is a normal audit event, not a system
-  error, matching S008's own reasoning). Every one of the 9 handlers from Tasks 5–11 is updated to call
-  this new signature, passing `deps.auditLogger` and the tool's snake_case name.
+- Consumes: `logAudit`, `runWithLogger` from `src/logger.js` (S008 — `entry = { tool, noteTitle,
+  source, reason, outcome, errorMessage }`, `source: 'mcp'` always here; `runWithLogger(logger, fn)`
+  runs `fn` inside an `AsyncLocalStorage` context so any `getContextLogger()` call inside whatever
+  `core/` function `fn` invokes lands in whichever log file `logger` points at).
+- Produces: `callTool`'s signature changes to `callTool(auditLogger, mcpLogger, toolName, input, fn) ->
+  Promise<{ content, isError? }>` — every call now does two things per S007's "Logging" section: (a)
+  runs `fn` through `runWithLogger(mcpLogger, fn)`, so `core/`'s own `getContextLogger()` call sites
+  (S002's malformed-query `warn`, S003's `id`-overwrite `debug`, S004's ripgrep-not-found `warn`, S001's
+  schema-mismatch `warn` in the unlikely event the MCP server's own connection hits it) land in
+  `mcp-server.log`; (b) writes exactly one audit log entry regardless of outcome (S008's "outcome:
+  success/error" — a failed mutation is a normal audit event, not a system error, matching S008's own
+  reasoning). Every one of the 9 handlers from Tasks 5–11 is updated to call this new signature, passing
+  `deps.auditLogger`, `deps.mcpLogger`, and the tool's snake_case name.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1377,7 +1397,7 @@ Add to `src/mcp/tools.test.js` (new imports and a temp-log-dir helper):
 
 ```js
 import { readFileSync } from 'node:fs';
-import { getAuditLogger } from '../logger.js';
+import { getAuditLogger, getLogger, getContextLogger } from '../logger.js';
 
 const logTempDirs = [];
 
@@ -1398,6 +1418,9 @@ function readAuditLines(logDir) {
 }
 ```
 
+(Add `vi` to the existing `vitest` import at the top of the file if not already imported — used below
+for `vi.waitFor`.)
+
 Replace the existing `describe('callTool', ...)` block with:
 
 ```js
@@ -1405,9 +1428,10 @@ describe('callTool', () => {
     it('wraps a successful result and logs a success audit entry', async () => {
         const logDir = makeTempLogDir();
         const auditLogger = getAuditLogger(logDir);
+        const mcpLogger = getLogger('mcp-server', logDir);
 
         const result = await callTool(
-            auditLogger, 'search', { reason: 'testing audit success' },
+            auditLogger, mcpLogger, 'search', { reason: 'testing audit success' },
             async () => 'ok',
         );
 
@@ -1422,9 +1446,10 @@ describe('callTool', () => {
     it('maps a thrown Error to isError: true and logs an error audit entry', async () => {
         const logDir = makeTempLogDir();
         const auditLogger = getAuditLogger(logDir);
+        const mcpLogger = getLogger('mcp-server', logDir);
 
         const result = await callTool(
-            auditLogger, 'note_write', { note_title: 'X', reason: 'testing audit failure' },
+            auditLogger, mcpLogger, 'note_write', { note_title: 'X', reason: 'testing audit failure' },
             async () => { throw new Error('hash mismatch'); },
         );
 
@@ -1434,34 +1459,79 @@ describe('callTool', () => {
         });
         const [ line ] = readAuditLines(logDir);
         expect(line).toMatchObject({
-            tool: 'note_write', note_title: 'X', source: 'mcp', outcome: 'error',
-            error_message: 'hash mismatch',
+            tool: 'note_write', note_title: 'X', source: 'mcp', reason: 'testing audit failure',
+            outcome: 'error', error_message: 'hash mismatch',
         });
     });
 
     it('logs note_title from old_title when present (note_rename), null otherwise', async () => {
         const logDir = makeTempLogDir();
         const auditLogger = getAuditLogger(logDir);
+        const mcpLogger = getLogger('mcp-server', logDir);
 
         await callTool(
-            auditLogger, 'note_rename',
+            auditLogger, mcpLogger, 'note_rename',
             { old_title: 'Old', new_title: 'New', reason: 'testing rename audit' },
             async () => 'ok',
         );
-        await callTool(auditLogger, 'search', { reason: 'testing null note_title' }, async () => 'ok');
+        await callTool(
+            auditLogger, mcpLogger, 'search', { reason: 'testing null note_title' }, async () => 'ok',
+        );
 
         const [ renameLine, searchLine ] = readAuditLines(logDir);
         expect(renameLine.note_title).toBe('Old');
         expect(searchLine.note_title).toBeNull();
     });
+
+    it('runs fn inside a runWithLogger context, so a getContextLogger call in fn reaches mcp-server.log',
+        async () => {
+            const logDir = makeTempLogDir();
+            const auditLogger = getAuditLogger(logDir);
+            const mcpLogger = getLogger('mcp-server', logDir);
+
+            await callTool(auditLogger, mcpLogger, 'search', { reason: 'testing context logger' },
+                async () => {
+                    getContextLogger().info('inside fn', { probe: 'search' });
+                    return 'ok';
+                });
+
+            await vi.waitFor(() => {
+                const line = readFileSync(joinPath(logDir, 'mcp-server.log'), 'utf8').trim();
+                expect(line).toContain('INFO  [mcp-server] inside fn');
+                expect(line).toContain('probe="search"');
+            });
+        });
+
+    it('still reaches getContextLogger via runWithLogger on the error path before logging the audit '
+        + 'entry', async () => {
+        const logDir = makeTempLogDir();
+        const auditLogger = getAuditLogger(logDir);
+        const mcpLogger = getLogger('mcp-server', logDir);
+
+        await callTool(auditLogger, mcpLogger, 'note_write', { note_title: 'X', reason: 'testing' },
+            async () => {
+                getContextLogger().warn('about to fail');
+                throw new Error('hash mismatch');
+            });
+
+        await vi.waitFor(() => {
+            const line = readFileSync(joinPath(logDir, 'mcp-server.log'), 'utf8').trim();
+            expect(line).toContain('WARN  [mcp-server] about to fail');
+        });
+    });
 });
 ```
+
+The last two tests reuse the `joinPath` binding (`join` from `node:path`, aliased in Task 6's grep-test
+setup) already in scope in this file, rather than adding a second, colliding `node:path` import.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `pnpm vitest run src/mcp/tools.test.js`
 Expected: FAIL — `callTool`'s current 1-argument signature ignores the new arguments entirely, so no
-audit log line is ever written and `readAuditLines` throws (`audit.log` doesn't exist).
+audit log line or `mcp-server.log` context line is ever written (`readAuditLines` throws because
+`audit.log` doesn't exist; the `getContextLogger()`-inside-`fn` tests time out waiting on
+`mcp-server.log`).
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -1470,14 +1540,14 @@ Update `src/mcp/tools.js`:
 1. Add the import and replace `callTool`:
 
 ```js
-import { logAudit } from '../logger.js';
+import { logAudit, runWithLogger } from '../logger.js';
 
-export async function callTool(auditLogger, toolName, input, fn) {
+export async function callTool(auditLogger, mcpLogger, toolName, input, fn) {
     const noteTitle = input.note_title ?? input.old_title ?? null;
     let text;
 
     try {
-        text = await fn();
+        text = await runWithLogger(mcpLogger, fn);
     } catch (err) {
         logAudit(auditLogger, {
             tool: toolName,
@@ -1502,16 +1572,23 @@ export async function callTool(auditLogger, toolName, input, fn) {
 }
 ```
 
-2. Update every one of the 9 handlers to pass `(deps.auditLogger, '<tool_name>', input, fn)` instead of
-   `(fn)`. Each change is a one-line edit to the `return callTool(...)` call; the tool name string
-   matches the wire-format tool name exactly (`snake_case`, matching S007's tool table):
+`runWithLogger(mcpLogger, fn)` — not a bare `await fn()` — is what makes S008's "Per-tool-call
+wrapping" real: `fn` is always the closure that calls straight into a `core/` function (`search`,
+`noteWrite`, `grep`, ...), so any `getContextLogger()` call inside that `core/` function now resolves
+to `mcpLogger` for the duration of this one tool call, landing in `mcp-server.log`, instead of the
+no-op logger `getContextLogger()` falls back to outside any `runWithLogger` context.
+
+2. Update every one of the 9 handlers to pass `(deps.auditLogger, deps.mcpLogger, '<tool_name>', input,
+   fn)` instead of `(deps.auditLogger, '<tool_name>', input, fn)`. Each change is a one-line edit to the
+   `return callTool(...)` call; the tool name string matches the wire-format tool name exactly
+   (`snake_case`, matching S007's tool table):
 
 ```js
 export async function searchTool(deps, input) {
     const { db, embed, embeddingModel, embeddingVersion } = deps;
     const { query, mode = 'hybrid', limit = 20 } = input;
 
-    return callTool(deps.auditLogger, 'search', input, async () => {
+    return callTool(deps.auditLogger, deps.mcpLogger, 'search', input, async () => {
         const results = await search(db, { query, mode, limit, embed, embeddingModel, embeddingVersion });
         return formatSearchTable(results, mode);
     });
@@ -1521,7 +1598,7 @@ export async function grepTool(deps, input) {
     const { vaultRoot } = deps;
     const { pattern, regex = false, note_title: noteTitle = null } = input;
 
-    return callTool(deps.auditLogger, 'grep', input, async () => {
+    return callTool(deps.auditLogger, deps.mcpLogger, 'grep', input, async () => {
         const results = grep(vaultRoot, pattern, { regex, noteTitle });
         return formatGrepTable(results);
     });
@@ -1529,20 +1606,22 @@ export async function grepTool(deps, input) {
 
 export async function tagListTool(deps, input) {
     const { db } = deps;
-    return callTool(deps.auditLogger, 'tag_list', input, async () => formatTagListTable(tagList(db)));
+    return callTool(deps.auditLogger, deps.mcpLogger, 'tag_list', input,
+        async () => formatTagListTable(tagList(db)));
 }
 
 export async function tagNotesTool(deps, input) {
     const { db } = deps;
     const { tag } = input;
-    return callTool(deps.auditLogger, 'tag_notes', input, async () => formatTagNotesTable(tagNotes(db, tag)));
+    return callTool(deps.auditLogger, deps.mcpLogger, 'tag_notes', input,
+        async () => formatTagNotesTable(tagNotes(db, tag)));
 }
 
 export async function noteReadTool(deps, input) {
     const { vaultRoot } = deps;
     const { note_title: noteTitle, start_line: startLine, end_line: endLine } = input;
 
-    return callTool(deps.auditLogger, 'note_read', input, async () => {
+    return callTool(deps.auditLogger, deps.mcpLogger, 'note_read', input, async () => {
         const result = noteRead(vaultRoot, noteTitle, { startLine, endLine });
         return formatJson(result);
     });
@@ -1552,7 +1631,7 @@ export async function noteWriteTool(deps, input) {
     const { vaultRoot } = deps;
     const { note_title: noteTitle, hash, metadata = null, content, force = false } = input;
 
-    return callTool(deps.auditLogger, 'note_write', input, async () => {
+    return callTool(deps.auditLogger, deps.mcpLogger, 'note_write', input, async () => {
         const result = noteWrite(vaultRoot, noteTitle, { hash, metadata, content, force });
         return formatJson(result);
     });
@@ -1564,7 +1643,7 @@ export async function noteEditTool(deps, input) {
         note_title: noteTitle, hash, old_txt: oldTxt, new_txt: newTxt, metadata = null,
     } = input;
 
-    return callTool(deps.auditLogger, 'note_edit', input, async () => {
+    return callTool(deps.auditLogger, deps.mcpLogger, 'note_edit', input, async () => {
         const result = noteEdit(vaultRoot, noteTitle, { hash, oldTxt, newTxt, metadata });
         return formatJson(result);
     });
@@ -1574,7 +1653,7 @@ export async function noteAppendTool(deps, input) {
     const { vaultRoot } = deps;
     const { note_title: noteTitle, hash, content } = input;
 
-    return callTool(deps.auditLogger, 'note_append', input, async () => {
+    return callTool(deps.auditLogger, deps.mcpLogger, 'note_append', input, async () => {
         const result = noteAppend(vaultRoot, noteTitle, hash, content);
         return formatJson(result);
     });
@@ -1584,7 +1663,7 @@ export async function noteRenameTool(deps, input) {
     const { vaultRoot } = deps;
     const { old_title: oldTitle, new_title: newTitle, hash } = input;
 
-    return callTool(deps.auditLogger, 'note_rename', input, async () => {
+    return callTool(deps.auditLogger, deps.mcpLogger, 'note_rename', input, async () => {
         const result = noteRename(vaultRoot, oldTitle, newTitle, hash);
         return formatJson(result);
     });
@@ -1592,18 +1671,21 @@ export async function noteRenameTool(deps, input) {
 ```
 
 3. Every test added in Tasks 5–11 that calls a handler directly (not through `callTool`) now needs a
-   real `auditLogger` in its `deps` object and a `reason` in its `input` object, since `logAudit`
-   throws if `source: 'mcp'` and `reason` is falsy (S008). Update each prior test's `deps` literal from
-   e.g. `{ db, embed, embeddingModel, embeddingVersion }` to `{ db, embed, embeddingModel,
-   embeddingVersion, auditLogger: getAuditLogger(makeTempLogDir()) }` (and the `vaultRoot`-only ones
-   similarly) — every prior test already includes a `reason` string in its `input`, so this is a
-   `deps`-object-only edit, not a rewrite.
+   real `auditLogger` **and** a real `mcpLogger` in its `deps` object, plus a `reason` in its `input`
+   object, since `logAudit` throws if `source: 'mcp'` and `reason` is falsy (S008), and `runWithLogger`
+   throws if handed something that isn't a logger-shaped object. Update each prior test's `deps` literal
+   from e.g. `{ db, embed, embeddingModel, embeddingVersion }` to `{ db, embed, embeddingModel,
+   embeddingVersion, auditLogger: getAuditLogger(dir), mcpLogger: getLogger('mcp-server', dir) }`, using
+   the *same* temp log dir for both loggers (and the `vaultRoot`-only ones similarly) — this mirrors
+   `main()`'s real wiring in Task 14, where `auditLogger` and `mcpLogger` are two components
+   (`audit.log`/`mcp-server.log`) sharing one `defaultLogDir()`. Every prior test already includes a
+   `reason` string in its `input`, so this is a `deps`-object-only edit, not a rewrite.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `pnpm vitest run src/mcp/tools.test.js`
-Expected: PASS (full `tools.js` suite green — every handler test from Tasks 5–11 plus the new audit
-tests)
+Expected: PASS (full `tools.js` suite green — every handler test from Tasks 5–11 plus the new audit and
+context-logger tests)
 
 - [ ] **Step 5: Run the full test suite and lint**
 
@@ -1614,7 +1696,7 @@ Expected: all tests pass, no lint errors.
 
 ```bash
 git add src/mcp/tools.js src/mcp/tools.test.js
-git commit -m "feat(mcp): wire S008 audit logging through every tool handler via callTool"
+git commit -m "feat(mcp): wire S008 audit logging + runWithLogger context through every tool handler"
 ```
 
 ---
@@ -1694,12 +1776,15 @@ git commit -m "feat(mcp): add prompts.js stub, no prompts registered (deferred s
 **Interfaces:**
 - Consumes: every handler from `src/mcp/tools.js` (Tasks 5–12); `registerPrompts` from
   `src/mcp/prompts.js` (Task 13); `assertSchemaCurrent` from Task 4; `openDb` (S001), `embed` /
-  `DEFAULT_MODEL_ID` (S005), `getAuditLogger` / `defaultLogDir` (S008).
+  `DEFAULT_MODEL_ID` (S005), `getAuditLogger` / `getLogger` / `defaultLogDir` (S008).
 - Produces: `createServer(deps) -> McpServer` (builds and registers, never connects — fully testable in
-  isolation) and `main() -> Promise<void>` (wires real dependencies, calls `assertSchemaCurrent` before
-  `openDb`, connects `StdioServerTransport`, guarded so importing `server.js` in tests never starts a
-  real process). This task is the one place `zod` schemas for all 9 tools' `inputSchema` live, per the
-  `@modelcontextprotocol/sdk`'s `registerTool` API.
+  isolation; also wires `deps.mcpLogger` onto the underlying SDK `Server`'s `onclose`/`onerror` hooks
+  per S007 "Logging" — `"stdio transport disconnected"` at `info` and protocol-level errors at `error`)
+  and `main() -> Promise<void>` (wires real dependencies, calls `assertSchemaCurrent` before `openDb`,
+  logs `"server started"` at `info` before connecting and `"stdio transport connected"` at `info` once
+  `server.connect` resolves, connects `StdioServerTransport`, guarded so importing `server.js` in tests
+  never starts a real process). This task is the one place `zod` schemas for all 9 tools' `inputSchema`
+  live, per the `@modelcontextprotocol/sdk`'s `registerTool` API.
 
 - [ ] **Step 1: Add the `zod` dependency**
 
@@ -1710,10 +1795,11 @@ Run: `pnpm add zod@^3.25`
 Add to `src/mcp/server.test.js`:
 
 ```js
+import { readFileSync } from 'node:fs';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { openDb } from '../core/db.js';
-import { getAuditLogger } from '../logger.js';
+import { getAuditLogger, getLogger } from '../logger.js';
 import { createServer } from './server.js';
 
 async function connectedClient(deps) {
@@ -1734,12 +1820,14 @@ describe('createServer', () => {
         const { db } = openDb(':memory:');
         const vaultRoot = makeTempDir();
         const auditLogger = getAuditLogger(makeTempDir());
+        const mcpLogger = getLogger('mcp-server', makeTempDir());
         async function fakeEmbed() {
             return new Float32Array(1024).fill(0.1);
         }
 
         const client = await connectedClient({
-            db, vaultRoot, embed: fakeEmbed, embeddingModel: 'm', embeddingVersion: 'v1', auditLogger,
+            db, vaultRoot, embed: fakeEmbed, embeddingModel: 'm', embeddingVersion: 'v1',
+            auditLogger, mcpLogger,
         });
         const { tools } = await client.listTools();
 
@@ -1757,12 +1845,14 @@ describe('createServer', () => {
         db.prepare('INSERT INTO notes_fts (rowid, title, body) VALUES (?, ?, ?)').run(1, 'A', 'hello world');
         const vaultRoot = makeTempDir();
         const auditLogger = getAuditLogger(makeTempDir());
+        const mcpLogger = getLogger('mcp-server', makeTempDir());
         async function fakeEmbed() {
             return new Float32Array(1024).fill(0.1);
         }
 
         const client = await connectedClient({
-            db, vaultRoot, embed: fakeEmbed, embeddingModel: 'm', embeddingVersion: 'v1', auditLogger,
+            db, vaultRoot, embed: fakeEmbed, embeddingModel: 'm', embeddingVersion: 'v1',
+            auditLogger, mcpLogger,
         });
         const result = await client.callTool({
             name: 'search',
@@ -1777,25 +1867,53 @@ describe('createServer', () => {
         const { db } = openDb(':memory:');
         const vaultRoot = makeTempDir();
         const auditLogger = getAuditLogger(makeTempDir());
+        const mcpLogger = getLogger('mcp-server', makeTempDir());
         async function fakeEmbed() {
             return new Float32Array(1024).fill(0.1);
         }
 
         const client = await connectedClient({
-            db, vaultRoot, embed: fakeEmbed, embeddingModel: 'm', embeddingVersion: 'v1', auditLogger,
+            db, vaultRoot, embed: fakeEmbed, embeddingModel: 'm', embeddingVersion: 'v1',
+            auditLogger, mcpLogger,
         });
 
         await expect(
             client.callTool({ name: 'tag_list', arguments: {} }),
         ).rejects.toThrow();
     });
+
+    it('logs a stdio transport disconnected line via mcpLogger when the connection closes', async () => {
+        const { db } = openDb(':memory:');
+        const vaultRoot = makeTempDir();
+        const auditLogger = getAuditLogger(makeTempDir());
+        const logDir = makeTempDir();
+        const mcpLogger = getLogger('mcp-server', logDir);
+        async function fakeEmbed() {
+            return new Float32Array(1024).fill(0.1);
+        }
+
+        const client = await connectedClient({
+            db, vaultRoot, embed: fakeEmbed, embeddingModel: 'm', embeddingVersion: 'v1',
+            auditLogger, mcpLogger,
+        });
+        await client.close();
+
+        await vi.waitFor(() => {
+            const line = readFileSync(join(logDir, 'mcp-server.log'), 'utf8').trim();
+            expect(line).toContain('INFO  [mcp-server] stdio transport disconnected');
+        });
+    });
 });
 ```
+
+(Add `vi` to the existing `vitest` import at the top of `src/mcp/server.test.js` if not already
+imported — `join` is already imported there from Task 4's `makeTempDir` helper.)
 
 - [ ] **Step 3: Run test to verify it fails**
 
 Run: `pnpm vitest run src/mcp/server.test.js`
-Expected: FAIL — `createServer` is not exported yet.
+Expected: FAIL — `createServer` is not exported yet, so every test including the new disconnect-logging
+one fails.
 
 - [ ] **Step 4: Write minimal implementation**
 
@@ -1808,7 +1926,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { openDb } from '../core/db.js';
-import { getAuditLogger, defaultLogDir } from '../logger.js';
+import { getAuditLogger, getLogger, defaultLogDir } from '../logger.js';
 import { embed, DEFAULT_MODEL_ID } from '../indexer/embed.js';
 import { registerPrompts } from './prompts.js';
 import {
@@ -1928,6 +2046,15 @@ export function createServer(deps) {
 
     registerPrompts(server);
 
+    // S007 "Logging": the SDK's underlying `Server` (a `Protocol`) exposes `onclose`/`onerror` as
+    // plain settable fields, invoked whenever *this* connection later closes or hits a protocol-level
+    // error (malformed JSON-RPC framing, an unsupported request) — independent of which transport ends
+    // up calling `.connect()` on this server (always `StdioServerTransport` in `main()`; an
+    // `InMemoryTransport` in this file's own tests). The SDK only exposes one `onerror` hook, not a
+    // separate warn/error-tier pair, so every protocol-level error lands at `error` here.
+    server.server.onclose = () => deps.mcpLogger.info('stdio transport disconnected');
+    server.server.onerror = (err) => deps.mcpLogger.error('protocol error', { message: err.message });
+
     return server;
 }
 
@@ -1936,6 +2063,7 @@ const EMBEDDING_VERSION = '1'; // stand-in pending S009's config.toml embedding_
 export async function main() {
     const dbPath = process.env.MNOTES_DB_PATH;
     const vaultRoot = process.env.MNOTES_VAULT_ROOT;
+    const mcpLogger = getLogger('mcp-server', defaultLogDir());
 
     if (!dbPath || !vaultRoot) {
         throw new Error(
@@ -1955,9 +2083,12 @@ export async function main() {
         embeddingModel: DEFAULT_MODEL_ID,
         embeddingVersion: EMBEDDING_VERSION,
         auditLogger,
+        mcpLogger,
     });
 
+    mcpLogger.info('server started');
     await server.connect(new StdioServerTransport());
+    mcpLogger.info('stdio transport connected');
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
@@ -1974,8 +2105,8 @@ have one from Task 4 (it does — reuse it, no change needed there).
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `pnpm vitest run src/mcp/server.test.js`
-Expected: PASS (full file green — schema-guard tests from Task 4 plus the three new `createServer`
-end-to-end tests)
+Expected: PASS (full file green — schema-guard tests from Task 4 plus the four new `createServer`
+end-to-end tests, including the `onclose`-driven disconnect-logging one)
 
 - [ ] **Step 6: Run the full test suite and lint**
 
@@ -1987,8 +2118,15 @@ Expected: all tests pass across `src/mcp/tools.test.js`, `src/mcp/server.test.js
 
 ```bash
 git add package.json pnpm-lock.yaml src/mcp/server.js src/mcp/server.test.js
-git commit -m "feat(mcp): bootstrap McpServer with all 9 tools, stdio transport, schema guard"
+git commit -m "feat(mcp): bootstrap McpServer with all 9 tools, stdio transport, schema guard, S008 lifecycle logging"
 ```
+
+Note: `"server started"` and the post-connect `"stdio transport connected"` line both live in `main()`,
+which — like the rest of `main()` — is not exercised by an automated test in this plan (it reads real
+env vars, calls the real `openDb`, and connects a real `StdioServerTransport`; nothing here changes that
+existing, already-accepted testing boundary). The `onclose`/`onerror` half wired inside `createServer`
+*is* directly testable, since `createServer` itself is the fully-isolated, transport-agnostic piece —
+that's what the new test above exercises.
 
 ---
 
@@ -2001,9 +2139,34 @@ git commit -m "feat(mcp): bootstrap McpServer with all 9 tools, stdio transport,
   `reason<string>` on every tool (enforced by `zod` at the protocol boundary in Task 14), the two output
   formats (pipe-delimited for list tools, structured JSON for `note_read` + the four mutators), verbatim
   error-message preservation with `isError: true` (Task 1, exercised per-tool in Tasks 5–11), S008 audit
-  logging with `source: 'mcp'` (Task 12), the `mnotes-mcp` stdio bin entry (Task 14, matches
+  logging with `source: 'mcp'` on **every** tool call regardless of outcome plus `runWithLogger`
+  context-wrapping of every handler's `core/` call (Task 12), S008 server-lifecycle logging — `"server
+  started"`/`"stdio transport connected"`/`"stdio transport disconnected"`/protocol-error — on its own
+  `mcp-server` logger instance (Task 14), the `mnotes-mcp` stdio bin entry (Task 14, matches
   `package.json`'s existing `bin` field), the schema-version-mismatch guard that never lets the MCP
   process perform DDL (Task 4), and the prompts stub (Task 13).
+- **S008 logging split, and where each half landed**: S007's "Logging" section splits into two
+  independent pieces, and this plan keeps them in the two places that already own the relevant code
+  rather than inventing a third. Per-tool-call logging (`runWithLogger(mcpLogger, fn)` wrapping every
+  handler's `core/` call, plus `logAudit` on every outcome) lives entirely in `callTool` (Task 12) — one
+  signature change, one set of call-site updates across all 9 handlers, landing in the same commit, so
+  `callTool` never has a half-migrated signature at any point in this plan's history (extending the
+  "Type/signature consistency" note below). Server-lifecycle logging (`"server started"`, the connect/
+  disconnect pair, protocol errors) lives in `server.js` (Task 14): `"server started"` and `"stdio
+  transport connected"` are two straight-line `mcpLogger.info(...)` calls in `main()` bracketing
+  `server.connect(...)`, while `"stdio transport disconnected"` and protocol-error logging are wired as
+  `onclose`/`onerror` callbacks on the SDK's underlying `Server` object inside `createServer` itself —
+  chosen over wiring them in `main()` because `createServer` is the one piece of `server.js` this plan
+  already tests in isolation (via `InMemoryTransport`), so the disconnect path gets a real automated
+  test (Task 14's `client.close()` test) instead of being an unverified assumption. The SDK exposes a
+  single `onerror` hook, not a warn/error-tier pair, so every protocol-level error (malformed JSON-RPC
+  framing, an unsupported request — S007's own examples) is logged at `error` here; splitting those by
+  inspecting `err.message` for keywords was considered and rejected as inventing a fragile taxonomy the
+  SDK itself doesn't provide. `"server started"`/`"stdio transport connected"` are not covered by an
+  automated test — `main()` as a whole has never been unit-tested anywhere in this plan (real env vars,
+  real `openDb`, real stdio), and adding a test for two log lines inside it would mean testing `main()`
+  for the first time for reasons unrelated to its actual untested surface area; flagged here rather than
+  silently skipped.
 - **Important discovered wrinkle, resolved explicitly rather than silently worked around**:
   `core/db.js`'s already-implemented `openDb` (S001) rebuilds the schema unconditionally on a version
   mismatch, with no caller-controlled opt-out — but S007's spec is explicit that "the MCP server never
@@ -2075,8 +2238,10 @@ git commit -m "feat(mcp): bootstrap McpServer with all 9 tools, stdio transport,
   unstated assumption, mirroring how `S002`'s Task 4 and `S001`'s Task 9→10 handle the same kind of
   later-task edit to earlier-task code.
 - **Type/signature consistency**: `callTool` has exactly two signatures across this plan's lifetime —
-  `(fn)` from Task 1 through Task 11, then `(auditLogger, toolName, input, fn)` from Task 12 onward,
-  with the change and every call-site update landing in the same task/commit, never left half-migrated.
+  `(fn)` from Task 1 through Task 11, then `(auditLogger, mcpLogger, toolName, input, fn)` from Task 12
+  onward (both the S008 audit-logging and `runWithLogger` context-wrapping arguments land together, in
+  the same task/commit, rather than `mcpLogger` arriving as a later third signature), with the change
+  and every call-site update landing in the same task/commit, never left half-migrated.
   Every one of the 9 handler functions keeps the identical `(deps, input) -> Promise<{ content,
   isError? }>` shape from the task that introduces it through the end of the plan. `assertSchemaCurrent
   (dbPath) -> void` (Task 4) and `createServer(deps) -> McpServer` (Task 14) are each introduced once
