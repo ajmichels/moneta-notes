@@ -2,6 +2,9 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseArgs } from 'node:util';
+import { search, explainSearch } from '../core/search.js';
+import { formatSearchTable, formatExplain, formatJson } from '../format.js';
 
 export function resolveVaultRoot(env = process.env) {
     if (!env.MNOTES_VAULT_ROOT) {
@@ -49,6 +52,40 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     }
     return result.exitCode;
 }
+
+export async function runSearch(args, deps) {
+    const { values, positionals } = parseArgs({
+        args,
+        allowPositionals: true,
+        options: {
+            mode: { type: 'string', default: 'hybrid' },
+            limit: { type: 'string' },
+            json: { type: 'boolean', default: false },
+            explain: { type: 'boolean', default: false },
+        },
+    });
+    const query = positionals[0];
+    const limit = values.limit !== undefined ? Number(values.limit) : undefined;
+    const searchOptions = {
+        query, mode: values.mode, limit,
+        embed: deps.embed, embeddingModel: deps.embeddingModel, embeddingVersion: deps.embeddingVersion,
+    };
+
+    if (values.explain) {
+        const explained = await explainSearch(deps.db, searchOptions);
+        return {
+            stdout: values.json ? formatJson(explained) : formatExplain(explained),
+            stderr: '',
+            exitCode: 0,
+        };
+    }
+
+    const results = await search(deps.db, searchOptions);
+    const stdout = values.json ? formatJson(results) : formatSearchTable(results, values.mode);
+    return { stdout, stderr: '', exitCode: 0 };
+}
+
+registerCommand('search', runSearch);
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
     main().then((exitCode) => {

@@ -14,3 +14,29 @@ export function formatTable(columns, rows) {
     const lines = rows.map((row) => columns.map((col) => formatCell(row[col])).join('|'));
     return [ header, ...lines ].join('\n');
 }
+
+export function formatSearchTable(results, mode) {
+    const columns = mode === 'hybrid'
+        ? [ 'note_title', 'file_line_count', 'fulltext_rank', 'semantic_rank' ]
+        : [ 'note_title', 'file_line_count' ];
+    return formatTable(columns, results);
+}
+
+function formatExplainRow(r, rank, mode) {
+    if (mode === 'fulltext') {
+        return `${rank} | ${r.note_title} | ${r.file_line_count} | bm25=${r.bm25_score}`;
+    }
+    if (mode === 'semantic') {
+        return `${rank} | ${r.note_title} | ${r.file_line_count} | cosine=${r.cosine_distance} `
+            + `| chunk[${r.winning_chunk.char_start}:${r.winning_chunk.char_end}]`;
+    }
+    return `${rank} | ${r.note_title} | ${r.file_line_count} | fulltext_rank=${r.fulltext_rank ?? '-'} `
+        + `| semantic_rank=${r.semantic_rank ?? '-'} | rrf=${r.rrf_formula}`;
+}
+
+export function formatExplain({ results, pipeline }) {
+    const header = `mode=${pipeline.mode} limit=${pipeline.limit} overfetch=${pipeline.overfetchLimit} `
+        + `fts5_expression=${JSON.stringify(pipeline.fulltextExpression)}`;
+    const lines = results.map((r, index) => formatExplainRow(r, index + 1, pipeline.mode));
+    return `${[ header, ...lines ].join('\n')}\n`;
+}

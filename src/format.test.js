@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { formatJson, formatTable } from './format.js';
+import { formatJson, formatTable, formatSearchTable, formatExplain } from './format.js';
 
 describe('formatJson', () => {
     it('serializes data as compact JSON, no whitespace, no trailing newline', () => {
@@ -29,5 +29,52 @@ describe('formatTable', () => {
 
     it('renders just the header row for an empty result set', () => {
         expect(formatTable([ 'a', 'b' ], [])).toBe('a|b');
+    });
+});
+
+describe('formatSearchTable', () => {
+    it('omits rank columns for a non-hybrid mode', () => {
+        const text = formatSearchTable(
+            [ { note_title: 'A', file_line_count: 5 } ],
+            'fulltext',
+        );
+
+        expect(text).toBe('note_title|file_line_count\nA|5');
+    });
+
+    it('includes fulltext_rank/semantic_rank columns for hybrid mode, even with a null rank', () => {
+        const text = formatSearchTable(
+            [ { note_title: 'A', file_line_count: 5, fulltext_rank: 1, semantic_rank: null } ],
+            'hybrid',
+        );
+
+        expect(text).toBe('note_title|file_line_count|fulltext_rank|semantic_rank\nA|5|1|');
+    });
+});
+
+describe('formatExplain', () => {
+    it('renders pipeline info and a bm25 line for fulltext mode', () => {
+        const text = formatExplain({
+            results: [ { note_title: 'A', file_line_count: 10, bm25_score: -1.2, rank: 1 } ],
+            pipeline: { mode: 'fulltext', limit: 20, overfetchLimit: 100, fulltextExpression: 'graph' },
+        });
+        expect(text).toContain('mode=fulltext limit=20 overfetch=100 fts5_expression="graph"');
+        expect(text).toContain('1 | A | 10 | bm25=-1.2');
+    });
+
+    it('renders a cosine + chunk-window line for semantic mode', () => {
+        const text = formatExplain({
+            results: [ { note_title: 'A', file_line_count: 10, cosine_distance: 0.01, winning_chunk: { char_start: 0, char_end: 100 }, rank: 1 } ],
+            pipeline: { mode: 'semantic', limit: 20, overfetchLimit: 100, fulltextExpression: 'x' },
+        });
+        expect(text).toContain('1 | A | 10 | cosine=0.01 | chunk[0:100]');
+    });
+
+    it('renders the rrf formula for hybrid mode', () => {
+        const text = formatExplain({
+            results: [ { note_title: 'A', file_line_count: 10, fulltext_rank: 1, semantic_rank: null, rrf_score: 0.0164, rrf_formula: '1/(60+1) = 0.0164' } ],
+            pipeline: { mode: 'hybrid', limit: 20, overfetchLimit: 100, fulltextExpression: 'x' },
+        });
+        expect(text).toContain('1 | A | 10 | fulltext_rank=1 | semantic_rank=- | rrf=1/(60+1) = 0.0164');
     });
 });
