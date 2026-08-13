@@ -48,10 +48,9 @@ function upsertNoteRow(db, path, contentHash, lineCount, mtime, updatedAt) {
 }
 
 function replaceChunks(db, noteId, embeddedChunks, embeddingModel, embeddingVersion) {
-    const staleChunkIds = db.prepare('SELECT id FROM chunks WHERE note_id = ?').all(noteId).map((r) => r.id);
-    for (const chunkId of staleChunkIds) {
-        db.prepare('DELETE FROM chunk_vectors WHERE rowid = ?').run(chunkId);
-    }
+    db.prepare(`
+        DELETE FROM chunk_vectors WHERE rowid IN (SELECT id FROM chunks WHERE note_id = ?)
+    `).run(noteId);
     db.prepare('DELETE FROM chunks WHERE note_id = ?').run(noteId);
 
     const insertChunk = db.prepare(`
@@ -61,13 +60,10 @@ function replaceChunks(db, noteId, embeddedChunks, embeddingModel, embeddingVers
     const insertVector = db.prepare('INSERT INTO chunk_vectors (rowid, embedding) VALUES (CAST(? AS INTEGER), ?)');
 
     for (const chunk of embeddedChunks) {
-        insertChunk.run(
+        const { lastInsertRowid: chunkId } = insertChunk.run(
             noteId, chunk.chunkIndex, chunk.charStart, chunk.charEnd, chunk.tokenCount,
             embeddingModel, embeddingVersion,
         );
-        const chunkId = db.prepare(
-            'SELECT id FROM chunks WHERE note_id = ? AND chunk_index = ?',
-        ).get(noteId, chunk.chunkIndex).id;
         insertVector.run(chunkId, Buffer.from(chunk.vector.buffer));
     }
 }
@@ -156,10 +152,9 @@ export function deleteNoteByPath(db, path) {
     if (!note) {
         return;
     }
-    const chunkIds = db.prepare('SELECT id FROM chunks WHERE note_id = ?').all(note.id).map((r) => r.id);
-    for (const chunkId of chunkIds) {
-        db.prepare('DELETE FROM chunk_vectors WHERE rowid = ?').run(chunkId);
-    }
+    db.prepare(`
+        DELETE FROM chunk_vectors WHERE rowid IN (SELECT id FROM chunks WHERE note_id = ?)
+    `).run(note.id);
     db.prepare('DELETE FROM notes_fts WHERE rowid = ?').run(note.id);
     db.prepare('DELETE FROM notes WHERE id = ?').run(note.id); // cascades chunks, note_tags (S001 FKs)
 }
