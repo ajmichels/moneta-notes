@@ -162,3 +162,42 @@ describe('createEmbedder: lazy load', () => {
         rmSync(logDir, { recursive: true, force: true });
     });
 });
+
+describe('createEmbedder: idle unload', () => {
+    it('unloads after idleTimeoutMs of inactivity and reloads transparently on next use', async () => {
+        const factory = fakePipelineFactory();
+        let scheduled = null;
+        const embedder = createEmbedder({
+            pipelineFactory: factory,
+            idleTimeoutMs: 1000,
+            scheduleUnload: (fn, ms) => { scheduled = { fn, ms }; return 'timer'; },
+            cancelUnload: () => {},
+        });
+
+        await embedder.embed('hello');
+        expect(embedder.isLoaded()).toBe(true);
+        expect(scheduled.ms).toBe(1000);
+
+        scheduled.fn(); // simulate the idle timer firing
+        expect(embedder.isLoaded()).toBe(false);
+
+        await embedder.embed('world again');
+        expect(factory.calls()).toBe(2);
+    });
+
+    it('cancels the previous idle timer on every embed() call', async () => {
+        const factory = fakePipelineFactory();
+        const cancelled = [];
+        let timerCount = 0;
+        const embedder = createEmbedder({
+            pipelineFactory: factory,
+            scheduleUnload: () => { timerCount += 1; return `timer-${timerCount}`; },
+            cancelUnload: (id) => cancelled.push(id),
+        });
+
+        await embedder.embed('a');
+        await embedder.embed('b');
+
+        expect(cancelled).toEqual([ 'timer-1' ]);
+    });
+});
