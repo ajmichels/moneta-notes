@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import {
@@ -8,6 +8,7 @@ import {
 import { titleToPath } from './note-fs.js';
 import { openDb } from './db.js';
 import { getLogger, runWithLogger } from '../logger.js';
+import { cleanupTempDir } from '../../vitest.helpers.js';
 
 const tempDirs = [];
 
@@ -26,7 +27,7 @@ function writeRawNote(vaultRoot, title, raw) {
 
 afterEach(() => {
     while (tempDirs.length > 0) {
-        rmSync(tempDirs.pop(), { recursive: true, force: true });
+        cleanupTempDir(tempDirs.pop());
     }
 });
 
@@ -161,7 +162,7 @@ describe('noteWrite (create)', () => {
             expect(line).toContain('supplied_id="bogus"');
             expect(line).toContain('computed_id="Logged Id"');
         });
-        rmSync(logDir, { recursive: true, force: true });
+        cleanupTempDir(logDir);
     });
 
     it('does not log when no metadata is given (nothing caller-supplied to overwrite)', async () => {
@@ -173,7 +174,7 @@ describe('noteWrite (create)', () => {
 
         await new Promise((resolve) => setTimeout(resolve, 20));
         expect(existsSync(join(logDir, 'mcp-server.log'))).toBe(false);
-        rmSync(logDir, { recursive: true, force: true });
+        cleanupTempDir(logDir);
     });
 
     it('creates parent folders for a folder-prefixed title', () => {

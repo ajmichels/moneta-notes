@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync as readAuditLog } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, readFileSync as readAuditLog } from 'node:fs';
 import { Readable } from 'node:stream';
 import {
     dispatch, resolveVaultRoot, resolveDbPath, registerCommand, runSearch, runGrep, runTags, runRead,
@@ -11,6 +11,7 @@ import { openDb } from '../core/db.js';
 import { syncNoteTags } from '../core/tags.js';
 import { getAuditLogger } from '../logger.js';
 import { buildDefaultConfig } from '../config.js';
+import { cleanupTempDir } from '../../vitest.helpers.js';
 
 // resolveVaultRoot()/resolveDbPath() default to loadConfig() (no argument), which reads the real
 // ~/.config/mnotes/config.toml on whatever machine the suite runs on (S009's documented behavior
@@ -42,9 +43,26 @@ function makeTempVault() {
 
 afterEach(() => {
     while (tempDirs.length > 0) {
-        rmSync(tempDirs.pop(), { recursive: true, force: true });
+        cleanupTempDir(tempDirs.pop());
     }
 });
+
+// logAudit is fire-and-forget (S008/S006), so concurrent appendFile calls to the same audit.log
+// can complete out of call order — a test writing more than one audit entry before the one it's
+// checking can't assume the entry under test is the *last* line. Matching tool + title instead of
+// position sidesteps the race instead of just making it less likely to show up.
+// (tool, noteTitle, outcome) is unique per test even when a title gets more than one audit entry
+// (e.g. an initial successful write followed by a rejected mismatched one) — matching on outcome
+// too, rather than just tool+title, means the result doesn't depend on which of two fire-and-forget
+// appendFile calls to the same file happens to land first.
+function findAuditLine(logDir, tool, noteTitle, outcome) {
+    const lines = readAuditLog(join(logDir, 'audit.log'), 'utf8').trim().split('\n');
+    return lines.find((line) => (
+        line.includes(`[audit] ${tool}`)
+        && line.includes(`note_title="${noteTitle}"`)
+        && line.includes(`outcome=${outcome}`)
+    ));
+}
 
 describe('dispatch: unknown command', () => {
     it('returns exitCode 1 and a descriptive stderr message', async () => {
@@ -377,13 +395,10 @@ describe('runWrite', () => {
         expect(result.exitCode).toBe(1);
 
         await vi.waitFor(() => {
-            const lines = readAuditLog(join(logDir, 'audit.log'), 'utf8').trim().split('\n');
-            const lastLine = lines[lines.length - 1];
-            expect(lastLine).toContain('INFO  [audit] write');
-            expect(lastLine).toContain('note_title="Existing"');
-            expect(lastLine).toContain('source=cli');
-            expect(lastLine).toContain('outcome=error');
-            expect(lastLine).toMatch(/error_message=".*hash mismatch.*"/i);
+            const line = findAuditLine(logDir, 'write', 'Existing', 'error');
+            expect(line).toBeDefined();
+            expect(line).toContain('source=cli');
+            expect(line).toMatch(/error_message=".*hash mismatch.*"/i);
         });
     });
 
@@ -433,12 +448,9 @@ describe('runEdit', () => {
         expect(JSON.parse(result.stdout).title).toBe('Editable');
 
         await vi.waitFor(() => {
-            const lines = readAuditLog(join(logDir, 'audit.log'), 'utf8').trim().split('\n');
-            const lastLine = lines[lines.length - 1];
-            expect(lastLine).toContain('INFO  [audit] edit');
-            expect(lastLine).toContain('note_title="Editable"');
-            expect(lastLine).toContain('source=cli');
-            expect(lastLine).toContain('outcome=success');
+            const line = findAuditLine(logDir, 'edit', 'Editable', 'success');
+            expect(line).toBeDefined();
+            expect(line).toContain('source=cli');
         });
     });
 
@@ -458,12 +470,9 @@ describe('runEdit', () => {
         expect(result.stderr).toMatch(/ambiguous|matches \d+ times/i);
 
         await vi.waitFor(() => {
-            const lines = readAuditLog(join(logDir, 'audit.log'), 'utf8').trim().split('\n');
-            const lastLine = lines[lines.length - 1];
-            expect(lastLine).toContain('INFO  [audit] edit');
-            expect(lastLine).toContain('note_title="Ambiguous"');
-            expect(lastLine).toContain('outcome=error');
-            expect(lastLine).toMatch(/error_message=".*ambiguous.*"/i);
+            const line = findAuditLine(logDir, 'edit', 'Ambiguous', 'error');
+            expect(line).toBeDefined();
+            expect(line).toMatch(/error_message=".*ambiguous.*"/i);
         });
     });
 
@@ -505,12 +514,9 @@ describe('runAppend', () => {
         expect(read.stdout).toBe('first line\nsecond line\n');
 
         await vi.waitFor(() => {
-            const lines = readAuditLog(join(logDir, 'audit.log'), 'utf8').trim().split('\n');
-            const lastLine = lines[lines.length - 1];
-            expect(lastLine).toContain('INFO  [audit] append');
-            expect(lastLine).toContain('note_title="Appendable"');
-            expect(lastLine).toContain('source=cli');
-            expect(lastLine).toContain('outcome=success');
+            const line = findAuditLine(logDir, 'append', 'Appendable', 'success');
+            expect(line).toBeDefined();
+            expect(line).toContain('source=cli');
         });
     });
 
@@ -549,12 +555,9 @@ describe('runRename', () => {
         // Audit entry is logged against the *new* title, per this task's "Interfaces" note above —
         // not the old one, even though the command's first positional was 'Old Name'.
         await vi.waitFor(() => {
-            const lines = readAuditLog(join(logDir, 'audit.log'), 'utf8').trim().split('\n');
-            const lastLine = lines[lines.length - 1];
-            expect(lastLine).toContain('INFO  [audit] rename');
-            expect(lastLine).toContain('note_title="New Name"');
-            expect(lastLine).toContain('source=cli');
-            expect(lastLine).toContain('outcome=success');
+            const line = findAuditLine(logDir, 'rename', 'New Name', 'success');
+            expect(line).toBeDefined();
+            expect(line).toContain('source=cli');
         });
         db.close();
     });
@@ -577,12 +580,9 @@ describe('runRename', () => {
         expect(result.stderr).toMatch(/already exists/i);
 
         await vi.waitFor(() => {
-            const lines = readAuditLog(join(logDir, 'audit.log'), 'utf8').trim().split('\n');
-            const lastLine = lines[lines.length - 1];
-            expect(lastLine).toContain('INFO  [audit] rename');
-            expect(lastLine).toContain('note_title="Target"');
-            expect(lastLine).toContain('outcome=error');
-            expect(lastLine).toMatch(/error_message=".*already exists.*"/i);
+            const line = findAuditLine(logDir, 'rename', 'Target', 'error');
+            expect(line).toBeDefined();
+            expect(line).toMatch(/error_message=".*already exists.*"/i);
         });
         db.close();
     });

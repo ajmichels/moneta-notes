@@ -1,10 +1,11 @@
 import { describe, it, expect, vi } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb } from './db.js';
 import { search, explainSearch } from './search.js';
 import { getLogger, runWithLogger } from '../logger.js';
+import { cleanupTempDir } from '../../vitest.helpers.js';
 
 function insertNote(db, { path, contentHash = 'hash', lineCount = 10, mtime = 1000 }) {
     db.prepare(
@@ -490,6 +491,6 @@ describe('search: malformed FTS5 query', () => {
             expect(line).toContain('WARN  [mcp-server] malformed FTS5 query');
             expect(line).toContain('query="\\"unterminated phrase"');
         });
-        rmSync(logDir, { recursive: true, force: true });
+        cleanupTempDir(logDir);
     });
 });

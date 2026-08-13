@@ -10,6 +10,7 @@ import {
     watermarkCatchup, existenceCheck, createDebouncer, assertFswatchAvailable, spawnFswatch, runReindex,
     createIpcServer, defaultSocketPath, startDaemon, createSerialGate,
 } from './daemon.js';
+import { cleanupTempDir } from '../../vitest.helpers.js';
 
 const tempDirs = [];
 
@@ -26,7 +27,7 @@ function makeTempVault() {
 
 afterEach(() => {
     while (tempDirs.length > 0) {
-        rmSync(tempDirs.pop(), { recursive: true, force: true });
+        cleanupTempDir(tempDirs.pop());
     }
 });
 
@@ -188,7 +189,7 @@ describe('processPath: content changed', () => {
             expect(line).toContain('note_title="Logged"');
             expect(line).toContain('chunk_count=1');
         });
-        rmSync(logDir, { recursive: true, force: true });
+        cleanupTempDir(logDir);
     });
 });
 
@@ -377,15 +378,17 @@ describe('drainQueueOnce', () => {
             const warnLines = lines.filter((line) => line.includes('WARN  [indexer] reindex attempt failed'));
             const errorLines = lines.filter((line) => line.includes('ERROR [indexer] reindex permanently failed'));
             expect(warnLines.length).toBe(3);
-            expect(warnLines[0]).toContain('note_title="Broken"');
-            expect(warnLines[0]).toContain('attempt=1');
-            expect(warnLines[0]).toContain('error_message="embedding failed"');
+            // Each warn line is a fire-and-forget appendFile (S008), so the 3 lines aren't
+            // guaranteed to land in call order — find the attempt=1 one, don't assume warnLines[0].
+            const firstAttemptLine = warnLines.find((line) => line.includes('attempt=1'));
+            expect(firstAttemptLine).toContain('note_title="Broken"');
+            expect(firstAttemptLine).toContain('error_message="embedding failed"');
             expect(errorLines).toHaveLength(1);
             expect(errorLines[0]).toContain('note_title="Broken"');
             expect(errorLines[0]).toContain('attempts=4');
             expect(errorLines[0]).toContain('error_message="embedding failed"');
         });
-        rmSync(logDir, { recursive: true, force: true });
+        cleanupTempDir(logDir);
     });
 
     it('returns zero counts when the queue is empty', async () => {
@@ -765,7 +768,7 @@ describe('startDaemon', () => {
         });
 
         await daemon.stop();
-        rmSync(logDir, { recursive: true, force: true });
+        cleanupTempDir(logDir);
     });
 
     it('does not start an overlapping drain pass while one is still embedding', async () => {
@@ -927,7 +930,12 @@ describe('startDaemon', () => {
         await vi.waitFor(() => {
             const row = daemon.db.prepare('SELECT enqueued_at, next_attempt_at FROM index_queue WHERE path = ?')
                 .get('AlwaysFails.md');
-            expect(row.next_attempt_at - row.enqueued_at).toBe(5000);
+            // enqueued_at/next_attempt_at are two separate real Date.now() calls, so the delta is
+            // backoffSchedule[0] plus actual processing time, not exactly backoffSchedule[0] — a
+            // tolerance window still tells "honored" (~5000ms) apart from the 30s default.
+            const delta = row.next_attempt_at - row.enqueued_at;
+            expect(delta).toBeGreaterThanOrEqual(5000);
+            expect(delta).toBeLessThan(7000);
         });
 
         await daemon.stop();

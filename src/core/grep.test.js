@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assertRipgrepAvailable, grep } from './grep.js';
 import { getLogger, runWithLogger } from '../logger.js';
+import { cleanupTempDir } from '../../vitest.helpers.js';
 
 const tempDirs = [];
 
@@ -18,7 +19,7 @@ function makeTempVault(files) {
 
 afterEach(() => {
     while (tempDirs.length > 0) {
-        rmSync(tempDirs.pop(), { recursive: true, force: true });
+        cleanupTempDir(tempDirs.pop());
     }
 });
 
@@ -43,7 +44,7 @@ describe('assertRipgrepAvailable', () => {
             const line = readFileSync(join(logDir, 'mcp-server.log'), 'utf8').trim();
             expect(line).toContain('WARN  [mcp-server] ripgrep not found on PATH');
         });
-        rmSync(logDir, { recursive: true, force: true });
+        cleanupTempDir(logDir);
     });
 
     it('does not log when rg is resolvable (no enclosing context either way)', () => {
@@ -53,7 +54,7 @@ describe('assertRipgrepAvailable', () => {
         runWithLogger(logger, () => assertRipgrepAvailable());
 
         expect(existsSync(join(logDir, 'mcp-server.log'))).toBe(false);
-        rmSync(logDir, { recursive: true, force: true });
+        cleanupTempDir(logDir);
     });
 });
 

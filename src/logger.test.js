@@ -1,8 +1,9 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { getLogger, defaultLogDir, getAuditLogger, logAudit, runWithLogger, getContextLogger } from './logger.js';
+import { cleanupTempDir } from '../vitest.helpers.js';
 
 const tempDirs = [];
 
@@ -14,7 +15,7 @@ function makeTempLogDir() {
 
 afterEach(() => {
     while (tempDirs.length > 0) {
-        rmSync(tempDirs.pop(), { recursive: true, force: true });
+        cleanupTempDir(tempDirs.pop());
     }
 });
 

@@ -1,9 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { getLogger, runWithLogger } from '../logger.js';
 import { chunkText, loadTokenizer, tokenizeWithOffsets, createEmbedder, embed } from './embed.js';
+import { cleanupTempDir } from '../../vitest.helpers.js';
 
 function fakePipelineFactory() {
     let calls = 0;
@@ -159,7 +160,7 @@ describe('createEmbedder: lazy load', () => {
             expect(line).toContain('INFO  [indexer] embedding pipeline loaded');
             expect(line).toContain('dtype="q8"');
         });
-        rmSync(logDir, { recursive: true, force: true });
+        cleanupTempDir(logDir);
     });
 });
 

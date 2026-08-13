@@ -1,9 +1,10 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, utimesSync, existsSync, readFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, utimesSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { shouldRotate, rotateLogFile, rotateLogDirectory, main } from './log-rotator.js';
 import { buildDefaultConfig } from './config.js';
+import { cleanupTempDir } from '../vitest.helpers.js';
 
 const tempDirs = [];
 
@@ -15,7 +16,7 @@ function makeTempDir() {
 
 afterEach(() => {
     while (tempDirs.length > 0) {
-        rmSync(tempDirs.pop(), { recursive: true, force: true });
+        cleanupTempDir(tempDirs.pop());
     }
 });
 

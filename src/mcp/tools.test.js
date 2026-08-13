@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { openDb } from '../core/db.js';
@@ -9,6 +9,7 @@ import {
     callTool, searchTool, grepTool, tagListTool, tagNotesTool, noteReadTool, noteWriteTool,
     noteEditTool, noteAppendTool, noteRenameTool,
 } from './tools.js';
+import { cleanupTempDir } from '../../vitest.helpers.js';
 
 const tempDirs = [];
 
@@ -20,7 +21,7 @@ function makeTempDir(prefix) {
 
 afterEach(() => {
     while (tempDirs.length > 0) {
-        rmSync(tempDirs.pop(), { recursive: true, force: true });
+        cleanupTempDir(tempDirs.pop());
     }
 });
 

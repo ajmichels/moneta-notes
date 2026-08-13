@@ -1,8 +1,9 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { titleToPath, pathToTitle, stripMdExtension, countLines } from './note-fs.js';
+import { cleanupTempDir } from '../../vitest.helpers.js';
 
 const tempDirs = [];
 
@@ -14,7 +15,7 @@ function makeTempVault() {
 
 afterEach(() => {
     while (tempDirs.length > 0) {
-        rmSync(tempDirs.pop(), { recursive: true, force: true });
+        cleanupTempDir(tempDirs.pop());
     }
 });
 

@@ -1,9 +1,10 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb, getMeta, setMeta, SCHEMA_VERSION } from './db.js';
 import { getLogger, runWithLogger } from '../logger.js';
+import { cleanupTempDir } from '../../vitest.helpers.js';
 
 const EXPECTED_TABLES = [
     'notes',
@@ -37,7 +38,7 @@ function findLogLine(logFile, level) {
 
 afterEach(() => {
     while (tempDirs.length > 0) {
-        rmSync(tempDirs.pop(), { recursive: true, force: true });
+        cleanupTempDir(tempDirs.pop());
     }
 });
 

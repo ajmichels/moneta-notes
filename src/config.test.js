@@ -1,11 +1,12 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
     buildDefaultConfig, defaultVaultPath, defaultDbPath, defaultConfigPath, loadConfig, resolveConfig,
 } from './config.js';
 import { getLogger, runWithLogger } from './logger.js';
+import { cleanupTempDir } from '../vitest.helpers.js';
 
 const tempDirs = [];
 
@@ -17,7 +18,7 @@ function makeTempConfigPath() {
 
 afterEach(() => {
     while (tempDirs.length > 0) {
-        rmSync(tempDirs.pop(), { recursive: true, force: true });
+        cleanupTempDir(tempDirs.pop());
     }
 });
 
@@ -116,7 +117,7 @@ describe('loadConfig: no file on disk', () => {
             const line = readFileSync(join(logDir, 'mcp-server.log'), 'utf8').trim();
             expect(line).toContain('DEBUG [mcp-server] no config.toml found, using built-in defaults');
         });
-        rmSync(logDir, { recursive: true, force: true });
+        cleanupTempDir(logDir);
     });
 });
 
@@ -146,7 +147,7 @@ describe('loadConfig: sparse top-level override', () => {
             expect(line).toContain('DEBUG [mcp-server] loaded config overrides');
             expect(line).toContain('overridden_keys=vault_path');
         });
-        rmSync(logDir, { recursive: true, force: true });
+        cleanupTempDir(logDir);
     });
 });
 
@@ -229,7 +230,7 @@ describe('loadConfig: unrecognized keys', () => {
                 line.includes('WARN  [mcp-server] unrecognized config key') && line.includes('key="search.limt_default"'),
             )).toBe(true);
         });
-        rmSync(logDir, { recursive: true, force: true });
+        cleanupTempDir(logDir);
     });
 
     it('does not warn when every key in the file matches the schema', async () => {
@@ -244,6 +245,6 @@ describe('loadConfig: unrecognized keys', () => {
             const lines = readFileSync(join(logDir, 'mcp-server.log'), 'utf8').trim().split('\n');
             expect(lines.some(line => line.includes('unrecognized config key'))).toBe(false);
         });
-        rmSync(logDir, { recursive: true, force: true });
+        cleanupTempDir(logDir);
     });
 });
