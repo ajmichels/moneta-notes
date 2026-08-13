@@ -22,6 +22,12 @@ dispatch table keyed on `argv[2]` (`search`, `grep`, `tags`, `read`, `write`, `e
 project's minimal-dependency, no-build-step bias — a dozen flat subcommands doesn't need a framework's
 nested-command/auto-help machinery.
 
+`dispatch()` intercepts `--help`/`-h` itself, ahead of routing to a command handler: `mnotes` (no
+command), `mnotes --help`, or `mnotes -h` prints the full command list; `mnotes <command> --help` (the
+flag can appear anywhere in that command's args) prints just that command's usage line instead of
+running it. This is a static lookup table in `cli/main.js`, not per-handler flag parsing — an unknown
+command is still an error regardless of a trailing `--help`.
+
 ## Output format
 
 **Mirrors MCP tool output exactly** — the same pipe-delimited columnar text for list-style commands

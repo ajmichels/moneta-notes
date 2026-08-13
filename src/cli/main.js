@@ -33,12 +33,53 @@ export function registerCommand(name, handler) {
     COMMANDS[name] = handler;
 }
 
+const TOP_LEVEL_HELP = `Usage: mnotes <command> [flags]
+
+Commands:
+  search    Full-text, semantic, or hybrid search over the vault
+  grep      Ripgrep-backed literal/regex search over note files
+  tags      list | notes <tag>
+  read      Read a note by title
+  write     Create a note or fully replace an existing one
+  edit      Surgically replace text in an existing note
+  append    Append content to an existing note
+  rename    Rename a note
+  reindex   Trigger a reindex via the indexing daemon
+  stats     Show index/daemon stats
+
+Run 'mnotes <command> --help' for command-specific flags.
+`;
+
+const COMMAND_USAGE = {
+    search: 'mnotes search <query> [--mode=hybrid|fulltext|semantic] [--limit=N] [--explain] [--json]',
+    grep: 'mnotes grep <pattern> [--regex] [--note=<title>] [--json]',
+    tags: "mnotes tags list [--json]\n       mnotes tags notes <tag> [--json]",
+    read: 'mnotes read <title> [--start=N] [--end=N] [--raw] [--json]',
+    write: "mnotes write <title> [--hash=H] [--metadata='{...}'] [--content=\"...\"]\n"
+        + '       (content is read from stdin if --content is omitted)',
+    edit: 'mnotes edit <title> --hash=H --old="..." --new="..." [--metadata=\'{...}\']',
+    append: 'mnotes append <title> [--hash=H] [--content="..."]\n'
+        + '       (content is read from stdin if --content is omitted)',
+    rename: 'mnotes rename <old-title> <new-title> [--hash=H]',
+    reindex: 'mnotes reindex [title]',
+    stats: 'mnotes stats [--json]',
+};
+
 export async function dispatch(argv, deps) {
     const [ command, ...rest ] = argv;
+
+    if (command === undefined || command === '--help' || command === '-h') {
+        return { stdout: TOP_LEVEL_HELP, stderr: '', exitCode: 0 };
+    }
+
     const handler = COMMANDS[command];
 
     if (!handler) {
         return { stdout: '', stderr: `mnotes: unknown command "${command}"\n`, exitCode: 1 };
+    }
+
+    if (rest.includes('--help') || rest.includes('-h')) {
+        return { stdout: `Usage: ${COMMAND_USAGE[command]}\n`, stderr: '', exitCode: 0 };
     }
 
     try {
