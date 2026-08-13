@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import {
     titleToPath, pathToTitle, hashContent, countLines, noteRead, noteWrite, noteEdit, noteAppend,
+    noteRename,
 } from './notes.js';
 import { getLogger, runWithLogger } from '../logger.js';
 
@@ -460,5 +461,76 @@ describe('noteAppend', () => {
         expect(() => noteAppend(vaultRoot, 'Stale Append', 'wrong-hash', 'y')).toThrow(
             /hash mismatch|changed since/i,
         );
+    });
+});
+
+describe('noteRename', () => {
+    it('moves the note and rewrites id to match the new title', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Old Name', { content: 'body unchanged' });
+
+        const result = noteRename(vaultRoot, 'Old Name', 'New Name', created.hash);
+
+        expect(result.title).toBe('New Name');
+        expect(existsSync(titleToPath(vaultRoot, 'Old Name'))).toBe(false);
+
+        const onDisk = noteRead(vaultRoot, 'New Name');
+        expect(onDisk.metadata.id).toBe('New Name');
+        expect(onDisk.content).toBe('body unchanged');
+    });
+
+    it('changes content_hash as a side effect even though the body is untouched', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Hash Change A', { content: 'same body' });
+
+        const result = noteRename(vaultRoot, 'Hash Change A', 'Hash Change B', created.hash);
+
+        expect(result.hash).not.toBe(created.hash);
+    });
+
+    it('supports moving into a new subfolder', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Flat Note', { content: 'body' });
+
+        noteRename(vaultRoot, 'Flat Note', 'Weekly Notes/2026-W33', created.hash);
+
+        expect(noteRead(vaultRoot, 'Weekly Notes/2026-W33').metadata.id).toBe('2026-W33');
+    });
+
+    it('fails hard when new_title already exists, with no force override', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Source', { content: 'source body' });
+        noteWrite(vaultRoot, 'Target', { content: 'target body' });
+
+        expect(() => noteRename(vaultRoot, 'Source', 'Target', created.hash)).toThrow(
+            /already exists/i,
+        );
+        expect(noteRead(vaultRoot, 'Source').content).toBe('source body');
+        expect(noteRead(vaultRoot, 'Target').content).toBe('target body');
+    });
+
+    it('throws a staleness error on hash mismatch and does not move the file', () => {
+        const vaultRoot = makeTempVault();
+        noteWrite(vaultRoot, 'Stale Rename', { content: 'body' });
+
+        expect(() => noteRename(vaultRoot, 'Stale Rename', 'Renamed', 'wrong-hash')).toThrow(
+            /hash mismatch|changed since/i,
+        );
+        expect(existsSync(titleToPath(vaultRoot, 'Stale Rename'))).toBe(true);
+        expect(existsSync(titleToPath(vaultRoot, 'Renamed'))).toBe(false);
+    });
+
+    it('throws when hash is missing', () => {
+        const vaultRoot = makeTempVault();
+        noteWrite(vaultRoot, 'No Hash Rename', { content: 'body' });
+
+        expect(() => noteRename(vaultRoot, 'No Hash Rename', 'Renamed', null)).toThrow(
+            /hash is required/i,
+        );
+    });
+
+    it('throws Note not found when old_title does not exist', () => {
+        const vaultRoot = makeTempVault();
+        expect(() => noteRename(vaultRoot, 'Ghost', 'Renamed', 'abc123')).toThrow(/not found/i);
     });
 });

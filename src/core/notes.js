@@ -1,6 +1,6 @@
 import { join, relative, dirname } from 'node:path';
 import { createHash } from 'node:crypto';
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from 'node:fs';
 import matter from 'gray-matter';
 import { getContextLogger } from '../logger.js';
 
@@ -272,4 +272,39 @@ export function noteAppend(vaultRoot, title, hash, content) {
     writeFileSync(filePath, raw, 'utf8');
 
     return { title, hash: hashContent(raw), line_count: countLines(newBody) };
+}
+
+export function noteRename(vaultRoot, oldTitle, newTitle, hash) {
+    if (!hash) {
+        throw new Error(`note_rename: hash is required for "${oldTitle}"`);
+    }
+
+    const oldPath = titleToPath(vaultRoot, oldTitle);
+    const newPath = titleToPath(vaultRoot, newTitle);
+
+    const currentRaw = readRawNote(oldPath, oldTitle);
+    const currentHash = hashContent(currentRaw);
+
+    if (currentHash !== hash) {
+        throw new Error(
+            `note_rename: hash mismatch for "${oldTitle}" — note has changed since last read `
+            + `(expected ${hash}, found ${currentHash}). Read the note again before renaming.`,
+        );
+    }
+
+    if (existsSync(newPath)) {
+        throw new Error(
+            `note_rename: "${newTitle}" already exists — cannot rename onto an existing note`,
+        );
+    }
+
+    const { data: existingMetadata, content: body } = matter(currentRaw);
+    const data = withComputedId(existingMetadata, null, newTitle);
+    const raw = matter.stringify(body, data);
+
+    mkdirSync(dirname(newPath), { recursive: true });
+    writeFileSync(newPath, raw, 'utf8');
+    unlinkSync(oldPath);
+
+    return { title: newTitle, hash: hashContent(raw), line_count: countLines(body) };
 }
