@@ -114,6 +114,36 @@ step, not part of this script). Steps, in order:
 
 Never touches the vault itself — uninstalling `mnotes` removes the tool's own state, not your notes.
 
+## Logging
+
+`scripts/install.sh`/`scripts/uninstall.sh` are bash, not Node — they print directly to the terminal
+(the "clear warning" for a missing `rg`, the path prompts, the model-download progress message) and
+never touch `src/logger.js`, which doesn't exist yet from bash's perspective at install time anyway.
+Their one connection to `S008` is purely mechanical: installing the log-rotation LaunchAgent's plist
+(step 6) is what makes `src/log-rotator.js`'s already-built `main()` (S008 Task 8) actually run on a
+schedule — there's no new logging behavior to design here, just wiring up what S008 shipped.
+
+`src/config.js` is a regular Node module loaded early by every entry point (daemon, CLI, MCP server),
+each of which — per `S005`/`S007` — establishes its own `runWithLogger` context before or around the
+same time config loads, so `getContextLogger()` works normally here, same as any `core/` module:
+
+- **Config file found and merged** — `debug`, `"loaded config overrides"`, context
+  `{ overridden_keys }` (just the key names actually present in `config.toml`, never their values —
+  `vault_path`/`db_path` are filesystem locations, not secrets, but there's no reason to echo full
+  paths into a log line when the key list alone answers "is my override taking effect").
+- **No `config.toml` found** — `debug`, `"no config.toml found, using built-in defaults"`. Not a
+  warning — this is the expected, common case per "Install" step 3 above (a user who accepted every
+  suggested default ends up with no file at all).
+- **Unrecognized key in `config.toml`** (present in the file, not part of the schema on this page) —
+  `warn`, `"unrecognized config key"`, context `{ key }` — the one genuinely diagnostic case, since a
+  typoed key (e.g. `limt_default`) would otherwise silently fall through to the built-in default with
+  no indication the override was ignored.
+
+The CLI is the one entry point where this needs a caveat matching `S006`'s Logging section: the CLI
+never establishes a `runWithLogger` context, so all three lines above are no-ops for `mnotes` command
+invocations — config still loads and merges correctly, it just doesn't leave a trail. Only the daemon
+and MCP server's config loads are actually observable in `indexer.log`/`mcp-server.log`.
+
 ## Explicitly out of scope here
 
 - **Exact plist XML contents beyond what's specified in S005 (daemon) and S008 (log-rotation

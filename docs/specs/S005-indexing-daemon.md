@@ -87,10 +87,10 @@ For each dequeued path:
 4. **On failure** (parse error, embedding error, etc.): increment `attempts`, compute
    `next_attempt_at = now + backoff(attempts)` using exponential backoff (default: 30s, 2min, 10min —
    3 retries after the initial attempt, 4 attempts total), update the row (don't remove it), and log
-   an error-level entry (S008) for that attempt. After the final attempt is exhausted, remove the row
-   and log a permanent-failure error — the daemon doesn't get stuck retrying the same bad file forever,
-   but a future edit to that file (new `fswatch` event) or an explicit `mnotes reindex <title>` will
-   re-enqueue it.
+   that attempt (see "Logging" below for the exact level/shape). After the final attempt is exhausted,
+   remove the row and log a permanent failure — the daemon doesn't get stuck retrying the same bad file
+   forever, but a future edit to that file (new `fswatch` event) or an explicit `mnotes reindex <title>`
+   will re-enqueue it.
 
 ## Chunking
 
@@ -157,6 +157,49 @@ tunables like these live in config rather than code:
 - Embedding model idle-unload timeout (default `10m`)
 - Embedding precision/dtype (default `q8`)
 - Retry backoff schedule / max attempts (default `30s, 2m, 10m`, 4 attempts total)
+
+## Logging
+
+`src/indexer/daemon.js` is a `runWithLogger` **root**: at process start, before anything else, it
+calls `runWithLogger(getLogger('indexer', defaultLogDir()), () => main())` (per `S008`) — every log
+call for the lifetime of the process, including `core/db.js`'s own `openDb` logging (`S001`: "schema
+created" at `info`, "schema version mismatch, rebuilding" at `warn`) and `core/tags.js`'s extraction
+calls during reindex, lands in `indexer.log` under this one context. Nothing else in this spec needs
+its own `runWithLogger` call — it's set up once, at the top.
+
+Concrete events, replacing this spec's earlier vague "log an error-level entry (S008)" phrasing with
+the actual `getContextLogger()` call sites and levels:
+
+- **Daemon started** — `info`, `"daemon started"`, before the schema check.
+- **Schema check/rebuild** — handled entirely by `core/db.js`'s own logging (`S001`); this spec doesn't
+  add a second line for it.
+- **Watermark catch-up complete** — `info`, `"watermark catch-up complete"`, context
+  `{ watermark, enqueued_count }`.
+- **Existence check complete** — `info`, `"existence check complete"`, context `{ deleted_count }`.
+- **`fswatch` watcher started** — `info`, `"fswatch watcher started"`.
+- **Queue drainer, per dequeued path**:
+  - Skip-unchanged (mtime or content hash unchanged) — `debug`, `"skipping unchanged path"`, context
+    `{ note_title }` — high-frequency, low-value outside active debugging, so not `info`.
+  - Content actually changed and successfully re-chunked/re-embedded/upserted — `info`,
+    `"reindexed note"`, context `{ note_title, chunk_count }` — this is the "processing events... at
+    info" line `S008`'s file-layout description calls out.
+  - Per-attempt failure (parse error, embedding error, etc.) — `warn`, `"reindex attempt failed"`,
+    context `{ note_title, attempt, next_attempt_at, error_message }`.
+  - Permanent failure (final attempt exhausted, row removed from `index_queue`) — `error`,
+    `"reindex permanently failed"`, context `{ note_title, attempts, error_message }`.
+- **Embedding pipeline load** (first use after startup or after an idle-unload) — `info`, `"embedding
+  pipeline loaded"`, context `{ dtype }`.
+- **Embedding pipeline idle-unload** (after the configured idle timeout) — `info`, `"embedding
+  pipeline unloaded"`, context `{ idle_minutes }`.
+- **IPC reindex request received** — `info`, `"reindex requested"`, context `{ scope<"vault"|"note">,
+  note_title? }`.
+- **IPC reindex summary sent** (end of a full-vault `mnotes reindex`) — `info`, `"reindex complete"`,
+  context `{ reindexed, skipped, failed }` — the same counts the final IPC summary message reports to
+  the CLI, also captured durably in `indexer.log`.
+
+No `logAudit` calls anywhere in this spec — `audit.log` is for MCP-tool-call and CLI-mutating-command
+outcomes only (`S008`/`S006`/`S007`); daemon-internal reindexing isn't a caller-initiated mutation in
+that sense, even though it writes to the index.
 
 ## Explicitly out of scope here
 

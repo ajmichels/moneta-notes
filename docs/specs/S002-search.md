@@ -99,6 +99,32 @@ Unchanged from the README's documented shape: `note_title`, `file_line_count`, a
 `note_title` are read from the `notes` row (`line_count` column, `path` → title derivation per S001);
 no additional query needed beyond what's already fetched during ranking.
 
+## Logging
+
+`core/search.js` calls `getContextLogger()` (per `S008`) — never imports `getLogger` directly, never
+picks a log file or component name. No per-query line at `info`/`warn` for a normal, successful search
+regardless of mode: that's the hot path (every `search` tool call), and a line per call would flood
+`mcp-server.log` for zero diagnostic benefit over just reading the tool's own response. Two specific,
+low-frequency conditions are worth a line:
+
+- **Malformed FTS5 expression** — `warn`, `"malformed FTS5 query"`, context `{ query, mode }`, logged
+  immediately before the hard error throws (per this spec's "fail loudly" rule above).
+- **Stale-embedding-model chunks excluded from a semantic/hybrid query** — `debug`, `"excluded chunks
+  from stale embedding model"`, context `{ excluded_count, current_model }`, once per query that hits
+  this path. This is silent-by-design from the caller's perspective (see "Semantic retrieval and chunk
+  collapse" above — `mnotes stats` is the intended surface for staleness, not search output) but worth
+  a low-noise trail for diagnosing "why did a note I know matches not show up" without re-deriving it
+  from `mnotes stats` at debug time.
+
+`getContextLogger()` only does anything when a `runWithLogger` context is active. Per `S007`, the MCP
+server wraps every tool call this way — `core/search.js` errors, including a malformed-query throw, are
+*also* captured by `S007`'s per-call `logAudit(... outcome: 'error', error_message)` in `audit.log`, so
+the `warn` line above is a convenience for `tail -f`/`grep`-ing `mcp-server.log` directly, not the only
+record. Per `S006`, the CLI never establishes a `runWithLogger` context at all (its only use of the
+logger is `audit.log` for mutations, and `search` isn't a mutation) — for a CLI-invoked `search`, both
+lines above are no-ops, and a malformed-query error is visible only in the CLI's own stderr output at
+the moment it happens, nowhere durable.
+
 ## Explicitly out of scope here
 
 - **Chunking algorithm** (token counting, ~512/~15% overlap window construction) — S005.

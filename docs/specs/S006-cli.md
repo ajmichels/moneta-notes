@@ -126,6 +126,32 @@ is queue-based (S005): a large or growing count means the daemon is behind or st
 a best-effort courtesy check (attempt a socket connection, non-blocking if it fails) — `stats` itself
 never requires the daemon to be up, unlike `reindex`.
 
+## Logging
+
+Per `S008`, the CLI's *only* use of `src/logger.js` is the audit trail for mutating commands — it
+never uses the logger for its own normal stdout/stderr output, and (unlike the daemon and MCP server)
+it does **not** wrap command dispatch in a `runWithLogger` context:
+
+- `mnotes search`/`grep`/`tags`/`read` — no logging at all. These call into `core/search.js`,
+  `core/grep.js`, `core/tags.js`, `core/notes.js` with no enclosing `runWithLogger`, so any
+  `getContextLogger()` calls inside those `core/` modules (`S002`'s malformed-query `warn`, `S004`'s
+  ripgrep-not-found `warn`) silently resolve to the no-op logger when invoked from the CLI — those
+  lines only exist for the MCP server, which does establish a context (`S007`). This matches the
+  README's original "CLI is interactive, doesn't need persistent logging" framing for reads.
+- `mnotes write`/`edit`/`append`/`rename` — after the command completes (success or a caught thrown
+  error), the CLI calls `logAudit(getAuditLogger(defaultLogDir()), { tool, noteTitle, source: 'cli',
+  outcome, errorMessage })` (`S008`) — `reason` is always absent (`source: 'cli'` never carries one, per
+  "No `reason` flag" above). This is a direct call to `logAudit`, not a `runWithLogger`-wrapped
+  context, so — same as the read commands — `core/notes.js`'s own incidental logging (`S003`'s
+  caller-supplied-`id`-overwrite `debug` line) resolves to the no-op logger for CLI-driven mutations;
+  only the MCP server's tool calls get that detail captured. This is a deliberate consequence of
+  `S008`'s "CLI's only use of the logger is `audit.log`" decision, not an oversight — reintroducing a
+  `cli.log` for incidental `core/` debug output would be a new architectural surface `S008` explicitly
+  didn't add.
+- `mnotes reindex`/`stats` talk to the daemon over its socket (`S005`) — no CLI-side logging beyond
+  what those commands print to stdout/stderr directly; the daemon's own `indexer.log` already captures
+  the actual reindex work.
+
 ## Explicitly out of scope here
 
 - **`mnotes reindex`'s actual protocol/behavior talking to the daemon** — fully specified in S005;

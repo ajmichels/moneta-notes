@@ -102,6 +102,25 @@ This is a deliberate asymmetry with `tag_list` (which shows exact-match counts p
 up) — `tag_list` is an inventory view of what tags exist, `tag_notes` is a "find everything under
 this tag" query. Both are correct for what they're each for.
 
+## Logging
+
+`core/grep.js` calls `getContextLogger()` for the one real failure mode worth a durable trail: `rg` not
+resolvable on `PATH` — `warn`, `"ripgrep not found on PATH"`, no context beyond the message itself (no
+user input worth capturing; the pattern/query isn't relevant to *why* the binary is missing), logged
+immediately before the actionable error throws. Same caveat as `S002`: this only lands anywhere when a
+`runWithLogger` context is active, which per `S007` is true for every MCP tool call (`mcp-server.log`)
+but per `S006` is never true for the CLI — a CLI-invoked `grep`/`tag_list`/`tag_notes` gets no logging
+at all beyond stderr, since neither tool is a mutation and the CLI never establishes a context. On the
+MCP side, `S007`'s per-call `logAudit` already captures the same failure's `error_message` in
+`audit.log` regardless of this `warn` line — MCP tool calls are audited whether they read or write
+(unlike the CLI, which per `S006` only audits mutations).
+
+No successful-call logging for `grep` (a match/no-match result is the normal range of outcomes, not
+worth a line per call) and no logging at all in `core/tags.js` — `tag_list`/`tag_notes` have no failure
+mode beyond what SQL already throws, and extraction's own notable events (per-note tag counts, parse
+issues during a reindex pass) belong to the daemon's reindex summary logging in `S005`, not to the pure
+extraction function itself.
+
 ## Explicitly out of scope here
 
 - **When/how extraction runs during reindex** (per-note vs. full-vault, idempotency) — S005.

@@ -137,6 +137,35 @@ prompt-behavior design in one document. **Deferred to a dedicated follow-up spec
 above is actually built and in use. `mcp/prompts.js` exists as a stub (empty prompt list registered
 with the SDK) until that spec lands.
 
+## Logging
+
+`src/mcp/server.js` does two separate things with the logger, both per `S008`:
+
+1. **Server lifecycle**, at `info` on its own `getLogger('mcp-server', defaultLogDir())` instance:
+   `"server started"` on boot, `"stdio transport connected"`/`"stdio transport disconnected"` as the
+   client attaches/detaches. Protocol-level errors (malformed JSON-RPC framing, an unsupported
+   request) go to the same logger at `warn`/`error`. None of this is per-tool-call — it's the process's
+   own start/stop/protocol narrative.
+2. **Per-tool-call wrapping**, in `mcp/tools.js`'s dispatch: every tool invocation — read or write,
+   `search` through `note_rename` — runs as `runWithLogger(mcpLogger, () => handler(args))`, so any
+   `getContextLogger()` call inside the `core/` function it invokes (`S002`'s malformed-query `warn`,
+   `S003`'s `id`-overwrite `debug`, `S004`'s ripgrep-not-found `warn`, `S001`'s schema-mismatch `warn`
+   in the unlikely event the MCP server's own connection hits it) lands in `mcp-server.log`. Separately
+   from that context, **every** tool call — this is the asymmetry with the CLI, which per `S006` only
+   audits mutations — also gets a `logAudit(getAuditLogger(defaultLogDir()), { tool, noteTitle,
+   source: 'mcp', reason, outcome, errorMessage })` call in `audit.log`, using the tool's own
+   (required, per CLAUDE.md) `reason` argument. This is what "logged per S008, not used to gate
+   behavior" in the Tool set intro above actually resolves to: every tool call is audited regardless of
+   outcome, `reason` is captured verbatim, and a caught thrown error (per "Error mapping" above) becomes
+   `outcome: 'error'` with the preserved error message as `error_message` — the same message Claude sees
+   in the tool response.
+
+Net effect: an MCP-driven `search` that hits `core/search.js`'s malformed-FTS5-query throw produces
+*two* durable records — a `warn` line in `mcp-server.log` from the `core/` call site itself, and an
+`outcome: 'error'` line in `audit.log` from the tool-call wrapper — which is intentional redundancy
+(different files, different purposes: one is "what happened inside this component," the other is "what
+did this caller do and did it work") rather than something to deduplicate.
+
 ## Explicitly out of scope here (beyond prompts)
 
 - **Audit log entry shape for MCP tool calls** (`{ tool, note_title, reason, timestamp, outcome }` per

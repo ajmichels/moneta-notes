@@ -127,6 +127,25 @@ single-user, sequential-tool-call system (one Claude session driving one MCP ser
 vault at a time), not a high-concurrency service — the hash guard exists to catch *staleness* (edits
 that happened between reads, e.g. a NeoVim save mid-conversation), not to serialize concurrent writers.
 
+## Logging
+
+Every tool here is a mutation, and per `S008`, mutations are already fully covered by `logAudit` at
+the boundary layer (MCP tool call or CLI mutating command) — `tool`, `note_title`, `outcome`, and
+`error_message` on failure land in `audit.log` regardless of which of these functions ran or why it
+failed. `core/notes.js` does **not** duplicate that via `getContextLogger()`: a hash mismatch, an
+ambiguous `old_txt` match (zero or multiple), and a size-drop-guard trip all just throw a specific,
+descriptive error (per CLAUDE.md's "fail loudly"), same as they would with no logging infrastructure
+at all — the thrown message *is* what ends up as `audit.log`'s `error_message`, so a second `warn` line
+from inside `core/` would only repeat it under a different component name.
+
+One exception, matching `S002`'s "silent-by-design but worth a low-noise trail" pattern: when a caller
+passes an `id` key in `metadata` and it's silently dropped/overwritten with the computed value (see
+"The `id` frontmatter field" above), `core/notes.js` calls `getContextLogger().debug('overwrote
+caller-supplied id', { note_title, supplied_id, computed_id })`. This is information `audit.log`
+wouldn't otherwise carry (it records the mutation's outcome, not what happened to an individual
+input field), and unlike a hash-mismatch or guard trip it isn't an error — there's genuinely nothing
+else to log it as.
+
 ## Explicitly out of scope here
 
 - **Path/title validation against the "flat vault structure" convention** — deliberately not
