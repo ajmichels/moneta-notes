@@ -82,8 +82,8 @@ One row per indexed note file.
 | `mtime`        | INTEGER | NOT NULL                  | File mtime (epoch seconds) at last index. Lets the daemon skip rehashing a file whose mtime hasn't changed. |
 | `updated_at`   | INTEGER | NOT NULL                  | Epoch seconds this row was last (re)written by the indexer. |
 
-**Title is never stored.** `core/notes.js` derives it from `path` (strip vault root prefix, strip
-`.md` extension) and derives `path` from a title the same way in reverse. This is a pure,
+**Title is never stored.** `core/note-fs.js` (S010) derives it from `path` (strip vault root prefix,
+strip `.md` extension) and derives `path` from a title the same way in reverse. This is a pure,
 deterministic transform — storing both would risk drift between them for zero benefit.
 
 ### `notes_fts` (FTS5, contentless)

@@ -2,7 +2,8 @@
 
 Status: **Approved**
 Owns: `src/cli/main.js`, `src/cli/reindex.js`, `src/cli/stats.js`
-Depends on: `S001-data-model`, `S002-search`, `S003-notes`, `S004-grep-tags`, `S005-indexing-daemon`
+Depends on: `S001-data-model`, `S002-search`, `S003-notes`, `S004-grep-tags`, `S005-indexing-daemon`,
+`S010-shared-utilities`
 Consumed by: (terminal use, `obsidian.nvim` integration)
 
 ## Purpose

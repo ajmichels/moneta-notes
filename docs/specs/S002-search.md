@@ -2,7 +2,7 @@
 
 Status: **Approved**
 Owns: `src/core/search.js`
-Depends on: `S001-data-model`
+Depends on: `S001-data-model`, `S010-shared-utilities`
 Consumed by: `S006-cli`, `S007-mcp-server`
 
 ## Purpose
@@ -96,7 +96,7 @@ native ranking (BM25 ascending / cosine distance ascending after chunk collapse)
 
 Unchanged from the README's documented shape: `note_title`, `file_line_count`, and (in `hybrid` mode)
 `fulltext_rank` / `semantic_rank` — rank position only, never raw scores. `file_line_count` and
-`note_title` are read from the `notes` row (`line_count` column, `path` → title derivation per S001);
+`note_title` are read from the `notes` row (`line_count` column, `path` → title derivation per S010);
 no additional query needed beyond what's already fetched during ranking.
 
 ## Logging

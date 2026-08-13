@@ -2,7 +2,7 @@
 
 Status: **Approved**
 Owns: `src/core/grep.js`, `src/core/tags.js`
-Depends on: `S001-data-model`
+Depends on: `S001-data-model`, `S010-shared-utilities`
 Consumed by: `S005-indexing-daemon` (tag extraction, invoked during reindex), `S006-cli`,
 `S007-mcp-server`
 
@@ -41,6 +41,17 @@ S002/S003, not because they're related to each other.
   returned; the total note count is unbounded (grep is an exhaustive literal-match tool, not a
   relevance-ranked one, so silently dropping matching notes would be surprising for what's meant to be
   a "find everywhere" primitive). The cap (`10`) is a `config.toml` value — flagged for S009.
+- `file_line_count` means the same thing here as everywhere else it appears in the tool surface
+  (`search`, `tag_notes`, `stats`, `read`): the frontmatter-stripped body's logical line count, per
+  `core/note-fs.js`'s `countLines` contract (S010). Since `grep` reads the vault directly rather than
+  through the index (this section's opening line), it can't just read `notes.line_count` — it parses
+  each matched file's frontmatter out (via `gray-matter`, same as `noteRead`) before counting, so the
+  number means the same thing regardless of which command reported it.
+- Line numbers inside `line_matches` are ripgrep's own, unadjusted — they count from the top of the
+  **raw file on disk** (frontmatter included), since that's what a match's line number means when you
+  open the file in an editor. This is intentionally different from `file_line_count` above, which is
+  body-only; the two conventions serve different purposes (locating a match on disk vs. reporting the
+  note's overall length) and shouldn't be reconciled to match each other.
 
 ## Tags
 

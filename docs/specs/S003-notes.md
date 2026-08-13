@@ -2,7 +2,7 @@
 
 Status: **Approved**
 Owns: `src/core/notes.js`
-Depends on: `S001-data-model`
+Depends on: `S001-data-model`, `S010-shared-utilities`
 Consumed by: `S006-cli`, `S007-mcp-server`
 
 ## Purpose

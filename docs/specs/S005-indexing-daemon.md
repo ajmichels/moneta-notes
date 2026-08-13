@@ -2,7 +2,8 @@
 
 Status: **Approved**
 Owns: `src/indexer/daemon.js`, `src/indexer/embed.js`
-Depends on: `S001-data-model`, `S004-grep-tags` (tag extraction, invoked here during processing)
+Depends on: `S001-data-model`, `S004-grep-tags` (tag extraction, invoked here during processing),
+`S010-shared-utilities`
 Consumed by: `S006-cli` (reindex/stats talk to this daemon), `S009-config-and-install` (new config
 knobs introduced here)
 
