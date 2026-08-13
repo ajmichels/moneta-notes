@@ -1,5 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { load } from 'sqlite-vec';
+import { getContextLogger } from '../logger.js';
 
 // node:sqlite binds every JS `number` as SQLite REAL, never INTEGER (only BigInt binds as
 // 'integer'). This is harmless for INTEGER-affinity columns (SQLite coerces 5.0 back to 5) but
@@ -173,11 +174,21 @@ export function openDb(dbPath) {
     const currentVersion = readSchemaVersion(db);
     let reindexRequired = false;
 
-    if (currentVersion !== SCHEMA_VERSION) {
+    if (currentVersion === null) {
         dropAllTables(db);
         createSchema(db);
         writeSchemaVersion(db, SCHEMA_VERSION);
         reindexRequired = true;
+        getContextLogger().info('schema created', { schema_version: SCHEMA_VERSION });
+    } else if (currentVersion !== SCHEMA_VERSION) {
+        dropAllTables(db);
+        createSchema(db);
+        writeSchemaVersion(db, SCHEMA_VERSION);
+        reindexRequired = true;
+        getContextLogger().warn('schema version mismatch, rebuilding', {
+            from_version: currentVersion,
+            to_version: SCHEMA_VERSION,
+        });
     }
 
     return { db, reindexRequired };

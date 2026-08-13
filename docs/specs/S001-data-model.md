@@ -282,6 +282,25 @@ are a normal, expected side effect of those virtual table modules, not schema dr
 guard against). That turns a future list-drift bug into a failing test instead of a silent
 production break.
 
+## Logging
+
+`core/db.js` calls `getContextLogger()` (per `S008`'s "Context propagation into `core/`" section) at
+the two notable branches of `openDb`'s version check — never on the routine reopen-at-current-version
+path, which stays silent to avoid a log line on every process startup for the expected case:
+
+- **Fresh database** (no `meta` table yet, i.e. first-ever open at a given `dbPath`) — `info`,
+  `"schema created"`, context `{ schema_version }`.
+- **Stale schema version** (rebuild-and-wipe path) — `warn`, `"schema version mismatch, rebuilding"`,
+  context `{ from_version, to_version }` — `warn`, not `info`, because this branch drops and recreates
+  every table, which is a lossy, unusual event worth flagging distinctly from routine startup even
+  though it's an expected, handled condition (not an error `core/db.js` throws for).
+
+These lines land in whichever log file the caller's `runWithLogger` context points at — typically
+`indexer.log` for the daemon's startup `openDb` call (`S005`) — `core/db.js` itself never opens or
+names a log file. Callers that invoke `openDb` with no enclosing `runWithLogger` context (every
+`core/db.js` unit test, and any one-off script) get `getContextLogger()`'s no-op fallback: `openDb`
+behaves identically, just without writing anywhere.
+
 ## Idempotent reindex
 
 Reindexing a single note (`mnotes reindex <title>` or a daemon-triggered re-index on file change) is:

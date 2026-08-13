@@ -1,8 +1,9 @@
-import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { openDb, getMeta, setMeta } from './db.js';
+import { openDb, getMeta, setMeta, SCHEMA_VERSION } from './db.js';
+import { getLogger, runWithLogger } from '../logger.js';
 
 const EXPECTED_TABLES = [
     'notes',
@@ -21,6 +22,17 @@ function makeTempDbPath() {
     const dir = mkdtempSync(join(tmpdir(), 'mnotes-db-test-'));
     tempDirs.push(dir);
     return join(dir, 'index.db');
+}
+
+function makeTempLogDir() {
+    const dir = mkdtempSync(join(tmpdir(), 'mnotes-db-test-log-'));
+    tempDirs.push(dir);
+    return dir;
+}
+
+function findLogLine(logFile, level) {
+    const lines = readFileSync(logFile, 'utf8').trim().split('\n');
+    return lines.find((line) => line.includes(level));
 }
 
 afterEach(() => {
@@ -351,6 +363,63 @@ describe('schema versioning', () => {
         const row = second.db.prepare('SELECT * FROM notes WHERE path = ?').get('Test.md');
         expect(row.content_hash).toBe('abc123');
         second.db.close();
+    });
+});
+
+describe('schema versioning: logging', () => {
+    it('logs at info when creating a fresh schema', async () => {
+        const logDir = makeTempLogDir();
+        const logger = getLogger('indexer', logDir);
+        const dbPath = makeTempDbPath();
+
+        const { db } = runWithLogger(logger, () => openDb(dbPath));
+        db.close();
+
+        await vi.waitFor(() => {
+            const line = readFileSync(join(logDir, 'indexer.log'), 'utf8').trim();
+            expect(line).toContain('INFO  [indexer] schema created');
+            expect(line).toContain(`schema_version=${SCHEMA_VERSION}`);
+        });
+    });
+
+    it('logs at warn when rebuilding due to a schema version mismatch', async () => {
+        const logDir = makeTempLogDir();
+        const logger = getLogger('indexer', logDir);
+        const dbPath = makeTempDbPath();
+
+        const first = openDb(dbPath);
+        first.db.prepare("UPDATE meta SET value = '0' WHERE key = 'schema_version'").run();
+        first.db.close();
+
+        const { db } = runWithLogger(logger, () => openDb(dbPath));
+        db.close();
+
+        await vi.waitFor(() => {
+            const warnLine = findLogLine(join(logDir, 'indexer.log'), 'WARN');
+            expect(warnLine).toContain('[indexer] schema version mismatch, rebuilding');
+            expect(warnLine).toContain('from_version=0');
+            expect(warnLine).toContain(`to_version=${SCHEMA_VERSION}`);
+        });
+    });
+
+    it('does not log when reopening at the current schema version', async () => {
+        const logDir = makeTempLogDir();
+        const logger = getLogger('indexer', logDir);
+        const dbPath = makeTempDbPath();
+
+        openDb(dbPath).db.close();
+
+        const { db } = runWithLogger(logger, () => openDb(dbPath));
+        db.close();
+
+        // Give any unexpected fire-and-forget write a chance to land before asserting its absence.
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(() => readFileSync(join(logDir, 'indexer.log'), 'utf8')).toThrow();
+    });
+
+    it('does not throw when opened with no logger context (unit-test-style direct call)', () => {
+        const dbPath = makeTempDbPath();
+        expect(() => openDb(dbPath).db.close()).not.toThrow();
     });
 });
 
