@@ -1,3 +1,4 @@
+#!/usr/bin/env -S node --disable-warning=ExperimentalWarning
 import { existsSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
@@ -557,5 +558,6 @@ export async function main() {
 // resolves against this same context. Guarded so `import`ing daemon.js (this test file, and
 // eventually S006's CLI) never triggers a real daemon startup as a side effect of the import.
 if (import.meta.url === `file://${process.argv[1]}`) {
+    process.title = 'mnotes-indexer';
     runWithLogger(getLogger('indexer', defaultLogDir()), () => main());
 }

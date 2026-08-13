@@ -1,3 +1,4 @@
+#!/usr/bin/env -S node --disable-warning=ExperimentalWarning
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
@@ -199,6 +200,7 @@ export async function main() {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
+    process.title = 'mnotes-mcp';
     main().catch((err) => {
         process.stderr.write(`mnotes-mcp: fatal: ${err.message}\n`);
         process.exit(1);

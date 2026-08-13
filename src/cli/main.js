@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env -S node --disable-warning=ExperimentalWarning
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { readFileSync } from 'node:fs';
@@ -360,6 +360,7 @@ function buildRealDeps() {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
+    process.title = 'mnotes';
     main(process.argv.slice(2), buildRealDeps()).then((exitCode) => {
         process.exitCode = exitCode;
     });

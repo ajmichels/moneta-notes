@@ -122,11 +122,11 @@ MCP_SERVER_NAME="mnotes"
 MCP_SERVER_SCRIPT="$REPO_ROOT/src/mcp/server.js"
 
 if ! command -v claude >/dev/null 2>&1; then
-    echo "WARNING: \`claude\` CLI not found — skipping MCP server registration. Run \`claude mcp add $MCP_SERVER_NAME -s user -- $NODE_BIN $MCP_SERVER_SCRIPT\` manually once Claude Code is installed."
+    echo "WARNING: \`claude\` CLI not found — skipping MCP server registration. Run \`claude mcp add $MCP_SERVER_NAME -s user -- $NODE_BIN --disable-warning=ExperimentalWarning $MCP_SERVER_SCRIPT\` manually once Claude Code is installed."
 elif claude mcp get "$MCP_SERVER_NAME" >/dev/null 2>&1; then
     echo "MCP server \"$MCP_SERVER_NAME\" already registered with Claude Code — leaving it untouched."
 else
-    claude mcp add "$MCP_SERVER_NAME" -s user -- "$NODE_BIN" "$MCP_SERVER_SCRIPT"
+    claude mcp add "$MCP_SERVER_NAME" -s user -- "$NODE_BIN" --disable-warning=ExperimentalWarning "$MCP_SERVER_SCRIPT"
     echo "Registered MCP server \"$MCP_SERVER_NAME\" with Claude Code (user scope)."
 fi
 
