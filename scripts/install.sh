@@ -104,10 +104,19 @@ echo "downloading embedding model, this may take a minute..."
 "$NODE_BIN" -e "
 import('$REPO_ROOT/src/indexer/embed.js').then((m) => m.embed('warm-up')).then(() => {
     console.log('embedding model ready.');
+    process.exit(0);
 });
 "
 
-# --- Step 9: register the MCP server with Claude Code -------------------------
+# --- Step 9: link the mnotes CLI onto PATH via pnpm ---------------------------
+
+if pnpm link --global -C "$REPO_ROOT"; then
+    echo "Linked mnotes/mnotes-mcp/mnotes-indexer onto PATH via pnpm."
+else
+    echo "WARNING: \`pnpm link --global\` failed — mnotes/mnotes-mcp/mnotes-indexer will not be on PATH. Retry manually with \`pnpm link --global -C $REPO_ROOT\` once resolved."
+fi
+
+# --- Step 10: register the MCP server with Claude Code -------------------------
 
 MCP_SERVER_NAME="mnotes"
 MCP_SERVER_SCRIPT="$REPO_ROOT/src/mcp/server.js"

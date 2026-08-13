@@ -10,7 +10,8 @@ Depends on: `S002-search`, `S003-notes`, `S004-grep-tags`, `S005-indexing-daemon
 Finalizes `config.toml`'s full shape (collecting every tunable flagged across S002/S003/S004/S005/S008
 into one coherent schema), and the install/uninstall flow — now covering **two** LaunchAgents (the
 indexing daemon from the README, plus S008's log-rotation agent) instead of one, plus registering (and
-deregistering) `mnotes-mcp` as an actual Claude Code MCP server rather than leaving that step manual.
+deregistering) `mnotes-mcp` as an actual Claude Code MCP server and linking (and unlinking) the `mnotes`
+CLI onto `PATH` — rather than leaving either step manual.
 
 ## `config.toml` schema
 
@@ -101,30 +102,44 @@ step, not part of this script). Steps, in order:
    step, with a visible "downloading embedding model, this may take a minute..." message — so the
    first real note write after install doesn't stall on a surprise multi-minute download in the middle
    of the daemon's first indexing pass.
-9. **Register the MCP server with Claude Code**: `which claude` — if missing, print a clear warning
-   (the same "warn and continue" posture as step 1's `rg` check — Claude Desktop users or anyone
-   registering the server by hand don't need the CLI present) naming the manual `claude mcp add`
-   command to run later. If `claude` is present, check first via `claude mcp get mnotes` — if it
-   already exists (exit `0`), leave it untouched and say so (same never-clobber posture as step 3's
-   config file); otherwise register it with
-   `claude mcp add mnotes -s user -- <node> <repo>/src/mcp/server.js` (`-s user`: available in every
-   Claude Code session on this machine, not just one project directory — matching how the daemon,
-   config, and index are already all machine-level, not project-level, resources).
+9. **Link the CLI onto `PATH`**: `pnpm link --global` (run against the repo root) — this is what
+   actually makes `package.json`'s `bin` entries (`mnotes`, `mnotes-mcp`, `mnotes-indexer`) resolve
+   as commands; a plain local `pnpm install` (this script's own prerequisite, per the top of this
+   section) never puts a package's own `bin` entries on `PATH` on its own, only `pnpm link --global`
+   or an actual global install does. If the command fails (e.g. a stale/mismatched global pnpm store
+   on this machine — a real, observed failure mode, unrelated to anything this script controls), print
+   a warning with the exact command to retry by hand and continue (same "warn and continue" posture as
+   step 1's `rg` check) rather than aborting the rest of install over it.
+10. **Register the MCP server with Claude Code**: `which claude` — if missing, print a clear warning
+    (the same "warn and continue" posture as step 1's `rg` check — Claude Desktop users or anyone
+    registering the server by hand don't need the CLI present) naming the manual `claude mcp add`
+    command to run later. If `claude` is present, check first via `claude mcp get mnotes` — if it
+    already exists (exit `0`), leave it untouched and say so (same never-clobber posture as step 3's
+    config file); otherwise register it with
+    `claude mcp add mnotes -s user -- <node> <repo>/src/mcp/server.js` (`-s user`: available in every
+    Claude Code session on this machine, not just one project directory — matching how the daemon,
+    config, and index are already all machine-level, not project-level, resources). This step invokes
+    `node`/the script path directly rather than depending on step 9's `mnotes-mcp` having successfully
+    landed on `PATH` — the two steps are independent, and a step 9 failure shouldn't cascade into
+    step 10 also failing.
 
 ## Uninstall (`scripts/uninstall.sh`)
 
 1. **Deregister the MCP server from Claude Code**: `claude mcp remove mnotes -s user`, only if
-   `claude` is present on `PATH` — tolerating "not registered" the same way step 2 below tolerates
+   `claude` is present on `PATH` — tolerating "not registered" the same way step 3 below tolerates
    "not currently loaded" for the launchd jobs, since uninstall must be safe to run even if install
    never got that far (or `claude` was never installed on this machine at all).
-2. **Bootout both launchd jobs**: `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.ajmichels.mnotes.plist`
+2. **Unlink the CLI from `PATH`**: `pnpm uninstall --global <package name>` (read from the repo's own
+   `package.json`, not hardcoded, so a future rename can't silently desync install/uninstall), only if
+   `pnpm` is present on `PATH` — tolerating "not linked" the same way step 1 tolerates "not registered."
+3. **Bootout both launchd jobs**: `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.ajmichels.mnotes.plist`
    and the log-rotation agent's equivalent.
-3. **Delete both Property List files**.
-4. **Delete Logs directory**.
-5. **Delete Application Support directory** (the SQLite index and socket file — safe to delete
+4. **Delete both Property List files**.
+5. **Delete Logs directory**.
+6. **Delete Application Support directory** (the SQLite index and socket file — safe to delete
    unconditionally since the index is a pure derived cache per S001; nothing here is a data-loss risk,
    a future reinstall's daemon startup just rebuilds it from the vault on first run).
-6. **Delete Configuration directory** (`~/.config/mnotes/`).
+7. **Delete Configuration directory** (`~/.config/mnotes/`).
 
 Never touches the vault itself — uninstalling `mnotes` removes the tool's own state, not your notes.
 
