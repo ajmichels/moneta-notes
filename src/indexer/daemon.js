@@ -1,10 +1,11 @@
 #!/usr/bin/env -S node --disable-warning=ExperimentalWarning
-import { existsSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { createServer } from 'node:net';
 import { homedir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { noteRead } from '../core/notes.js';
 import { stripMdExtension } from '../core/note-fs.js';
 import { extractTags, syncNoteTags } from '../core/tags.js';
@@ -556,8 +557,10 @@ export async function main() {
 // that establishes the AsyncLocalStorage context, before anything else runs. Every
 // getContextLogger() call anywhere in daemon.js/embed.js, for the lifetime of the process,
 // resolves against this same context. Guarded so `import`ing daemon.js (this test file, and
-// eventually S006's CLI) never triggers a real daemon startup as a side effect of the import.
-if (import.meta.url === `file://${process.argv[1]}`) {
+// S006's CLI) never triggers a real daemon startup as a side effect of the import.
+//
+// realpathSync(argv[1]), not a raw string compare — see the identical comment in cli/main.js.
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
     process.title = 'mnotes-indexer';
     runWithLogger(getLogger('indexer', defaultLogDir()), () => main());
 }

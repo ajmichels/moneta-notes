@@ -1,7 +1,7 @@
 #!/usr/bin/env -S node --disable-warning=ExperimentalWarning
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { search, explainSearch } from '../core/search.js';
 import { grep } from '../core/grep.js';
 import { tagList, tagNotes } from '../core/tags.js';
@@ -400,7 +400,11 @@ function buildRealDeps() {
     };
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+// realpathSync(argv[1]), not a raw string compare: mnotes is invoked through pnpm's global bin
+// symlink (itself pointing at a symlinked node_modules/moneta-notes -> the repo), so argv[1] is a
+// symlinked path while import.meta.url is already the resolved real path — a raw compare never
+// matches through that symlink hop, silently skipping main() entirely (no error, no output).
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
     process.title = 'mnotes';
     main(process.argv.slice(2), buildRealDeps()).then((exitCode) => {
         process.exitCode = exitCode;

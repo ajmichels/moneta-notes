@@ -1,5 +1,6 @@
 #!/usr/bin/env -S node --disable-warning=ExperimentalWarning
 import { DatabaseSync } from 'node:sqlite';
+import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -199,7 +200,8 @@ export async function main() {
     mcpLogger.info('stdio transport connected');
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+// realpathSync(argv[1]), not a raw string compare — see the identical comment in cli/main.js.
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
     process.title = 'mnotes-mcp';
     main().catch((err) => {
         process.stderr.write(`mnotes-mcp: fatal: ${err.message}\n`);
