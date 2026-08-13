@@ -6,7 +6,12 @@ import { createServer } from 'node:net';
 import { homedir } from 'node:os';
 import { noteRead } from '../core/notes.js';
 import { extractTags, syncNoteTags } from '../core/tags.js';
-import { getContextLogger } from '../logger.js';
+import { openDb } from '../core/db.js';
+import { getLogger, defaultLogDir, runWithLogger, getContextLogger } from '../logger.js';
+import {
+    chunkText as realChunkText, loadTokenizer, tokenizeWithOffsets as realTokenizeWithOffsets,
+    embed as realEmbed,
+} from './embed.js';
 
 export function enqueuePath(db, path, now = Date.now()) {
     db.prepare(`
@@ -416,4 +421,120 @@ export function createIpcServer(socketPath, vaultRoot, db, deps) {
     const server = createServer((socket) => handleIpcConnection(socket, vaultRoot, db, deps));
     server.listen(socketPath);
     return server;
+}
+
+const DEFAULT_EMBEDDING_MODEL = 'Qwen3-Embedding-0.6B';
+const DEFAULT_EMBEDDING_VERSION = 'q8-v1';
+const DEFAULT_DRAIN_INTERVAL_MS = 2000;
+
+async function resolveChunkText(providedChunkText) {
+    if (providedChunkText) {
+        return providedChunkText;
+    }
+    const tokenizer = await loadTokenizer();
+    return (body) => realChunkText(body, (text) => realTokenizeWithOffsets(tokenizer, text));
+}
+
+function defaultCreateWatcher(vaultRoot, db) {
+    const debouncer = createDebouncer((path) => {
+        const absPath = join(vaultRoot, path);
+        if (existsSync(absPath)) {
+            enqueuePath(db, path);
+        } else {
+            deleteNoteByPath(db, path);
+        }
+    });
+
+    const child = spawnFswatch(vaultRoot, (absPath) => {
+        debouncer.notify(toVaultRelativePath(vaultRoot, absPath));
+    });
+
+    return {
+        stop() {
+            debouncer.cancelAll();
+            child.kill();
+        },
+    };
+}
+
+function startDrainLoop(vaultRoot, db, deps, drainIntervalMs) {
+    if (drainIntervalMs === null) {
+        return null;
+    }
+    return setInterval(() => {
+        drainQueueOnce(vaultRoot, db, deps).catch(
+            (err) => getContextLogger().error('queue drain failed', { error_message: err.message }),
+        );
+    }, drainIntervalMs);
+}
+
+export async function startDaemon(options = {}) {
+    const {
+        vaultRoot,
+        dbPath,
+        socketPath = defaultSocketPath(),
+        embeddingModel = DEFAULT_EMBEDDING_MODEL,
+        embeddingVersion = DEFAULT_EMBEDDING_VERSION,
+        embed = realEmbed,
+        createWatcher = defaultCreateWatcher,
+        drainIntervalMs = DEFAULT_DRAIN_INTERVAL_MS,
+    } = options;
+
+    getContextLogger().info('daemon started');
+
+    // openDb's own schema-check/rebuild logging ("schema created" / "schema version mismatch,
+    // rebuilding", S001) fires from inside this call and lands in the same runWithLogger context
+    // main() established — no second log line added here (S005 "Logging").
+    const { db, reindexRequired } = openDb(dbPath);
+
+    const chunkText = await resolveChunkText(options.chunkText);
+    const deps = { chunkText, embed, embeddingModel, embeddingVersion };
+
+    watermarkCatchup(db, vaultRoot);
+    if (!reindexRequired) {
+        // A schema rebuild (reindexRequired) resets the watermark to 0, so watermarkCatchup alone
+        // already re-enqueues the entire vault — existenceCheck would find nothing to delete
+        // against a freshly-rebuilt, currently-empty notes table, so it's skipped in that case.
+        existenceCheck(db, vaultRoot);
+    }
+
+    const watcher = createWatcher(vaultRoot, db);
+    const drainTimer = startDrainLoop(vaultRoot, db, deps, drainIntervalMs);
+    if (drainTimer === null) {
+        await drainQueueOnce(vaultRoot, db, deps);
+    }
+
+    const ipcServer = createIpcServer(socketPath, vaultRoot, db, deps);
+
+    async function stop() {
+        if (drainTimer !== null) {
+            clearInterval(drainTimer);
+        }
+        watcher.stop();
+        await new Promise((resolve) => ipcServer.close(resolve));
+        db.close();
+    }
+
+    return { db, stop };
+}
+
+// The actual process entry point — everything above is built as an importable, independently
+// testable function, but a real `launchd`-managed daemon process needs something that runs on
+// `node src/indexer/daemon.js` with no caller supplying options. Real vaultRoot/dbPath resolution
+// from `config.toml` is S009's job (this plan hardcodes every other default already, per its own
+// "Explicitly out of scope" section) — main() here reads two placeholder env vars instead.
+export async function main() {
+    return startDaemon({
+        vaultRoot: process.env.MNOTES_VAULT_ROOT,
+        dbPath: process.env.MNOTES_DB_PATH,
+    });
+}
+
+// S005 "Logging": daemon.js is a runWithLogger root — this is the one place in the whole process
+// that establishes the AsyncLocalStorage context, before anything else runs. Every
+// getContextLogger() call anywhere in daemon.js/embed.js, for the lifetime of the process,
+// resolves against this same context. Guarded so `import`ing daemon.js (this test file, and
+// eventually S006's CLI) never triggers a real daemon startup as a side effect of the import.
+if (import.meta.url === `file://${process.argv[1]}`) {
+    runWithLogger(getLogger('indexer', defaultLogDir()), () => main());
 }

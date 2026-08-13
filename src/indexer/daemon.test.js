@@ -8,7 +8,7 @@ import { getLogger, runWithLogger } from '../logger.js';
 import {
     enqueuePath, dequeueNextPath, processPath, deleteNoteByPath, recordFailure, drainQueueOnce,
     watermarkCatchup, existenceCheck, createDebouncer, assertFswatchAvailable, spawnFswatch, runReindex,
-    createIpcServer, defaultSocketPath,
+    createIpcServer, defaultSocketPath, startDaemon,
 } from './daemon.js';
 
 const tempDirs = [];
@@ -662,5 +662,79 @@ describe('createIpcServer', () => {
         server.close();
         expect(messages.some((m) => m.path === 'Socketed.md')).toBe(true);
         expect(messages.find((m) => m.summary).summary).toEqual({ reindexed: 1, skipped: 0, failed: 0 });
+    });
+});
+
+describe('startDaemon', () => {
+    it('indexes the pre-existing vault on startup and serves a reindex request over IPC', async () => {
+        const vaultRoot = makeTempVault();
+        writeNote(vaultRoot, 'Preexisting.md', 'already on disk', 1000);
+        const socketDir = makeTempVault();
+        const socketPath = join(socketDir, 'daemon.sock');
+
+        const daemon = await startDaemon({
+            vaultRoot,
+            dbPath: ':memory:',
+            socketPath,
+            createWatcher: () => ({ stop() {} }), // fswatch itself is covered by Task 16's real-binary test
+            chunkText: fakeChunkText,
+            embed: fakeEmbed,
+            embeddingModel: 'test-model',
+            embeddingVersion: 'v1',
+            drainIntervalMs: null, // this test drives one drain pass manually instead of on a timer
+        });
+
+        expect(daemon.db.prepare('SELECT path FROM notes').get().path).toBe('Preexisting.md');
+
+        const messages = await new Promise((resolve, reject) => {
+            const received = [];
+            const client = createConnection(socketPath, () => {
+                client.write(`${JSON.stringify({ action: 'reindex' })}\n`);
+            });
+            let buffer = '';
+            client.on('data', (chunk) => {
+                buffer += chunk.toString('utf8');
+                let newlineIndex = buffer.indexOf('\n');
+                while (newlineIndex !== -1) {
+                    received.push(JSON.parse(buffer.slice(0, newlineIndex)));
+                    buffer = buffer.slice(newlineIndex + 1);
+                    newlineIndex = buffer.indexOf('\n');
+                }
+            });
+            client.on('end', () => resolve(received));
+            client.on('error', reject);
+        });
+
+        expect(messages.find((m) => m.summary)).toBeDefined();
+
+        await daemon.stop();
+    });
+
+    it('logs "daemon started" via the context logger before opening the DB', async () => {
+        const vaultRoot = makeTempVault();
+        const socketDir = makeTempVault();
+        const socketPath = join(socketDir, 'daemon.sock');
+        const logDir = mkdtempSync(join(tmpdir(), 'mnotes-daemon-test-log-'));
+        const logger = getLogger('indexer', logDir);
+
+        const daemon = await runWithLogger(logger, () => startDaemon({
+            vaultRoot,
+            dbPath: ':memory:',
+            socketPath,
+            createWatcher: () => ({ stop() {} }),
+            chunkText: fakeChunkText,
+            embed: fakeEmbed,
+            embeddingModel: 'test-model',
+            embeddingVersion: 'v1',
+            drainIntervalMs: null,
+        }));
+
+        await vi.waitFor(() => {
+            const line = readFileSync(join(logDir, 'indexer.log'), 'utf8').trim();
+            expect(line).toContain('INFO  [indexer] daemon started');
+        });
+
+        await daemon.stop();
+        rmSync(logDir, { recursive: true, force: true });
     });
 });
