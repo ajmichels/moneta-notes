@@ -436,7 +436,15 @@ async function resolveChunkText(providedChunkText) {
 }
 
 function defaultCreateWatcher(vaultRoot, db) {
+    let stopped = false;
+
     const debouncer = createDebouncer((path) => {
+        // fswatch's stdout can still have buffered lines in flight when child.kill() runs below,
+        // so a debounce timer can settle after stop() — this guard keeps that a no-op instead of
+        // touching a since-closed db.
+        if (stopped) {
+            return;
+        }
         const absPath = join(vaultRoot, path);
         if (existsSync(absPath)) {
             enqueuePath(db, path);
@@ -446,11 +454,14 @@ function defaultCreateWatcher(vaultRoot, db) {
     });
 
     const child = spawnFswatch(vaultRoot, (absPath) => {
-        debouncer.notify(toVaultRelativePath(vaultRoot, absPath));
+        if (!stopped) {
+            debouncer.notify(toVaultRelativePath(vaultRoot, absPath));
+        }
     });
 
     return {
         stop() {
+            stopped = true;
             debouncer.cancelAll();
             child.kill();
         },
