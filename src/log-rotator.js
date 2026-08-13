@@ -6,5 +6,7 @@ export function shouldRotate(filePath, policy) {
     }
 
     const stats = statSync(filePath);
-    return stats.size >= policy.maxSizeBytes;
+    const ageMs = Date.now() - stats.mtimeMs;
+
+    return stats.size >= policy.maxSizeBytes || ageMs >= policy.maxAgeMs;
 }

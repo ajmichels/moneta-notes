@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { shouldRotate } from './log-rotator.js';
@@ -40,5 +40,36 @@ describe('shouldRotate: size threshold', () => {
         const filePath = join(dir, 'missing.log');
 
         expect(shouldRotate(filePath, { maxSizeBytes: 1024, maxAgeMs: Infinity })).toBe(false);
+    });
+});
+
+describe('shouldRotate: age threshold', () => {
+    it('returns true for a file older than the age threshold even if small', () => {
+        const dir = makeTempDir();
+        const filePath = join(dir, 'test.log');
+        writeFileSync(filePath, 'small');
+
+        const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+        utimesSync(filePath, eightDaysAgo, eightDaysAgo);
+
+        expect(
+            shouldRotate(filePath, {
+                maxSizeBytes: 10 * 1024 * 1024,
+                maxAgeMs: 7 * 24 * 60 * 60 * 1000,
+            }),
+        ).toBe(true);
+    });
+
+    it('returns false for a small, recently modified file', () => {
+        const dir = makeTempDir();
+        const filePath = join(dir, 'test.log');
+        writeFileSync(filePath, 'small');
+
+        expect(
+            shouldRotate(filePath, {
+                maxSizeBytes: 10 * 1024 * 1024,
+                maxAgeMs: 7 * 24 * 60 * 60 * 1000,
+            }),
+        ).toBe(false);
     });
 });
