@@ -12,6 +12,15 @@ import { syncNoteTags } from '../core/tags.js';
 import { getAuditLogger } from '../logger.js';
 import { buildDefaultConfig } from '../config.js';
 
+// resolveVaultRoot()/resolveDbPath() default to loadConfig() (no argument), which reads the real
+// ~/.config/mnotes/config.toml on whatever machine the suite runs on (S009's documented behavior
+// for a real invocation). Mocking loadConfig() here keeps the "no config passed" tests below
+// hermetic — they'd otherwise pass or fail depending on the developer's own local config file.
+vi.mock('../config.js', async (importOriginal) => {
+    const actual = await importOriginal();
+    return { ...actual, loadConfig: () => actual.buildDefaultConfig() };
+});
+
 function fakeStdin(text) {
     return Readable.from([ text ]);
 }
