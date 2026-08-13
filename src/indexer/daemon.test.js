@@ -1,12 +1,14 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, utimesSync, readFileSync, mkdirSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
+import { createConnection } from 'node:net';
 import { openDb } from '../core/db.js';
 import { getLogger, runWithLogger } from '../logger.js';
 import {
     enqueuePath, dequeueNextPath, processPath, deleteNoteByPath, recordFailure, drainQueueOnce,
     watermarkCatchup, existenceCheck, createDebouncer, assertFswatchAvailable, spawnFswatch, runReindex,
+    createIpcServer, defaultSocketPath,
 } from './daemon.js';
 
 const tempDirs = [];
@@ -617,5 +619,48 @@ describe('runReindex', () => {
 
         const summaryMsg = messages.find((m) => m.summary);
         expect(summaryMsg.summary).toEqual({ reindexed: 0, skipped: 0, failed: 1 });
+    });
+});
+
+describe('defaultSocketPath', () => {
+    it('points at ~/Library/Application Support/mnotes/daemon.sock', () => {
+        expect(defaultSocketPath()).toBe(
+            join(homedir(), 'Library', 'Application Support', 'mnotes', 'daemon.sock'),
+        );
+    });
+});
+
+describe('createIpcServer', () => {
+    it('streams per-path outcomes and a final summary for a reindex request', async () => {
+        const vaultRoot = makeTempVault();
+        writeNote(vaultRoot, 'Socketed.md', 'note body', 1000);
+        const db = makeTestDb();
+        const socketDir = makeTempVault();
+        const socketPath = join(socketDir, 'daemon.sock');
+
+        const server = createIpcServer(socketPath, vaultRoot, db, { ...baseDeps(), now: 0 });
+
+        const messages = await new Promise((resolve, reject) => {
+            const received = [];
+            const client = createConnection(socketPath, () => {
+                client.write(`${JSON.stringify({ action: 'reindex' })}\n`);
+            });
+            let buffer = '';
+            client.on('data', (chunk) => {
+                buffer += chunk.toString('utf8');
+                let newlineIndex = buffer.indexOf('\n');
+                while (newlineIndex !== -1) {
+                    received.push(JSON.parse(buffer.slice(0, newlineIndex)));
+                    buffer = buffer.slice(newlineIndex + 1);
+                    newlineIndex = buffer.indexOf('\n');
+                }
+            });
+            client.on('end', () => resolve(received));
+            client.on('error', reject);
+        });
+
+        server.close();
+        expect(messages.some((m) => m.path === 'Socketed.md')).toBe(true);
+        expect(messages.find((m) => m.summary).summary).toEqual({ reindexed: 1, skipped: 0, failed: 0 });
     });
 });

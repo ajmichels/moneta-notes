@@ -1,7 +1,9 @@
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
+import { createServer } from 'node:net';
+import { homedir } from 'node:os';
 import { noteRead } from '../core/notes.js';
 import { extractTags, syncNoteTags } from '../core/tags.js';
 import { getContextLogger } from '../logger.js';
@@ -374,4 +376,44 @@ export async function runReindex(vaultRoot, db, deps, options = {}, onMessage = 
 
     getContextLogger().info('reindex complete', counts);
     onMessage({ summary: counts });
+}
+
+export function defaultSocketPath() {
+    return join(homedir(), 'Library', 'Application Support', 'mnotes', 'daemon.sock');
+}
+
+function handleIpcRequest(line, socket, vaultRoot, db, deps) {
+    const request = JSON.parse(line);
+    if (request.action !== 'reindex') {
+        socket.end(`${JSON.stringify({ error: `unknown action "${request.action}"` })}\n`);
+        return;
+    }
+    runReindex(
+        vaultRoot, db, deps, { noteTitle: request.noteTitle ?? null },
+        (msg) => socket.write(`${JSON.stringify(msg)}\n`),
+    ).then(() => socket.end());
+}
+
+function handleIpcConnection(socket, vaultRoot, db, deps) {
+    let buffer = '';
+    socket.on('data', (chunk) => {
+        buffer += chunk.toString('utf8');
+        let newlineIndex = buffer.indexOf('\n');
+        while (newlineIndex !== -1) {
+            const line = buffer.slice(0, newlineIndex);
+            buffer = buffer.slice(newlineIndex + 1);
+            newlineIndex = buffer.indexOf('\n');
+            handleIpcRequest(line, socket, vaultRoot, db, deps);
+        }
+    });
+}
+
+export function createIpcServer(socketPath, vaultRoot, db, deps) {
+    if (existsSync(socketPath)) {
+        rmSync(socketPath);
+    }
+
+    const server = createServer((socket) => handleIpcConnection(socket, vaultRoot, db, deps));
+    server.listen(socketPath);
+    return server;
 }
