@@ -14,6 +14,7 @@ import { embed as realEmbed } from '../indexer/embed.js';
 import { loadConfig } from '../config.js';
 import { computeStats, checkDaemonRunning } from './stats.js';
 import { runReindexCommand } from './reindex.js';
+import { runDaemonCommand } from './daemon.js';
 import {
     formatSearchTable, formatExplain, formatGrepTable, formatTagListTable, formatTagNotesTable,
     formatStats, formatJson,
@@ -45,6 +46,7 @@ Commands:
   append    Append content to an existing note
   rename    Rename a note
   reindex   Trigger a reindex via the indexing daemon
+  daemon    start | stop | restart the indexing daemon
   stats     Show index/daemon stats
 
 Run 'mnotes <command> --help' for command-specific flags.
@@ -62,6 +64,7 @@ const COMMAND_USAGE = {
         + '       (content is read from stdin if --content is omitted)',
     rename: 'mnotes rename <old-title> <new-title> [--hash=H]',
     reindex: 'mnotes reindex [title]',
+    daemon: 'mnotes daemon <start|stop|restart>',
     stats: 'mnotes stats [--json]',
 };
 
@@ -385,6 +388,7 @@ export async function runStats(args, deps) {
 }
 
 registerCommand('reindex', runReindexCommand);
+registerCommand('daemon', runDaemonCommand);
 registerCommand('stats', runStats);
 
 function buildRealDeps() {

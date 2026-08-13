@@ -1,7 +1,7 @@
 # S006 — CLI
 
 Status: **Approved**
-Owns: `src/cli/main.js`, `src/cli/reindex.js`, `src/cli/stats.js`
+Owns: `src/cli/main.js`, `src/cli/reindex.js`, `src/cli/daemon.js`, `src/cli/stats.js`
 Depends on: `S001-data-model`, `S002-search`, `S003-notes`, `S004-grep-tags`, `S005-indexing-daemon`,
 `S010-shared-utilities`
 Consumed by: (terminal use, `obsidian.nvim` integration)
@@ -18,7 +18,7 @@ surface.
 
 Node's built-in `util.parseArgs` — no CLI framework dependency. Subcommand routing is a small
 dispatch table keyed on `argv[2]` (`search`, `grep`, `tags`, `read`, `write`, `edit`, `append`,
-`rename`, `reindex`, `stats`), each parsing its own remaining flags via `parseArgs`. This matches the
+`rename`, `reindex`, `daemon`, `stats`), each parsing its own remaining flags via `parseArgs`. This matches the
 project's minimal-dependency, no-build-step bias — a dozen flat subcommands doesn't need a framework's
 nested-command/auto-help machinery.
 
@@ -104,6 +104,7 @@ it's already present in the raw output.
 | `mnotes append <title>` | `--hash=H`, `--content="..."` | Content from stdin if `--content` omitted. |
 | `mnotes rename <old-title> <new-title>` | `--hash=H` | |
 | `mnotes reindex [title]` | | Talks to the daemon over the S005 Unix socket; hard error if daemon isn't running. Blocks until done, streaming attempt/retry progress for a single-title reindex. |
+| `mnotes daemon <start\|stop\|restart>` | | Controls the `launchd`-managed daemon process itself (not the IPC socket) — see below. |
 | `mnotes stats` | `--json` | See below. |
 
 Every command other than `reindex`/`stats` is a thin wrapper: parse flags, call the corresponding
@@ -122,6 +123,27 @@ breakdown (`1/(k+fulltext_rank) + 1/(k+semantic_rank) = ...`). Plus pipeline-lev
 chunks/notes were over-fetched before collapsing/truncating to `limit`, and the actual FTS5 expression
 sent to `MATCH` (relevant now that `hybrid` mode passes DSL through unmodified, per S002) — this is
 the level of detail that makes "why didn't note X show up" actually answerable.
+
+### `mnotes daemon <start|stop|restart>`
+
+A thin wrapper around `launchctl`, targeting the `com.ajmichels.mnotes` LaunchAgent (S009) directly —
+distinct from `mnotes reindex`, which talks to the *already-running* daemon over its IPC socket.
+This command manages the process itself, for when the daemon is stuck, needs picking up after a config
+change, or needs to be stopped entirely:
+
+- `start` — `launchctl bootstrap gui/<uid> <plist path>`, loading the LaunchAgent (a no-op error if
+  it's already loaded).
+- `stop` — `launchctl bootout gui/<uid>/com.ajmichels.mnotes`, unloading it. Since the plist sets
+  `KeepAlive: true` (S009), a plain kill/signal would just have `launchd` immediately relaunch the
+  process — `bootout` is the only way to actually stop it until the next `start` (or the next login,
+  since `RunAtLoad` is also `true`).
+- `restart` — `launchctl kickstart -k gui/<uid>/com.ajmichels.mnotes`, killing and relaunching a
+  currently-loaded daemon in place.
+
+`launchctl`'s own stderr is surfaced directly in the error message on failure (e.g. `restart` against
+a daemon that was never started) rather than being pattern-matched into a synthesized message —
+`launchctl`'s exact wording isn't stable across macOS versions, so passing it through as-is is more
+reliable than guessing at it.
 
 ### `mnotes stats`
 

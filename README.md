@@ -86,6 +86,7 @@ moneta-notes/
 │   ├── cli/
 │   │   ├── main.js         # arg parsing, calls core/* — S006
 │   │   ├── reindex.js      # `mnotes reindex` — S005/S006
+│   │   ├── daemon.js       # `mnotes daemon start|stop|restart` — S005/S006
 │   │   ├── stats.js        # `mnotes stats` — S006
 │   │   └── *.test.js
 │   └── mcp/
