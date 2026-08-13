@@ -1,9 +1,17 @@
+import { mkdirSync } from 'node:fs';
 import { appendFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 const LEVELS = [ 'trace', 'debug', 'info', 'warn', 'error', 'fatal' ];
 
+export function defaultLogDir() {
+    return join(homedir(), 'Library', 'Logs', 'com.ajmichels.mnotes');
+}
+
 export function getLogger(component, logDir) {
+    mkdirSync(logDir, { recursive: true });
+
     const logFile = join(logDir, `${component}.log`);
     return Object.fromEntries(
         LEVELS.map(level => [ level, (msg, context) => writeLine(logFile, component, level, msg, context) ]),

@@ -1,8 +1,8 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
-import { getLogger } from './logger.js';
+import { getLogger, defaultLogDir } from './logger.js';
 
 const tempDirs = [];
 
@@ -87,5 +87,21 @@ describe('getLogger', () => {
         const logDir = makeTempLogDir();
         const logger = getLogger('indexer', logDir);
         expect(() => logger.info('msg', 'not an object')).toThrow(TypeError);
+    });
+});
+
+describe('getLogger: directory creation and defaultLogDir', () => {
+    it('creates the log directory recursively if it does not exist yet', async () => {
+        const base = makeTempLogDir();
+        const nested = join(base, 'nested', 'logs');
+        const logger = getLogger('indexer', nested);
+        await logger.info('created nested dir');
+
+        const line = readFileSync(join(nested, 'indexer.log'), 'utf8').trim();
+        expect(line).toContain('created nested dir');
+    });
+
+    it('defaultLogDir points at ~/Library/Logs/com.ajmichels.mnotes', () => {
+        expect(defaultLogDir()).toBe(join(homedir(), 'Library', 'Logs', 'com.ajmichels.mnotes'));
     });
 });
