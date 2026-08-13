@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb } from './db.js';
-import { search } from './search.js';
+import { search, explainSearch } from './search.js';
 import { getLogger, runWithLogger } from '../logger.js';
 
 function insertNote(db, { path, contentHash = 'hash', lineCount = 10, mtime = 1000 }) {
@@ -325,6 +325,59 @@ describe('search: limit validation', () => {
 
         await expect(search(db, { query: 'term', mode: 'fulltext', limit: 1 })).resolves.not.toThrow();
         await expect(search(db, { query: 'term', mode: 'fulltext', limit: 100 })).resolves.not.toThrow();
+        db.close();
+    });
+});
+
+describe('explainSearch: fulltext mode', () => {
+    it('exposes the raw bm25 score, rank, and pipeline detail', async () => {
+        const { db } = openDb(':memory:');
+        const noteId = insertNote(db, { path: 'A.md' });
+        insertFtsRow(db, noteId, 'A', 'graph graph graph');
+
+        const { results, pipeline } = await explainSearch(db, { query: 'graph', mode: 'fulltext', limit: 20 });
+
+        expect(results[0].note_title).toBe('A');
+        expect(typeof results[0].bm25_score).toBe('number');
+        expect(results[0].rank).toBe(1);
+        expect(pipeline).toEqual({ mode: 'fulltext', limit: 20, overfetchLimit: 100, fulltextExpression: 'graph' });
+        db.close();
+    });
+});
+
+describe('explainSearch: semantic mode', () => {
+    it('exposes the raw cosine distance and the winning chunk boundaries', async () => {
+        const { db } = openDb(':memory:');
+        const noteId = insertNote(db, { path: 'B.md' });
+        insertChunkWithVector(db, noteId, { seed: 0.5 });
+
+        const { results } = await explainSearch(db, {
+            query: 'x', mode: 'semantic', limit: 20,
+            embed: fakeEmbed(0.5), embeddingModel: 'test-model', embeddingVersion: 'v1',
+        });
+
+        expect(typeof results[0].cosine_distance).toBe('number');
+        expect(results[0].winning_chunk).toEqual({ char_start: 0, char_end: 100 });
+        db.close();
+    });
+});
+
+describe('explainSearch: hybrid mode', () => {
+    it('exposes the rrf formula and both source ranks', async () => {
+        const { db } = openDb(':memory:');
+        const noteId = insertNote(db, { path: 'C.md' });
+        insertFtsRow(db, noteId, 'C', 'graph');
+        insertChunkWithVector(db, noteId, { seed: 0.5 });
+
+        const { results } = await explainSearch(db, {
+            query: 'graph', mode: 'hybrid', limit: 20,
+            embed: fakeEmbed(0.5), embeddingModel: 'test-model', embeddingVersion: 'v1',
+        });
+
+        expect(results[0].fulltext_rank).toBe(1);
+        expect(results[0].semantic_rank).toBe(1);
+        expect(results[0].rrf_score).toBeCloseTo(1 / 61 + 1 / 61, 10);
+        expect(results[0].rrf_formula).toBe(`1/(60+1) + 1/(60+1) = ${results[0].rrf_score}`);
         db.close();
     });
 });

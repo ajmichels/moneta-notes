@@ -50,6 +50,7 @@ function fulltextSearch(db, query, limit) {
         noteTitle: pathToTitle(row.path),
         fileLineCount: row.file_line_count,
         mtime: row.mtime,
+        score: row.score,
         rank: index + 1,
     }));
 }
@@ -220,6 +221,123 @@ export async function search(db, options = {}) {
         const fulltextResults = fulltextSearch(db, query, limit);
         const semanticResults = await semanticSearch(db, query, limit, options);
         return toHybridOutput(mergeHybrid(fulltextResults, semanticResults, limit));
+    }
+
+    throw new Error(`search: unknown mode "${mode}"`);
+}
+
+function runSemanticQueryWithChunkDetail(db, vector, fetchCount, embeddingModel, embeddingVersion) {
+    return db.prepare(`
+        SELECT c.note_id AS note_id, c.char_start AS char_start, c.char_end AS char_end,
+               cv.distance AS distance
+        FROM chunk_vectors cv
+        JOIN chunks c ON c.id = cv.rowid
+        WHERE cv.embedding MATCH ? AND k = ${fetchCount}
+          AND c.embedding_model = ?
+          AND c.embedding_version = ?
+        ORDER BY cv.distance
+    `).all(vectorToBuffer(vector), embeddingModel, embeddingVersion);
+}
+
+function collapseToBestChunkPerNoteWithDetail(rows) {
+    const bestByNote = new Map();
+    for (const row of rows) {
+        if (!bestByNote.has(row.note_id)) {
+            bestByNote.set(row.note_id, {
+                distance: row.distance,
+                charStart: row.char_start,
+                charEnd: row.char_end,
+            });
+        }
+    }
+    return bestByNote;
+}
+
+async function semanticSearchDetail(db, query, limit, { embed, embeddingModel, embeddingVersion }) {
+    if (typeof embed !== 'function') {
+        throw new Error('search: semantic and hybrid modes require an `embed` function');
+    }
+
+    const vector = await embed(query);
+    const rawRows = runSemanticQueryWithChunkDetail(
+        db, vector, computeOverfetch(limit), embeddingModel, embeddingVersion,
+    );
+    const bestByNote = collapseToBestChunkPerNoteWithDetail(rawRows);
+    const notesById = hydrateNotes(db, [ ...bestByNote.keys() ]);
+
+    const collapsed = [ ...bestByNote.entries() ].map(([ noteId, best ]) => {
+        const note = notesById.get(noteId);
+        return {
+            noteTitle: pathToTitle(note.path),
+            fileLineCount: note.file_line_count,
+            mtime: note.mtime,
+            distance: best.distance,
+            charStart: best.charStart,
+            charEnd: best.charEnd,
+        };
+    });
+
+    collapsed.sort((a, b) => a.distance - b.distance || b.mtime - a.mtime);
+    return collapsed.map((row, index) => ({ ...row, rank: index + 1 }));
+}
+
+function formatRrfFormula(fulltextRank, semanticRank, score) {
+    const terms = [];
+    if (fulltextRank !== null) {
+        terms.push(`1/(${RRF_K}+${fulltextRank})`);
+    }
+    if (semanticRank !== null) {
+        terms.push(`1/(${RRF_K}+${semanticRank})`);
+    }
+    return `${terms.join(' + ')} = ${score}`;
+}
+
+export async function explainSearch(db, options = {}) {
+    const { query, mode = 'hybrid', limit = DEFAULT_LIMIT } = options;
+    validateQuery(query);
+    validateLimit(limit);
+
+    const pipeline = {
+        mode, limit, overfetchLimit: computeOverfetch(limit), fulltextExpression: query,
+    };
+
+    if (mode === 'fulltext') {
+        const rows = fulltextSearch(db, query, limit).slice(0, limit);
+        return {
+            results: rows.map((r) => ({
+                note_title: r.noteTitle, file_line_count: r.fileLineCount,
+                bm25_score: r.score, rank: r.rank,
+            })),
+            pipeline,
+        };
+    }
+
+    if (mode === 'semantic') {
+        const rows = (await semanticSearchDetail(db, query, limit, options)).slice(0, limit);
+        return {
+            results: rows.map((r) => ({
+                note_title: r.noteTitle, file_line_count: r.fileLineCount,
+                cosine_distance: r.distance,
+                winning_chunk: { char_start: r.charStart, char_end: r.charEnd },
+                rank: r.rank,
+            })),
+            pipeline,
+        };
+    }
+
+    if (mode === 'hybrid') {
+        const fulltextResults = fulltextSearch(db, query, limit);
+        const semanticResults = await semanticSearch(db, query, limit, options);
+        const merged = mergeHybrid(fulltextResults, semanticResults, limit);
+        return {
+            results: merged.map((r) => ({
+                note_title: r.noteTitle, file_line_count: r.fileLineCount,
+                fulltext_rank: r.fulltextRank, semantic_rank: r.semanticRank,
+                rrf_score: r.score,
+                rrf_formula: formatRrfFormula(r.fulltextRank, r.semanticRank, r.score),
+            })),
+            pipeline,
+        };
     }
 
     throw new Error(`search: unknown mode "${mode}"`);
