@@ -1,12 +1,9 @@
 import { getContextLogger } from '../logger.js';
+import { stripMdExtension as pathToTitle } from './note-fs.js';
 
 const DEFAULT_LIMIT = 20;
 const OVERFETCH_MULTIPLIER = 5;
 const OVERFETCH_CAP = 500;
-
-function pathToTitle(path) {
-    return path.replace(/\.md$/, '');
-}
 
 function computeOverfetch(limit) {
     return Math.min(limit * OVERFETCH_MULTIPLIER, OVERFETCH_CAP);

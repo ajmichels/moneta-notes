@@ -1,7 +1,9 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { join, relative, sep } from 'node:path';
+import { join } from 'node:path';
+import matter from 'gray-matter';
 import { getContextLogger } from '../logger.js';
+import { titleToPath, pathToTitle, countLines } from './note-fs.js';
 
 const DEFAULT_LINE_MATCH_CAP = 10;
 
@@ -44,7 +46,7 @@ export function grep(vaultRoot, pattern, options = {}) {
     for (const [ absPath, lineMatches ] of matchesByPath) {
         results.push({
             noteTitle: pathToTitle(vaultRoot, absPath),
-            fileLineCount: countLines(absPath),
+            fileLineCount: fileLineCount(absPath),
             lineMatches: lineMatches.slice(0, lineMatchCap),
             totalMatchCount: lineMatches.length,
         });
@@ -77,18 +79,15 @@ function parseMatches(stdout, vaultRoot, targetPath) {
     return matchesByPath;
 }
 
-function pathToTitle(vaultRoot, filePath) {
-    const rel = relative(vaultRoot, filePath).split(sep).join('/');
-    return rel.replace(/\.md$/, '');
-}
-
-function titleToPath(vaultRoot, noteTitle) {
-    return join(vaultRoot, `${noteTitle}.md`);
-}
-
-function countLines(filePath) {
-    const content = readFileSync(filePath, 'utf8');
-    return content.length === 0 ? 0 : content.split('\n').length;
+// file_line_count means the same thing everywhere it appears (search/tags/stats/read) — the
+// frontmatter-stripped body's line count, per core/note-fs.js's countLines contract — so this
+// strips frontmatter the same way core/notes.js's noteRead does before counting, rather than
+// counting raw file bytes (which would include frontmatter lines grep never actually searches
+// meaningfully as "content").
+function fileLineCount(filePath) {
+    const raw = readFileSync(filePath, 'utf8');
+    const { content: body } = matter(raw);
+    return countLines(body);
 }
 
 function runRipgrep(args, cwd) {

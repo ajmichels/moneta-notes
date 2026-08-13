@@ -167,7 +167,7 @@ describe('runGrep', () => {
 
         expect(result.exitCode).toBe(0);
         expect(result.stdout).toContain('note_title|file_line_count|line_matches');
-        expect(result.stdout).toContain('Recipe|3|L2: some hello world text');
+        expect(result.stdout).toContain('Recipe|2|L2: some hello world text');
     });
 
     it('supports --json', async () => {

@@ -1,27 +1,12 @@
-import { join, relative, dirname } from 'node:path';
+import { dirname } from 'node:path';
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, statSync } from 'node:fs';
 import matter from 'gray-matter';
 import { getContextLogger } from '../logger.js';
-
-export function titleToPath(vaultRoot, title) {
-    return join(vaultRoot, `${title}.md`);
-}
-
-export function pathToTitle(vaultRoot, filePath) {
-    return relative(vaultRoot, filePath).replace(/\.md$/, '');
-}
+import { titleToPath, countLines } from './note-fs.js';
 
 export function hashContent(content) {
     return createHash('sha1').update(content, 'utf8').digest('hex');
-}
-
-export function countLines(content) {
-    if (content === '') {
-        return 0;
-    }
-    const lines = content.split('\n');
-    return content.endsWith('\n') ? lines.length - 1 : lines.length;
 }
 
 function readRawNote(filePath, title) {

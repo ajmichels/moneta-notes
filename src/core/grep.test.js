@@ -67,9 +67,19 @@ describe('grep', () => {
 
         expect(results).toHaveLength(1);
         expect(results[0].noteTitle).toBe('Recipe');
-        expect(results[0].fileLineCount).toBe(4);
+        expect(results[0].fileLineCount).toBe(3);
         expect(results[0].lineMatches).toEqual([ { line: 2, text: 'some hello world text' } ]);
         expect(results[0].totalMatchCount).toBe(1);
+    });
+
+    it('excludes frontmatter from fileLineCount, matching core/notes.js elsewhere', () => {
+        const vaultRoot = makeTempVault({
+            'Recipe.md': '---\nid: Recipe\ntags:\n  - food\n---\nhello world\nsecond line\n',
+        });
+
+        const results = grep(vaultRoot, 'hello');
+
+        expect(results[0].fileLineCount).toBe(2);
     });
 });
 

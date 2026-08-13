@@ -5,6 +5,7 @@ import { createInterface } from 'node:readline';
 import { createServer } from 'node:net';
 import { homedir } from 'node:os';
 import { noteRead } from '../core/notes.js';
+import { stripMdExtension } from '../core/note-fs.js';
 import { extractTags, syncNoteTags } from '../core/tags.js';
 import { openDb, setMeta } from '../core/db.js';
 import { getLogger, defaultLogDir, runWithLogger, getContextLogger } from '../logger.js';
@@ -99,7 +100,7 @@ export function recordFailure(db, path, now = Date.now(), backoffSchedule = DEFA
 
 function recordAndLogFailure(db, path, err, now, backoffSchedule) {
     const { permanentlyFailed, attempts } = recordFailure(db, path, now, backoffSchedule);
-    const noteTitle = path.replace(/\.md$/, '');
+    const noteTitle = stripMdExtension(path);
 
     if (permanentlyFailed) {
         getContextLogger().error('reindex permanently failed', {
@@ -195,7 +196,7 @@ async function embedChunks(content, chunkText, embed) {
 export async function processPath(vaultRoot, db, path, deps) {
     const { chunkText, embed, embeddingModel, embeddingVersion, now = Date.now() } = deps;
     const absPath = join(vaultRoot, path);
-    const title = path.replace(/\.md$/, '');
+    const title = stripMdExtension(path);
 
     const stats = statOrNull(absPath);
     if (stats === null) {
@@ -388,8 +389,12 @@ export async function runReindex(vaultRoot, db, deps, options = {}, onMessage = 
     onMessage({ summary: counts });
 }
 
+export function defaultAppSupportDir() {
+    return join(homedir(), 'Library', 'Application Support', 'mnotes');
+}
+
 export function defaultSocketPath() {
-    return join(homedir(), 'Library', 'Application Support', 'mnotes', 'daemon.sock');
+    return join(defaultAppSupportDir(), 'daemon.sock');
 }
 
 function handleIpcRequest(line, socket, vaultRoot, db, deps) {

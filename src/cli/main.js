@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -7,11 +6,12 @@ import { readFileSync } from 'node:fs';
 import { search, explainSearch } from '../core/search.js';
 import { grep } from '../core/grep.js';
 import { tagList, tagNotes } from '../core/tags.js';
-import { noteRead, titleToPath, noteWrite, noteEdit, noteAppend, noteRename } from '../core/notes.js';
+import { noteRead, noteWrite, noteEdit, noteAppend, noteRename } from '../core/notes.js';
+import { titleToPath } from '../core/note-fs.js';
 import { logAudit, getAuditLogger, defaultLogDir } from '../logger.js';
 import { openDb } from '../core/db.js';
 import {
-    defaultSocketPath, DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_VERSION,
+    defaultSocketPath, defaultAppSupportDir, DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_VERSION,
 } from '../indexer/daemon.js';
 import { embed as realEmbed } from '../indexer/embed.js';
 import { computeStats, checkDaemonRunning } from './stats.js';
@@ -32,8 +32,7 @@ export function resolveVaultRoot(env = process.env) {
 }
 
 export function resolveDbPath(env = process.env) {
-    return env.MNOTES_DB_PATH
-        ?? join(homedir(), 'Library', 'Application Support', 'mnotes', 'index.db');
+    return env.MNOTES_DB_PATH ?? join(defaultAppSupportDir(), 'index.db');
 }
 
 const COMMANDS = {};

@@ -1,3 +1,5 @@
+import { stripMdExtension } from './note-fs.js';
+
 const INLINE_TAG_PATTERN = /(^|[^\p{L}\p{N}_])#([\p{L}\p{N}_/-]+)/gmu;
 
 export function extractTags(body, metadata = {}) {
@@ -85,7 +87,7 @@ export function tagNotes(db, tagName) {
     `).all(tagName, tagName);
 
     return rows.map(row => ({
-        noteTitle: row.path.replace(/\.md$/, ''),
+        noteTitle: stripMdExtension(row.path),
         fileLineCount: row.fileLineCount,
     }));
 }
