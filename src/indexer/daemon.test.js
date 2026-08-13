@@ -186,3 +186,49 @@ describe('processPath: content changed', () => {
         rmSync(logDir, { recursive: true, force: true });
     });
 });
+
+describe('processPath: idempotent reprocessing', () => {
+    it('produces no duplicate chunks/vectors/fts rows when run twice with no file change', async () => {
+        const vaultRoot = makeTempVault();
+        const db = makeTestDb();
+        writeNote(vaultRoot, 'Stable.md', 'a stable note body', 1000);
+
+        const first = await processPath(vaultRoot, db, 'Stable.md', baseDeps());
+        expect(first.status).toBe('reindexed');
+
+        // Force a re-check by bumping mtime without changing content — the daemon's real trigger for
+        // this path (an editor rewriting identical bytes) but exercised directly here since this test
+        // is about processPath's idempotency, not the debounce/fswatch layer that would normally cause it.
+        utimesSync(join(vaultRoot, 'Stable.md'), 2000, 2000);
+        const second = await processPath(vaultRoot, db, 'Stable.md', baseDeps());
+        expect(second.status).toBe('unchanged');
+
+        const note = db.prepare('SELECT id FROM notes WHERE path = ?').get('Stable.md');
+        const chunkCount = db.prepare('SELECT COUNT(*) AS count FROM chunks WHERE note_id = ?').get(note.id).count;
+        expect(chunkCount).toBe(1);
+
+        const vectorCount = db.prepare('SELECT COUNT(*) AS count FROM chunk_vectors').get().count;
+        expect(vectorCount).toBe(1);
+
+        const ftsCount = db.prepare("SELECT COUNT(*) AS count FROM notes_fts WHERE notes_fts MATCH 'stable'").get().count;
+        expect(ftsCount).toBe(1);
+    });
+
+    it('produces no duplicate rows when the content genuinely changes twice in a row to the same text', async () => {
+        const vaultRoot = makeTempVault();
+        const db = makeTestDb();
+        writeNote(vaultRoot, 'Repeat.md', 'first version', 1000);
+        await processPath(vaultRoot, db, 'Repeat.md', baseDeps());
+
+        writeNote(vaultRoot, 'Repeat.md', 'second version', 2000);
+        await processPath(vaultRoot, db, 'Repeat.md', baseDeps());
+
+        writeNote(vaultRoot, 'Repeat.md', 'second version', 3000); // rewritten with identical bytes
+        const result = await processPath(vaultRoot, db, 'Repeat.md', baseDeps());
+
+        expect(result.status).toBe('unchanged');
+        const note = db.prepare('SELECT id FROM notes WHERE path = ?').get('Repeat.md');
+        const chunkCount = db.prepare('SELECT COUNT(*) AS count FROM chunks WHERE note_id = ?').get(note.id).count;
+        expect(chunkCount).toBe(1);
+    });
+});
