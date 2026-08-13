@@ -74,7 +74,7 @@ export default defineConfig([
         },
     },
     {
-        files: [ '**/*.spec.js' ],
+        files: [ '**/*.test.js' ],
         rules: {
             'max-depth': [ 'warn', 3 ],
             'max-lines': 'off',
