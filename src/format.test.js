@@ -64,7 +64,10 @@ describe('formatExplain', () => {
 
     it('renders a cosine + chunk-window line for semantic mode', () => {
         const text = formatExplain({
-            results: [ { note_title: 'A', file_line_count: 10, cosine_distance: 0.01, winning_chunk: { char_start: 0, char_end: 100 }, rank: 1 } ],
+            results: [ {
+                note_title: 'A', file_line_count: 10, cosine_distance: 0.01,
+                winning_chunk: { char_start: 0, char_end: 100 }, rank: 1,
+            } ],
             pipeline: { mode: 'semantic', limit: 20, overfetchLimit: 100, fulltextExpression: 'x' },
         });
         expect(text).toContain('1 | A | 10 | cosine=0.01 | chunk[0:100]');
@@ -72,7 +75,10 @@ describe('formatExplain', () => {
 
     it('renders the rrf formula for hybrid mode', () => {
         const text = formatExplain({
-            results: [ { note_title: 'A', file_line_count: 10, fulltext_rank: 1, semantic_rank: null, rrf_score: 0.0164, rrf_formula: '1/(60+1) = 0.0164' } ],
+            results: [ {
+                note_title: 'A', file_line_count: 10, fulltext_rank: 1, semantic_rank: null,
+                rrf_score: 0.0164, rrf_formula: '1/(60+1) = 0.0164',
+            } ],
             pipeline: { mode: 'hybrid', limit: 20, overfetchLimit: 100, fulltextExpression: 'x' },
         });
         expect(text).toContain('1 | A | 10 | fulltext_rank=1 | semantic_rank=- | rrf=1/(60+1) = 0.0164');
