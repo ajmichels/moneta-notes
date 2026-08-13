@@ -166,6 +166,19 @@ describe('noteWrite (create)', () => {
         expect(onDisk.metadata).toEqual({ id: '2026-W32', tags: [ 'weekly' ] });
     });
 
+    it('serializes array metadata in expanded block form, never collapsed flow form', () => {
+        const vaultRoot = makeTempVault();
+
+        noteWrite(vaultRoot, 'Expanded Arrays', {
+            metadata: { tags: [ 'weekly', 'project' ] },
+            content: 'body',
+        });
+
+        const raw = readFileSync(titleToPath(vaultRoot, 'Expanded Arrays'), 'utf8');
+        expect(raw).toContain('tags:\n  - weekly\n  - project\n');
+        expect(raw).not.toMatch(/tags:\s*\[/);
+    });
+
     it('logs a debug line via the context logger when a caller-supplied id is overwritten', async () => {
         const vaultRoot = makeTempVault();
         const logDir = mkdtempSync(join(tmpdir(), 'mnotes-notes-test-log-'));
