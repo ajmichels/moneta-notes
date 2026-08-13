@@ -428,8 +428,8 @@ export function createIpcServer(socketPath, vaultRoot, db, deps) {
     return server;
 }
 
-const DEFAULT_EMBEDDING_MODEL = 'Qwen3-Embedding-0.6B';
-const DEFAULT_EMBEDDING_VERSION = 'q8-v1';
+export const DEFAULT_EMBEDDING_MODEL = 'Qwen3-Embedding-0.6B';
+export const DEFAULT_EMBEDDING_VERSION = 'q8-v1';
 const DEFAULT_DRAIN_INTERVAL_MS = 2000;
 
 async function resolveChunkText(providedChunkText) {

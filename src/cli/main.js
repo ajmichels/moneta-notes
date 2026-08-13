@@ -10,7 +10,9 @@ import { tagList, tagNotes } from '../core/tags.js';
 import { noteRead, titleToPath, noteWrite, noteEdit, noteAppend, noteRename } from '../core/notes.js';
 import { logAudit, getAuditLogger, defaultLogDir } from '../logger.js';
 import { openDb } from '../core/db.js';
-import { defaultSocketPath } from '../indexer/daemon.js';
+import {
+    defaultSocketPath, DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_VERSION,
+} from '../indexer/daemon.js';
 import { embed as realEmbed } from '../indexer/embed.js';
 import { computeStats, checkDaemonRunning } from './stats.js';
 import { runReindexCommand } from './reindex.js';
@@ -349,12 +351,6 @@ export async function runStats(args, deps) {
 
 registerCommand('reindex', runReindexCommand);
 registerCommand('stats', runStats);
-
-// Must match indexer/daemon.js's own DEFAULT_EMBEDDING_MODEL/VERSION (S005) — neither is exported
-// from that module, so this is a deliberate, flagged duplication pending S009's config.js, which
-// will supply both from one place.
-const DEFAULT_EMBEDDING_MODEL = 'Qwen3-Embedding-0.6B';
-const DEFAULT_EMBEDDING_VERSION = 'q8-v1';
 
 function buildRealDeps() {
     const vaultRoot = resolveVaultRoot();
