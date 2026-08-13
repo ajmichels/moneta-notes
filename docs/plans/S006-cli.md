@@ -102,6 +102,15 @@ explicitly flagged, additive amendments above.
   required `reason<string>`. Mutating commands (`write`/`edit`/`append`/`rename`) are still audited via
   `logAudit` with a fixed `source: 'cli'` and `reason: null` (enforced by `logAudit`'s own validation,
   S008 Task 4).
+- **Logging** (S008, S006 "Logging"): the `logAudit` calls in Tasks 9–12 are the CLI's *only* use of
+  `src/logger.js` — `dispatch` (Task 1) never wraps command execution in a `runWithLogger` context, and
+  nothing in this plan calls `runWithLogger` anywhere, unlike the daemon (S005) and MCP server (S007).
+  This means `getContextLogger()` call sites inside `core/search.js`/`core/grep.js`/`core/notes.js`
+  (S002's malformed-query `warn`, S004's ripgrep-not-found `warn`, S003's caller-supplied-`id`
+  `debug`) silently resolve to the no-op logger for every CLI invocation — read or write — since there
+  is no enclosing context to resolve to. `search`/`grep`/`tags`/`read` (Tasks 4, 6, 7, 8) add no
+  logging of their own. `reindex`/`stats` (Tasks 14, 15) add no CLI-side logging either — they talk to
+  the daemon over its own socket (S005), whose `indexer.log` already covers the actual reindex work.
 - **`cli/` must not duplicate `core/` logic.** Every handler's job is parse flags → call one `core/`
   function → format. If a conditional or query would need to exist in both `cli/` and a future `mcp/`
   tool handler, it belongs in `core/` or in the shared `src/format.js`, never copy-pasted.
@@ -1492,6 +1501,7 @@ git commit -m "feat(cli): add read command with default/--raw/--json output mode
 Add to `src/cli/main.test.js`:
 
 ```js
+import { vi } from 'vitest';
 import { Readable } from 'node:stream';
 import { readFileSync as readAuditLog } from 'node:fs';
 import { getAuditLogger } from '../logger.js';
@@ -1515,8 +1525,17 @@ describe('runWrite', () => {
         expect(result.exitCode).toBe(0);
         expect(JSON.parse(result.stdout).title).toBe('New Note');
 
-        const auditLine = JSON.parse(readAuditLog(join(logDir, 'audit.log'), 'utf8').trim());
-        expect(auditLine).toEqual(expect.objectContaining({ tool: 'write', source: 'cli', outcome: 'success' }));
+        // logAudit's underlying write is fire-and-forget (never awaited by runWrite, same as every
+        // other getContextLogger/logAudit call site in this codebase) — vi.waitFor polls for it to
+        // land, mirroring src/core/search.test.js's and src/core/notes.test.js's own logging tests.
+        await vi.waitFor(() => {
+            const line = readAuditLog(join(logDir, 'audit.log'), 'utf8').trim();
+            expect(line).toContain('INFO  [audit] write');
+            expect(line).toContain('note_title="New Note"');
+            expect(line).toContain('source=cli');
+            expect(line).toContain('outcome=success');
+            expect(line).not.toContain('reason=');
+        });
     });
 
     it('reads content from stdin when --content is omitted', async () => {
@@ -1543,9 +1562,16 @@ describe('runWrite', () => {
         );
 
         expect(result.exitCode).toBe(1);
-        const lines = readAuditLog(join(logDir, 'audit.log'), 'utf8').trim().split('\n');
-        const lastLine = JSON.parse(lines[lines.length - 1]);
-        expect(lastLine).toEqual(expect.objectContaining({ tool: 'write', outcome: 'error' }));
+
+        await vi.waitFor(() => {
+            const lines = readAuditLog(join(logDir, 'audit.log'), 'utf8').trim().split('\n');
+            const lastLine = lines[lines.length - 1];
+            expect(lastLine).toContain('INFO  [audit] write');
+            expect(lastLine).toContain('note_title="Existing"');
+            expect(lastLine).toContain('source=cli');
+            expect(lastLine).toContain('outcome=error');
+            expect(lastLine).toMatch(/error_message=".*hash mismatch.*"/i);
+        });
     });
 
     it('rejects invalid --metadata JSON with a descriptive error', async () => {
@@ -1558,6 +1584,10 @@ describe('runWrite', () => {
     });
 });
 ```
+
+Add `vi` to `src/cli/main.test.js`'s top-level `vitest` import (alongside `describe, it, expect` from
+Task 1) — the rest of the imports above (`Readable`, `readFileSync as readAuditLog`, `getAuditLogger`)
+are new for this task.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -1653,9 +1683,10 @@ Add to `src/cli/main.test.js`:
 import { runEdit } from './main.js';
 
 describe('runEdit', () => {
-    it('applies a surgical replace and logs success', async () => {
+    it('applies a surgical replace and logs a success audit entry', async () => {
         const vaultRoot = makeTempVault();
-        const auditLogger = getAuditLogger(makeTempVault());
+        const logDir = makeTempVault();
+        const auditLogger = getAuditLogger(logDir);
         const created = await runWrite([ 'Editable', '--content=the quick fox' ], { vaultRoot, auditLogger });
         const hash = JSON.parse(created.stdout).hash;
 
@@ -1666,11 +1697,21 @@ describe('runEdit', () => {
 
         expect(result.exitCode).toBe(0);
         expect(JSON.parse(result.stdout).title).toBe('Editable');
+
+        await vi.waitFor(() => {
+            const lines = readAuditLog(join(logDir, 'audit.log'), 'utf8').trim().split('\n');
+            const lastLine = lines[lines.length - 1];
+            expect(lastLine).toContain('INFO  [audit] edit');
+            expect(lastLine).toContain('note_title="Editable"');
+            expect(lastLine).toContain('source=cli');
+            expect(lastLine).toContain('outcome=success');
+        });
     });
 
-    it('propagates an ambiguous-match error via dispatch', async () => {
+    it('propagates an ambiguous-match error via dispatch and logs an error audit entry', async () => {
         const vaultRoot = makeTempVault();
-        const auditLogger = getAuditLogger(makeTempVault());
+        const logDir = makeTempVault();
+        const auditLogger = getAuditLogger(logDir);
         const created = await runWrite([ 'Ambiguous', '--content=foo bar foo' ], { vaultRoot, auditLogger });
         const hash = JSON.parse(created.stdout).hash;
 
@@ -1681,6 +1722,15 @@ describe('runEdit', () => {
 
         expect(result.exitCode).toBe(1);
         expect(result.stderr).toMatch(/ambiguous|matches \d+ times/i);
+
+        await vi.waitFor(() => {
+            const lines = readAuditLog(join(logDir, 'audit.log'), 'utf8').trim().split('\n');
+            const lastLine = lines[lines.length - 1];
+            expect(lastLine).toContain('INFO  [audit] edit');
+            expect(lastLine).toContain('note_title="Ambiguous"');
+            expect(lastLine).toContain('outcome=error');
+            expect(lastLine).toMatch(/error_message=".*ambiguous.*"/i);
+        });
     });
 });
 ```
@@ -1750,8 +1800,9 @@ git commit -m "feat(cli): add edit command"
 
 **Interfaces:**
 - Consumes: `noteAppend` from `core/notes.js` (S003, note the positional `hash` argument — a different
-  shape from `noteWrite`/`noteEdit`'s options object), `readStdinContent` (Task 9).
-- Produces: `runAppend(args, deps) -> Promise<{...}>`, registered as `COMMANDS.append`.
+  shape from `noteWrite`/`noteEdit`'s options object), `readStdinContent` (Task 9), `logAudit` (S008).
+- Produces: `runAppend(args, deps) -> Promise<{...}>`, registered as `COMMANDS.append`. Same
+  success/error `logAudit` pattern as `write`/`edit` (`tool: 'append'`).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1761,9 +1812,10 @@ Add to `src/cli/main.test.js`:
 import { runAppend } from './main.js';
 
 describe('runAppend', () => {
-    it('appends --content to the end of the body', async () => {
+    it('appends --content to the end of the body and logs a success audit entry', async () => {
         const vaultRoot = makeTempVault();
-        const auditLogger = getAuditLogger(makeTempVault());
+        const logDir = makeTempVault();
+        const auditLogger = getAuditLogger(logDir);
         const created = await runWrite([ 'Appendable', '--content=first line' ], { vaultRoot, auditLogger });
         const hash = JSON.parse(created.stdout).hash;
 
@@ -1775,6 +1827,15 @@ describe('runAppend', () => {
         expect(result.exitCode).toBe(0);
         const read = await runRead([ 'Appendable' ], { vaultRoot });
         expect(read.stdout).toBe('first line\nsecond line\n');
+
+        await vi.waitFor(() => {
+            const lines = readAuditLog(join(logDir, 'audit.log'), 'utf8').trim().split('\n');
+            const lastLine = lines[lines.length - 1];
+            expect(lastLine).toContain('INFO  [audit] append');
+            expect(lastLine).toContain('note_title="Appendable"');
+            expect(lastLine).toContain('source=cli');
+            expect(lastLine).toContain('outcome=success');
+        });
     });
 
     it('reads content from stdin when --content is omitted', async () => {
@@ -1875,14 +1936,22 @@ describe('runRename', () => {
         expect(result.exitCode).toBe(0);
         expect(JSON.parse(result.stdout).title).toBe('New Name');
 
-        const lines = readAuditLog(join(logDir, 'audit.log'), 'utf8').trim().split('\n');
-        const lastLine = JSON.parse(lines[lines.length - 1]);
-        expect(lastLine.note_title).toBe('New Name');
+        // Audit entry is logged against the *new* title, per this task's "Interfaces" note above —
+        // not the old one, even though the command's first positional was 'Old Name'.
+        await vi.waitFor(() => {
+            const lines = readAuditLog(join(logDir, 'audit.log'), 'utf8').trim().split('\n');
+            const lastLine = lines[lines.length - 1];
+            expect(lastLine).toContain('INFO  [audit] rename');
+            expect(lastLine).toContain('note_title="New Name"');
+            expect(lastLine).toContain('source=cli');
+            expect(lastLine).toContain('outcome=success');
+        });
     });
 
-    it('propagates a target-exists error via dispatch, with no force override', async () => {
+    it('propagates a target-exists error via dispatch, with no force override, and logs an error audit entry', async () => {
         const vaultRoot = makeTempVault();
-        const auditLogger = getAuditLogger(makeTempVault());
+        const logDir = makeTempVault();
+        const auditLogger = getAuditLogger(logDir);
         const source = await runWrite([ 'Source', '--content=a' ], { vaultRoot, auditLogger });
         await runWrite([ 'Target', '--content=b' ], { vaultRoot, auditLogger });
         const hash = JSON.parse(source.stdout).hash;
@@ -1891,6 +1960,15 @@ describe('runRename', () => {
 
         expect(result.exitCode).toBe(1);
         expect(result.stderr).toMatch(/already exists/i);
+
+        await vi.waitFor(() => {
+            const lines = readAuditLog(join(logDir, 'audit.log'), 'utf8').trim().split('\n');
+            const lastLine = lines[lines.length - 1];
+            expect(lastLine).toContain('INFO  [audit] rename');
+            expect(lastLine).toContain('note_title="Target"');
+            expect(lastLine).toContain('outcome=error');
+            expect(lastLine).toMatch(/error_message=".*already exists.*"/i);
+        });
     });
 });
 ```
@@ -2570,6 +2648,14 @@ git commit -m "feat(cli): wire reindex and stats commands, build real dependency
   tag counts, average length, embedding model/version, pending-re-embedding count, index size, last
   reindex time, daemon status, queue depth). The "no `reason` flag" rule and CLI mutations still being
   audited with `source: 'cli'` are covered in every mutating command's task (9, 10, 11, 12).
+- **Logging** (S008, S006 "Logging"): each of `write`/`edit`/`append`/`rename` (Tasks 9–12) has both a
+  success-path and an error-path test asserting on the actual `audit.log` line format produced by
+  `src/logger.js`'s plain-text `writeLine` (`toContain`/`toMatch` against the real
+  `TIMESTAMP LEVEL [component] msg key=value ...` shape, via `vi.waitFor` since `logAudit`'s write is
+  fire-and-forget and never awaited by any handler) — not `JSON.parse`, which this plan's tests
+  incorrectly assumed in an earlier draft before `src/logger.js` was actually implemented. Confirmed no
+  task in this plan calls `runWithLogger` anywhere; `search`/`grep`/`tags`/`read`/`reindex`/`stats` add
+  no logging at all, matching S006's "Logging" section precisely.
 - **Two flagged amendments to earlier plans, not literally "owned" by S006's file list** (Tasks 3 and
   13) — surfaced prominently in the Architecture section above, repeated here for visibility: (1)
   `core/search.js` gains an additive `explainSearch` export because S002's `search()` has no seam for
