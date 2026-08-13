@@ -759,4 +759,45 @@ describe('startDaemon', () => {
         await daemon.stop();
         rmSync(logDir, { recursive: true, force: true });
     });
+
+    it('does not start an overlapping drain pass while one is still embedding', async () => {
+        const vaultRoot = makeTempVault();
+        writeNote(vaultRoot, 'Slow.md', 'content', 1000);
+        const socketDir = makeTempVault();
+        const socketPath = join(socketDir, 'daemon.sock');
+
+        let embedCalls = 0;
+        let releaseEmbed;
+        const gate = new Promise((resolve) => { releaseEmbed = resolve; });
+        const slowEmbed = async (text) => {
+            embedCalls += 1;
+            await gate;
+            return fakeEmbed(text);
+        };
+
+        const daemon = await startDaemon({
+            vaultRoot,
+            dbPath: ':memory:',
+            socketPath,
+            createWatcher: () => ({ stop() {} }),
+            chunkText: fakeChunkText,
+            embed: slowEmbed,
+            embeddingModel: 'test-model',
+            embeddingVersion: 'v1',
+            // Fires far more often than the gated embed call above resolves, so a working
+            // drain loop must skip these ticks rather than starting a second concurrent pass.
+            drainIntervalMs: 5,
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(embedCalls).toBe(1);
+
+        releaseEmbed();
+        await vi.waitFor(() => {
+            expect(daemon.db.prepare('SELECT COUNT(*) c FROM index_queue').get().c).toBe(0);
+        });
+        expect(embedCalls).toBe(1);
+
+        await daemon.stop();
+    });
 });

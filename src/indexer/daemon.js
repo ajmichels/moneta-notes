@@ -485,10 +485,20 @@ function startDrainLoop(vaultRoot, db, deps, drainIntervalMs) {
     if (drainIntervalMs === null) {
         return null;
     }
+    // A single drainQueueOnce pass can outlast drainIntervalMs by a lot (e.g. draining a large
+    // initial backlog while each note takes hundreds of ms to embed). Without this guard,
+    // setInterval fires a new overlapping pass anyway, and since a queued path isn't deleted from
+    // index_queue until its embed finishes, every overlapping pass re-dequeues and re-embeds the
+    // same still-queued note before any of them get a chance to delete it.
+    let draining = false;
     return setInterval(() => {
-        drainQueueOnce(vaultRoot, db, deps).catch(
-            (err) => getContextLogger().error('queue drain failed', { error_message: err.message }),
-        );
+        if (draining) {
+            return;
+        }
+        draining = true;
+        drainQueueOnce(vaultRoot, db, deps)
+            .catch((err) => getContextLogger().error('queue drain failed', { error_message: err.message }))
+            .finally(() => { draining = false; });
     }, drainIntervalMs);
 }
 
