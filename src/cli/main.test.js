@@ -1,9 +1,9 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import {
-    dispatch, resolveVaultRoot, resolveDbPath, registerCommand, runSearch, runGrep, runTags,
+    dispatch, resolveVaultRoot, resolveDbPath, registerCommand, runSearch, runGrep, runTags, runRead,
 } from './main.js';
 import { openDb } from '../core/db.js';
 import { syncNoteTags } from '../core/tags.js';
@@ -200,5 +200,64 @@ describe('runTags', () => {
         const result = await runTags([ 'bogus' ], {});
         expect(result.exitCode).toBe(1);
         expect(result.stderr).toMatch(/unknown tags subcommand "bogus"/);
+    });
+});
+
+function writeRawNote(vaultRoot, relPath, raw) {
+    const filePath = join(vaultRoot, relPath);
+    mkdirSync(dirname(filePath), { recursive: true });
+    writeFileSync(filePath, raw, 'utf8');
+}
+
+describe('runRead', () => {
+    it('default mode: body on stdout, parsed metadata JSON on stderr', async () => {
+        const vaultRoot = makeTempVault();
+        writeRawNote(vaultRoot, 'A.md', '---\nid: A\ntags:\n  - x\n---\nbody text');
+
+        const result = await runRead([ 'A' ], { vaultRoot });
+
+        expect(result.stdout).toBe('body text\n');
+        expect(JSON.parse(result.stderr)).toEqual({ id: 'A', tags: [ 'x' ] });
+        expect(result.exitCode).toBe(0);
+    });
+
+    it('--raw: exact file bytes, nothing on stderr', async () => {
+        const vaultRoot = makeTempVault();
+        const raw = '---\nid: A\n---\nbody text\n';
+        writeRawNote(vaultRoot, 'A.md', raw);
+
+        const result = await runRead([ 'A', '--raw' ], { vaultRoot });
+
+        expect(result.stdout).toBe(raw);
+        expect(result.stderr).toBe('');
+    });
+
+    it('--json: full structured result including content_hash', async () => {
+        const vaultRoot = makeTempVault();
+        writeRawNote(vaultRoot, 'A.md', 'body text');
+
+        const result = await runRead([ 'A', '--json' ], { vaultRoot });
+
+        const parsed = JSON.parse(result.stdout);
+        expect(parsed.title).toBe('A');
+        expect(typeof parsed.content_hash).toBe('string');
+        expect(result.stderr).toBe('');
+    });
+
+    it('--start/--end window the body', async () => {
+        const vaultRoot = makeTempVault();
+        writeRawNote(vaultRoot, 'A.md', 'l1\nl2\nl3\n');
+
+        const result = await runRead([ 'A', '--start=2', '--end=3' ], { vaultRoot });
+
+        expect(result.stdout).toBe('l2\nl3\n');
+    });
+
+    it('--raw on a missing note produces a "Note not found" error, not a raw ENOENT', async () => {
+        const vaultRoot = makeTempVault();
+        const result = await dispatch([ 'read', 'Ghost', '--raw' ], { vaultRoot });
+
+        expect(result.exitCode).toBe(1);
+        expect(result.stderr).toMatch(/Note not found: "Ghost"/);
     });
 });

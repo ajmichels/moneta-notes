@@ -3,9 +3,11 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { readFileSync } from 'node:fs';
 import { search, explainSearch } from '../core/search.js';
 import { grep } from '../core/grep.js';
 import { tagList, tagNotes } from '../core/tags.js';
+import { noteRead, titleToPath } from '../core/notes.js';
 import {
     formatSearchTable, formatExplain, formatGrepTable, formatTagListTable, formatTagNotesTable, formatJson,
 } from '../format.js';
@@ -158,6 +160,52 @@ export async function runTags(args, deps) {
 }
 
 registerCommand('tags', runTags);
+
+function readRawNoteBytes(vaultRoot, title) {
+    const filePath = titleToPath(vaultRoot, title);
+    try {
+        return readFileSync(filePath, 'utf8');
+    } catch (err) {
+        if (err.code === 'ENOENT') {
+            throw new Error(`Note not found: "${title}"`, { cause: err });
+        }
+        throw err;
+    }
+}
+
+export async function runRead(args, deps) {
+    const { values, positionals } = parseArgs({
+        args,
+        allowPositionals: true,
+        options: {
+            start: { type: 'string' },
+            end: { type: 'string' },
+            raw: { type: 'boolean', default: false },
+            json: { type: 'boolean', default: false },
+        },
+    });
+    const title = positionals[0];
+
+    if (values.raw) {
+        return { stdout: readRawNoteBytes(deps.vaultRoot, title), stderr: '', exitCode: 0 };
+    }
+
+    const startLine = values.start !== undefined ? Number(values.start) : undefined;
+    const endLine = values.end !== undefined ? Number(values.end) : undefined;
+    const result = noteRead(deps.vaultRoot, title, { startLine, endLine });
+
+    if (values.json) {
+        return { stdout: formatJson(result), stderr: '', exitCode: 0 };
+    }
+
+    return {
+        stdout: result.content.length > 0 ? `${result.content}\n` : '',
+        stderr: formatJson(result.metadata),
+        exitCode: 0,
+    };
+}
+
+registerCommand('read', runRead);
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
     main().then((exitCode) => {
