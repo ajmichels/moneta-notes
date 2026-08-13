@@ -4,7 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb } from '../core/db.js';
 import { getLogger, runWithLogger } from '../logger.js';
-import { enqueuePath, dequeueNextPath, processPath, deleteNoteByPath, recordFailure } from './daemon.js';
+import {
+    enqueuePath, dequeueNextPath, processPath, deleteNoteByPath, recordFailure, drainQueueOnce,
+} from './daemon.js';
 
 const tempDirs = [];
 
@@ -325,5 +327,70 @@ describe('recordFailure', () => {
     it('is a safe no-op for a path with no matching queue row', () => {
         const db = makeTestDb();
         expect(recordFailure(db, 'NotQueued.md', 0)).toEqual({ permanentlyFailed: false, attempts: 0 });
+    });
+});
+
+describe('drainQueueOnce', () => {
+    it('processes every eligible path once, removing successes from the queue', async () => {
+        const vaultRoot = makeTempVault();
+        const db = makeTestDb();
+        writeNote(vaultRoot, 'A.md', 'note a', 1000);
+        writeNote(vaultRoot, 'B.md', 'note b', 1000);
+        enqueuePath(db, 'A.md', 0);
+        enqueuePath(db, 'B.md', 0);
+
+        const summary = await drainQueueOnce(vaultRoot, db, { ...baseDeps(), now: 0 });
+
+        expect(summary).toEqual({ reindexed: 2, skipped: 0, failed: 0 });
+        expect(db.prepare('SELECT COUNT(*) AS count FROM index_queue').get().count).toBe(0);
+    });
+
+    it('logs a warn per attempt and an error line via the context logger on permanent failure', async () => {
+        const vaultRoot = makeTempVault();
+        const db = makeTestDb();
+        const logDir = mkdtempSync(join(tmpdir(), 'mnotes-daemon-test-log-'));
+        const logger = getLogger('indexer', logDir);
+        writeNote(vaultRoot, 'Broken.md', 'body', 1000);
+        enqueuePath(db, 'Broken.md', 0);
+        const brokenDeps = {
+            ...baseDeps(),
+            embed: async () => { throw new Error('embedding failed'); },
+            now: 0,
+        };
+
+        // Exhaust all 4 attempts across 4 drain passes (each pass processes eligible rows once;
+        // backoff means a failed row isn't eligible again until its next_attempt_at, so this test
+        // forces next_attempt_at back to 0 between passes to reach exhaustion deterministically).
+        await runWithLogger(logger, async () => {
+            for (let i = 0; i < 4; i += 1) {
+                db.prepare('UPDATE index_queue SET next_attempt_at = 0').run();
+                await drainQueueOnce(vaultRoot, db, brokenDeps);
+            }
+        });
+
+        expect(db.prepare('SELECT * FROM index_queue WHERE path = ?').get('Broken.md')).toBeUndefined();
+        await vi.waitFor(() => {
+            const lines = readFileSync(join(logDir, 'indexer.log'), 'utf8').trim().split('\n');
+            const warnLines = lines.filter((line) => line.includes('WARN  [indexer] reindex attempt failed'));
+            const errorLines = lines.filter((line) => line.includes('ERROR [indexer] reindex permanently failed'));
+            expect(warnLines.length).toBe(3);
+            expect(warnLines[0]).toContain('note_title="Broken"');
+            expect(warnLines[0]).toContain('attempt=1');
+            expect(warnLines[0]).toContain('error_message="embedding failed"');
+            expect(errorLines).toHaveLength(1);
+            expect(errorLines[0]).toContain('note_title="Broken"');
+            expect(errorLines[0]).toContain('attempts=4');
+            expect(errorLines[0]).toContain('error_message="embedding failed"');
+        });
+        rmSync(logDir, { recursive: true, force: true });
+    });
+
+    it('returns zero counts when the queue is empty', async () => {
+        const vaultRoot = makeTempVault();
+        const db = makeTestDb();
+
+        const summary = await drainQueueOnce(vaultRoot, db, baseDeps());
+
+        expect(summary).toEqual({ reindexed: 0, skipped: 0, failed: 0 });
     });
 });

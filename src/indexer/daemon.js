@@ -88,6 +88,56 @@ export function recordFailure(db, path, now = Date.now(), backoffSchedule = DEFA
     return { permanentlyFailed: false, attempts };
 }
 
+function recordAndLogFailure(db, path, err, now, backoffSchedule) {
+    const { permanentlyFailed, attempts } = recordFailure(db, path, now, backoffSchedule);
+    const noteTitle = path.replace(/\.md$/, '');
+
+    if (permanentlyFailed) {
+        getContextLogger().error('reindex permanently failed', {
+            note_title: noteTitle,
+            attempts,
+            error_message: err.message,
+        });
+    } else {
+        const row = db.prepare('SELECT next_attempt_at FROM index_queue WHERE path = ?').get(path);
+        getContextLogger().warn('reindex attempt failed', {
+            note_title: noteTitle,
+            attempt: attempts,
+            next_attempt_at: row.next_attempt_at,
+            error_message: err.message,
+        });
+    }
+
+    return { permanentlyFailed, attempts };
+}
+
+async function processQueuedPath(vaultRoot, db, path, deps, now) {
+    try {
+        const result = await processPath(vaultRoot, db, path, deps);
+        db.prepare('DELETE FROM index_queue WHERE path = ?').run(path);
+        return result.status === 'reindexed' ? 'reindexed' : 'skipped';
+    } catch (err) {
+        const { permanentlyFailed } = recordAndLogFailure(db, path, err, now, deps.backoffSchedule);
+        return permanentlyFailed ? 'failed' : 'retry';
+    }
+}
+
+export async function drainQueueOnce(vaultRoot, db, deps) {
+    const { now = Date.now() } = deps;
+    const counts = { reindexed: 0, skipped: 0, failed: 0 };
+
+    let path = dequeueNextPath(db, now);
+    while (path !== null) {
+        const outcome = await processQueuedPath(vaultRoot, db, path, deps, now);
+        if (outcome !== 'retry') {
+            counts[outcome] += 1;
+        }
+        path = dequeueNextPath(db, now);
+    }
+
+    return counts;
+}
+
 export function deleteNoteByPath(db, path) {
     const note = db.prepare('SELECT id FROM notes WHERE path = ?').get(path);
     if (!note) {
