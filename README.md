@@ -25,6 +25,17 @@ project does; if anything here conflicts with a spec, the spec wins.
 
 ---
 
+## Documentation
+
+| Guide | Covers |
+|---|---|
+| [Installation](docs/installation.md) | Prerequisites, running `scripts/install.sh`, what it creates, verifying the install |
+| [Usage](docs/usage.md) | The full `mnotes` CLI command reference plus the MCP tool surface |
+| [Process Management](docs/process-management.md) | Starting/stopping/restarting the indexing daemon, log locations, troubleshooting |
+| [Uninstallation](docs/uninstallation.md) | Running `scripts/uninstall.sh`, what it removes, what it leaves alone |
+
+---
+
 ## Specs
 
 | Spec | Covers |

@@ -14,6 +14,26 @@ it, not *what* to build.
 - **Once a plan's spec is implemented and verified, delete the plan file.** Keeping it around past
   that point only invites drift between plan and reality.
 
+## `docs/*.md` — user-facing guides
+
+`docs/installation.md`, `docs/usage.md`, `docs/process-management.md`, and `docs/uninstallation.md` are
+living documentation too, same rule as `docs/specs/`: keep them in sync with actual behavior, don't let
+them drift. They're linked from the README's "Documentation" table so they're the first thing a reader
+on GitHub reaches. Update the relevant page(s), in the same change, whenever you touch:
+
+- **`scripts/install.sh` / `scripts/uninstall.sh`** (steps, prompts, what gets created/removed) →
+  `docs/installation.md` / `docs/uninstallation.md`.
+- **`src/cli/main.js`'s command surface** (new command, new/changed flag, changed output shape) →
+  `docs/usage.md`.
+- **`src/cli/daemon.js`, `src/indexer/daemon.js`'s launchd wiring, or `launchd/*.plist.template`**
+  (daemon control, log file layout, rotation policy) → `docs/process-management.md`.
+- **`src/mcp/tools.js`'s tool list** (added/removed/renamed MCP tool) → `docs/usage.md`'s MCP section.
+
+These are separate from `docs/specs/S0xx-*.md`: specs are the binding contract for *what* a subsystem
+does and why (implementation-facing); `docs/*.md` guides are *how a user runs the thing*
+(operator-facing) — a spec change doesn't automatically imply a guide change, and vice versa, but check
+both when the observable CLI/install/process-management behavior moves.
+
 ## Language & Runtime
 
 - **Plain JavaScript. No TypeScript.** No `tsc`, no `.ts`/`.d.ts` files, no build step for the JS
