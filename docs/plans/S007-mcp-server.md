@@ -2246,3 +2246,12 @@ that's what the new test above exercises.
   isError? }>` shape from the task that introduces it through the end of the plan. `assertSchemaCurrent
   (dbPath) -> void` (Task 4) and `createServer(deps) -> McpServer` (Task 14) are each introduced once
   and never change shape afterward.
+- **Latent coupling to flag at implementation time, not fixed here**: `src/log-rotator.js`'s
+  `LOG_FILE_NAMES` (S008) already hardcodes `'mcp-server.log'` in anticipation of this plan's component
+  name, but that string isn't derived from anywhere — it's just two independent literals (this plan's
+  `getLogger('mcp-server', ...)` calls in Task 12/14, and `log-rotator.js`'s array entry) that happen to
+  agree today. When Task 14 actually lands, confirm the component name passed to `getLogger` is still
+  the literal string `'mcp-server'` before wiring `main()` up for real — if it drifts, log rotation for
+  that file silently stops with no error, not a loud failure. Consider at that point whether
+  `log-rotator.js` should instead derive its file list from the same place component names are defined,
+  rather than maintaining a fully separate hardcoded list.
