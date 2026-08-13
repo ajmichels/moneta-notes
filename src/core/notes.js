@@ -110,7 +110,7 @@ function mergeMetadata(existing, patch) {
 
 export const SIZE_DROP_THRESHOLD = 0.5; // fraction of current line count; config.toml-backed under S009
 
-function updateNote(filePath, title, hash, metadata, content, force) {
+function updateNote(filePath, title, hash, metadata, content, { force, sizeDropThreshold }) {
     const currentRaw = readRawNote(filePath, title);
     const currentHash = hashContent(currentRaw);
 
@@ -125,10 +125,10 @@ function updateNote(filePath, title, hash, metadata, content, force) {
     const currentLineCount = countLines(existingBody);
     const newLineCount = countLines(content);
 
-    if (!force && newLineCount < currentLineCount * SIZE_DROP_THRESHOLD) {
+    if (!force && newLineCount < currentLineCount * sizeDropThreshold) {
         throw new Error(
             `note_write: size-drop guard tripped for "${title}" — new content is ${newLineCount} `
-            + `lines, down from ${currentLineCount} (below ${SIZE_DROP_THRESHOLD * 100}% threshold). `
+            + `lines, down from ${currentLineCount} (below ${sizeDropThreshold * 100}% threshold). `
             + 'Pass force: true to override.',
         );
     }
@@ -141,7 +141,9 @@ function updateNote(filePath, title, hash, metadata, content, force) {
     return { title, hash: hashContent(raw), line_count: newLineCount };
 }
 
-export function noteWrite(vaultRoot, title, { hash = null, metadata = null, content, force = false } = {}) {
+export function noteWrite(vaultRoot, title, {
+    hash = null, metadata = null, content, force = false, sizeDropThreshold = SIZE_DROP_THRESHOLD,
+} = {}) {
     const filePath = titleToPath(vaultRoot, title);
     const fileExists = existsSync(filePath);
 
@@ -162,7 +164,7 @@ export function noteWrite(vaultRoot, title, { hash = null, metadata = null, cont
         );
     }
 
-    return updateNote(filePath, title, hash, metadata, content, force);
+    return updateNote(filePath, title, hash, metadata, content, { force, sizeDropThreshold });
 }
 
 function countOccurrences(haystack, needle) {
@@ -172,7 +174,9 @@ function countOccurrences(haystack, needle) {
     return haystack.split(needle).length - 1;
 }
 
-export function noteEdit(vaultRoot, title, { hash, oldTxt, newTxt, metadata = null } = {}) {
+export function noteEdit(vaultRoot, title, {
+    hash, oldTxt, newTxt, metadata = null, sizeDropThreshold = SIZE_DROP_THRESHOLD,
+} = {}) {
     if (!hash) {
         throw new Error(`note_edit: hash is required for "${title}"`);
     }
@@ -205,10 +209,10 @@ export function noteEdit(vaultRoot, title, { hash, oldTxt, newTxt, metadata = nu
     const currentLineCount = countLines(existingBody);
     const newLineCount = countLines(newBody);
 
-    if (newLineCount < currentLineCount * SIZE_DROP_THRESHOLD) {
+    if (newLineCount < currentLineCount * sizeDropThreshold) {
         throw new Error(
             `note_edit: size-drop guard tripped for "${title}" — new content is ${newLineCount} `
-            + `lines, down from ${currentLineCount} (below ${SIZE_DROP_THRESHOLD * 100}% threshold)`,
+            + `lines, down from ${currentLineCount} (below ${sizeDropThreshold * 100}% threshold)`,
         );
     }
 

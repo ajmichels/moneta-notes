@@ -7,7 +7,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { SCHEMA_VERSION } from '../core/db.js';
 import { getAuditLogger, getLogger, defaultLogDir } from '../logger.js';
-import { embed } from '../indexer/embed.js';
+import { embed, configureEmbedder } from '../indexer/embed.js';
 import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_VERSION } from '../indexer/daemon.js';
 import { loadConfig } from '../config.js';
 import { registerPrompts } from './prompts.js';
@@ -178,16 +178,23 @@ function resolveDbPath(config = loadConfig()) {
 }
 
 export async function main() {
-    const vaultRoot = resolveVaultRoot();
-    const dbPath = resolveDbPath();
+    const config = loadConfig();
+    const vaultRoot = resolveVaultRoot(config);
+    const dbPath = resolveDbPath(config);
     const mcpLogger = getLogger('mcp-server', defaultLogDir());
 
     assertSchemaCurrent(dbPath);
     const auditLogger = getAuditLogger(defaultLogDir());
 
+    configureEmbedder({
+        dtype: config.index.embedding_dtype,
+        idleTimeoutMs: config.index.model_idle_unload_minutes * 60 * 1000,
+    });
+
     const server = createServer({
         dbPath,
         vaultRoot,
+        config,
         embed,
         embeddingModel: DEFAULT_EMBEDDING_MODEL,
         embeddingVersion: DEFAULT_EMBEDDING_VERSION,

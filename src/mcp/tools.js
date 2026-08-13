@@ -4,6 +4,7 @@ import { tagList, tagNotes } from '../core/tags.js';
 import { noteRead, noteWrite, noteEdit, noteAppend, noteRename } from '../core/notes.js';
 import { openDb } from '../core/db.js';
 import { logAudit, runWithLogger } from '../logger.js';
+import { resolveConfig } from '../config.js';
 import {
     formatSearchTable, formatGrepTable, formatTagListTable, formatTagNotesTable, formatJson,
 } from '../format.js';
@@ -52,11 +53,19 @@ export async function callTool(auditLogger, mcpLogger, toolName, input, fn) {
 
 export async function searchTool(deps, input) {
     const { dbPath, embed, embeddingModel, embeddingVersion } = deps;
-    const { query, mode = 'hybrid', limit = 20 } = input;
+    const { search: searchConfig } = resolveConfig(deps);
+    const { query, mode = 'hybrid', limit = searchConfig.limit_default } = input;
 
     return callTool(deps.auditLogger, deps.mcpLogger, 'search', input, async () => {
         const results = await withDb(dbPath, (db) => (
-            search(db, { query, mode, limit, embed, embeddingModel, embeddingVersion })
+            search(db, {
+                query, mode, limit, embed, embeddingModel, embeddingVersion,
+                limitDefault: searchConfig.limit_default,
+                limitMax: searchConfig.limit_max,
+                overfetchMultiplier: searchConfig.overfetch_multiplier,
+                overfetchCap: searchConfig.overfetch_cap,
+                rrfK: searchConfig.rrf_k,
+            })
         ));
         return formatSearchTable(results, mode);
     });
@@ -64,10 +73,11 @@ export async function searchTool(deps, input) {
 
 export async function grepTool(deps, input) {
     const { vaultRoot } = deps;
+    const { grep: grepConfig } = resolveConfig(deps);
     const { pattern, regex = false, note_title: noteTitle = null } = input;
 
     return callTool(deps.auditLogger, deps.mcpLogger, 'grep', input, async () => {
-        const results = grep(vaultRoot, pattern, { regex, noteTitle });
+        const results = grep(vaultRoot, pattern, { regex, noteTitle, lineMatchCap: grepConfig.line_match_cap });
         return formatGrepTable(results);
     });
 }
@@ -97,22 +107,28 @@ export async function noteReadTool(deps, input) {
 
 export async function noteWriteTool(deps, input) {
     const { vaultRoot } = deps;
+    const { notes: notesConfig } = resolveConfig(deps);
     const { note_title: noteTitle, hash, metadata = null, content, force = false } = input;
 
     return callTool(deps.auditLogger, deps.mcpLogger, 'note_write', input, async () => {
-        const result = noteWrite(vaultRoot, noteTitle, { hash, metadata, content, force });
+        const result = noteWrite(vaultRoot, noteTitle, {
+            hash, metadata, content, force, sizeDropThreshold: notesConfig.size_drop_threshold,
+        });
         return formatJson(result);
     });
 }
 
 export async function noteEditTool(deps, input) {
     const { vaultRoot } = deps;
+    const { notes: notesConfig } = resolveConfig(deps);
     const {
         note_title: noteTitle, hash, old_txt: oldTxt, new_txt: newTxt, metadata = null,
     } = input;
 
     return callTool(deps.auditLogger, deps.mcpLogger, 'note_edit', input, async () => {
-        const result = noteEdit(vaultRoot, noteTitle, { hash, oldTxt, newTxt, metadata });
+        const result = noteEdit(vaultRoot, noteTitle, {
+            hash, oldTxt, newTxt, metadata, sizeDropThreshold: notesConfig.size_drop_threshold,
+        });
         return formatJson(result);
     });
 }

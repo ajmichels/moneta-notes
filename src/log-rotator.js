@@ -2,6 +2,7 @@ import { existsSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defaultLogDir } from './logger.js';
+import { loadConfig } from './config.js';
 
 export function shouldRotate(filePath, policy) {
     if (!existsSync(filePath)) {
@@ -51,8 +52,16 @@ export function rotateLogDirectory(logDir, fileNames = LOG_FILE_NAMES, policy = 
     }
 }
 
-export function main(logDir = defaultLogDir()) {
-    rotateLogDirectory(logDir);
+function policyFromConfig(config) {
+    return {
+        maxSizeBytes: config.logging.rotation_max_size_mb * 1024 * 1024,
+        maxAgeMs: config.logging.rotation_max_age_days * 24 * 60 * 60 * 1000,
+        keepCount: config.logging.rotation_keep,
+    };
+}
+
+export function main(logDir = defaultLogDir(), config = loadConfig()) {
+    rotateLogDirectory(logDir, LOG_FILE_NAMES, policyFromConfig(config));
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

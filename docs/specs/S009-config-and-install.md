@@ -200,12 +200,38 @@ S009 lands" comment. Concretely:
   `MNOTES_DB_PATH` are no longer read anywhere. This was a clean replacement, not backwards-compatible
   shimming, per the "stand-in... until S009 lands" framing already in the code being replaced.
 
-**Still out of scope, unchanged from before:** the other `config.toml` sections
-(`[search]`/`[notes]`/`[grep]`/`[index]`/`[logging]`) are not read by `search.js`/`notes.js`/`grep.js`/
-`daemon.js`'s indexing internals/`log-rotator.js` yet — those modules keep using their own hardcoded
-`DEFAULT_*` constants, so editing those sections of `config.toml` currently has no effect. Unlike
-`vault_path`, none of those gaps are blocking (every one has a working hardcoded default), so this pass
-closes only the `vault_path`/`db_path` gap that actually prevented pointing the tool at a real vault.
+## Wiring `[search]`/`[notes]`/`[grep]`/`[index]`/`[logging]` into `core/`, the daemon, and log-rotator
+
+The remaining sections are now read too — no `config.toml` key is decorative. `core/search.js`,
+`core/notes.js`, and `core/grep.js` stay config-ignorant per CLAUDE.md's architecture rules (they take
+plain JS options with the same defaults they always had — `search`/`explainSearch` accept
+`limitDefault`/`limitMax`/`overfetchMultiplier`/`overfetchCap`/`rrfK`; `noteWrite`/`noteEdit` accept
+`sizeDropThreshold`; `grep` already accepted `lineMatchCap`); it's `cli/main.js`, `mcp/tools.js`,
+`mcp/server.js`, and `indexer/daemon.js` that call `loadConfig()` and pass the relevant section's
+values down as options on every call.
+
+- `cli/main.js`'s `buildRealDeps()` and `mcp/server.js`'s `main()` each call `loadConfig()` once and
+  thread the resulting `config` object through `deps.config`, rather than re-reading the file per
+  command/tool invocation. `resolveConfig(deps)` (`src/config.js`) reads `deps.config`, falling back to
+  `buildDefaultConfig()` when absent — this is what lets test doubles that build a bare `deps` object
+  (no `config` field) still exercise the same built-in defaults `config.toml`'s absence would produce,
+  without every test having to construct a full config object.
+- `[index]`'s `embedding_dtype`/`model_idle_unload_minutes` don't flow through a per-call options
+  object like the others — `indexer/embed.js`'s `getSharedEmbedder()` is a lazily-created module-level
+  singleton (shared across every `embed()` call in a process). `configureEmbedder(options)` sets the
+  options that singleton is created with; every entry point (`daemon.js`, `cli/main.js`,
+  `mcp/server.js`'s `main()`s) calls it once, before the first real embed, with
+  `dtype: config.index.embedding_dtype` and `idleTimeoutMs: config.index.model_idle_unload_minutes * 60 * 1000`.
+- `[index]`'s `debounce_ms` and `retry_backoff_seconds` flow into `startDaemon()`'s `debounceMs`/
+  `backoffSchedule` options (the latter converted from the config's seconds to the milliseconds
+  `recordFailure` already worked in) — `debounceMs` reaches `createDebouncer` via `defaultCreateWatcher`,
+  `backoffSchedule` reaches `recordFailure` via `deps`. `retry_max_attempts` stays derived
+  (`backoffSchedule.length + 1`, computed where `recordFailure` already computed it) rather than becoming
+  a second, independently-settable knob that could disagree with the array length — the config comment
+  ("initial attempt + len(retry_backoff_seconds)") already documented it as derived, not independent.
+- `[logging]`'s three keys build the rotation policy object `log-rotator.js`'s `main()` passes to
+  `rotateLogDirectory()`, replacing the hardcoded `DEFAULT_ROTATION_POLICY` (still exported, now just a
+  fallback for direct `rotateLogDirectory()` callers that don't pass a policy).
 
 ## Logging
 

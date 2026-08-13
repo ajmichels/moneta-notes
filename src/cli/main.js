@@ -10,8 +10,8 @@ import { titleToPath } from '../core/note-fs.js';
 import { logAudit, getAuditLogger, defaultLogDir } from '../logger.js';
 import { openDb } from '../core/db.js';
 import { defaultSocketPath, DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_VERSION } from '../indexer/daemon.js';
-import { embed as realEmbed } from '../indexer/embed.js';
-import { loadConfig } from '../config.js';
+import { embed as realEmbed, configureEmbedder } from '../indexer/embed.js';
+import { loadConfig, resolveConfig } from '../config.js';
 import { computeStats, checkDaemonRunning } from './stats.js';
 import { runReindexCommand } from './reindex.js';
 import { runDaemonCommand } from './daemon.js';
@@ -116,9 +116,15 @@ export async function runSearch(args, deps) {
     });
     const query = positionals[0];
     const limit = values.limit !== undefined ? Number(values.limit) : undefined;
+    const { search: searchConfig } = resolveConfig(deps);
     const searchOptions = {
         query, mode: values.mode, limit,
         embed: deps.embed, embeddingModel: deps.embeddingModel, embeddingVersion: deps.embeddingVersion,
+        limitDefault: searchConfig.limit_default,
+        limitMax: searchConfig.limit_max,
+        overfetchMultiplier: searchConfig.overfetch_multiplier,
+        overfetchCap: searchConfig.overfetch_cap,
+        rrfK: searchConfig.rrf_k,
     };
 
     if (values.explain) {
@@ -149,7 +155,12 @@ export async function runGrep(args, deps) {
         },
     });
     const pattern = positionals[0];
-    const results = grep(deps.vaultRoot, pattern, { regex: values.regex, noteTitle: values.note ?? null });
+    const { grep: grepConfig } = resolveConfig(deps);
+    const results = grep(deps.vaultRoot, pattern, {
+        regex: values.regex,
+        noteTitle: values.note ?? null,
+        lineMatchCap: grepConfig.line_match_cap,
+    });
 
     if (values.json) {
         const mapped = results.map((r) => ({
@@ -288,7 +299,11 @@ export async function runWrite(args, deps) {
     const content = values.content ?? await readStdinContent(deps.stdin ?? process.stdin);
 
     try {
-        const result = noteWrite(deps.vaultRoot, title, { hash: values.hash ?? null, metadata, content });
+        const { notes: notesConfig } = resolveConfig(deps);
+        const result = noteWrite(deps.vaultRoot, title, {
+            hash: values.hash ?? null, metadata, content,
+            sizeDropThreshold: notesConfig.size_drop_threshold,
+        });
         logAudit(deps.auditLogger, { tool: 'write', noteTitle: title, source: 'cli', outcome: 'success' });
         return { stdout: formatJson(result), stderr: '', exitCode: 0 };
     } catch (err) {
@@ -316,8 +331,10 @@ export async function runEdit(args, deps) {
     const metadata = parseMetadataFlag(values.metadata);
 
     try {
+        const { notes: notesConfig } = resolveConfig(deps);
         const result = noteEdit(deps.vaultRoot, title, {
             hash: values.hash, oldTxt: values.old, newTxt: values.new, metadata,
+            sizeDropThreshold: notesConfig.size_drop_threshold,
         });
         logAudit(deps.auditLogger, { tool: 'edit', noteTitle: title, source: 'cli', outcome: 'success' });
         return { stdout: formatJson(result), stderr: '', exitCode: 0 };
@@ -392,13 +409,19 @@ registerCommand('daemon', runDaemonCommand);
 registerCommand('stats', runStats);
 
 function buildRealDeps() {
-    const vaultRoot = resolveVaultRoot();
-    const dbPath = resolveDbPath();
+    const config = loadConfig();
+    const vaultRoot = resolveVaultRoot(config);
+    const dbPath = resolveDbPath(config);
     const { db } = openDb(dbPath);
+    configureEmbedder({
+        dtype: config.index.embedding_dtype,
+        idleTimeoutMs: config.index.model_idle_unload_minutes * 60 * 1000,
+    });
     return {
         vaultRoot,
         dbPath,
         db,
+        config,
         embed: realEmbed,
         embeddingModel: DEFAULT_EMBEDDING_MODEL,
         embeddingVersion: DEFAULT_EMBEDDING_VERSION,

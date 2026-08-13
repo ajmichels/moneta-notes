@@ -320,6 +320,24 @@ describe('noteWrite size-drop guard', () => {
 
         expect(result.line_count).toBe(5);
     });
+
+    it('honors a caller-supplied sizeDropThreshold (config.toml-backed, S009)', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Custom Threshold', {
+            content: 'l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10',
+        });
+
+        // Default threshold (0.5) allows a drop to 5 lines; a stricter 0.9 threshold rejects it.
+        expect(() => noteWrite(vaultRoot, 'Custom Threshold', {
+            hash: created.hash, content: 'l1\nl2\nl3\nl4\nl5', sizeDropThreshold: 0.9,
+        })).toThrow(/size-drop|below/i);
+
+        // A looser threshold (0.1) allows a drop that the default would have rejected.
+        const result = noteWrite(vaultRoot, 'Custom Threshold', {
+            hash: created.hash, content: 'l1', sizeDropThreshold: 0.1,
+        });
+        expect(result.line_count).toBe(1);
+    });
 });
 
 describe('noteEdit', () => {
@@ -401,6 +419,23 @@ describe('noteEdit', () => {
                 hash: created.hash,
                 oldTxt: 'l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10',
                 newTxt: 'l1',
+            }),
+        ).toThrow(/size-drop|below/i);
+    });
+
+    it('honors a caller-supplied sizeDropThreshold (config.toml-backed, S009)', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Edit Custom Threshold', {
+            content: 'l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10',
+        });
+
+        // Default threshold (0.5) would allow dropping to 5 lines; 0.9 rejects it.
+        expect(() =>
+            noteEdit(vaultRoot, 'Edit Custom Threshold', {
+                hash: created.hash,
+                oldTxt: 'l6\nl7\nl8\nl9\nl10',
+                newTxt: '',
+                sizeDropThreshold: 0.9,
             }),
         ).toThrow(/size-drop|below/i);
     });

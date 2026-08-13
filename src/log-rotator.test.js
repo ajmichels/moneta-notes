@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync, utimesSync, existsSync, readFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { shouldRotate, rotateLogFile, rotateLogDirectory, main } from './log-rotator.js';
+import { buildDefaultConfig } from './config.js';
 
 const tempDirs = [];
 
@@ -149,5 +150,32 @@ describe('main', () => {
 
         expect(readFileSync(auditPath, 'utf8')).toBe('');
         expect(existsSync(`${auditPath}.1`)).toBe(true);
+    });
+
+    it('builds the rotation policy from a caller-supplied config (config.toml-backed, S009)', () => {
+        const dir = makeTempDir();
+        const auditPath = join(dir, 'audit.log');
+        writeFileSync(auditPath, Buffer.alloc(2 * 1024 * 1024)); // 2MB — below the built-in 10MB default
+
+        const config = buildDefaultConfig();
+        config.logging.rotation_max_size_mb = 1; // now above this stricter threshold
+
+        main(dir, config);
+
+        expect(readFileSync(auditPath, 'utf8')).toBe('');
+        expect(existsSync(`${auditPath}.1`)).toBe(true);
+    });
+
+    it('does not rotate below a caller-supplied, larger size threshold', () => {
+        const dir = makeTempDir();
+        const auditPath = join(dir, 'audit.log');
+        writeFileSync(auditPath, Buffer.alloc(2 * 1024 * 1024)); // 2MB — below the built-in 10MB default
+
+        const config = buildDefaultConfig();
+        config.logging.rotation_max_size_mb = 50; // now below this looser threshold too
+
+        main(dir, config);
+
+        expect(existsSync(`${auditPath}.1`)).toBe(false);
     });
 });

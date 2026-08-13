@@ -2,11 +2,13 @@ import { getContextLogger } from '../logger.js';
 import { stripMdExtension as pathToTitle } from './note-fs.js';
 
 const DEFAULT_LIMIT = 20;
-const OVERFETCH_MULTIPLIER = 5;
-const OVERFETCH_CAP = 500;
+const DEFAULT_LIMIT_MAX = 100;
+const DEFAULT_OVERFETCH_MULTIPLIER = 5;
+const DEFAULT_OVERFETCH_CAP = 500;
+const DEFAULT_RRF_K = 60;
 
-function computeOverfetch(limit) {
-    return Math.min(limit * OVERFETCH_MULTIPLIER, OVERFETCH_CAP);
+function computeOverfetch(limit, overfetchMultiplier, overfetchCap) {
+    return Math.min(limit * overfetchMultiplier, overfetchCap);
 }
 
 function validateQuery(query) {
@@ -15,15 +17,13 @@ function validateQuery(query) {
     }
 }
 
-const MAX_LIMIT = 100;
-
-function validateLimit(limit) {
-    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LIMIT) {
-        throw new Error(`search: limit must be an integer between 1 and ${MAX_LIMIT}, got ${limit}`);
+function validateLimit(limit, limitMax) {
+    if (!Number.isInteger(limit) || limit < 1 || limit > limitMax) {
+        throw new Error(`search: limit must be an integer between 1 and ${limitMax}, got ${limit}`);
     }
 }
 
-function fulltextSearch(db, query, limit) {
+function fulltextSearch(db, query, overfetchLimit) {
     let rows;
     try {
         rows = db.prepare(`
@@ -34,7 +34,7 @@ function fulltextSearch(db, query, limit) {
             WHERE notes_fts MATCH ?
             ORDER BY bm25(notes_fts)
             LIMIT ?
-        `).all(query, computeOverfetch(limit));
+        `).all(query, overfetchLimit);
     } catch (err) {
         getContextLogger().warn('malformed FTS5 query', { query });
         throw new Error(`search: malformed fulltext query "${query}": ${err.message}`, { cause: err });
@@ -111,13 +111,13 @@ function countStaleChunks(db, embeddingModel, embeddingVersion) {
     return row.count;
 }
 
-async function semanticSearch(db, query, limit, { embed, embeddingModel, embeddingVersion }) {
+async function semanticSearch(db, query, overfetchLimit, { embed, embeddingModel, embeddingVersion }) {
     if (typeof embed !== 'function') {
         throw new Error('search: semantic and hybrid modes require an `embed` function');
     }
 
     const vector = await embed(query);
-    const rawRows = runSemanticQuery(db, vector, computeOverfetch(limit), embeddingModel, embeddingVersion);
+    const rawRows = runSemanticQuery(db, vector, overfetchLimit, embeddingModel, embeddingVersion);
 
     const staleCount = countStaleChunks(db, embeddingModel, embeddingVersion);
     if (staleCount > 0) {
@@ -153,20 +153,18 @@ function toSemanticOutput(results, limit) {
     }));
 }
 
-const RRF_K = 60;
-
-function computeRrfScore(fulltextRank, semanticRank) {
+function computeRrfScore(fulltextRank, semanticRank, rrfK) {
     let score = 0;
     if (fulltextRank !== undefined) {
-        score += 1 / (RRF_K + fulltextRank);
+        score += 1 / (rrfK + fulltextRank);
     }
     if (semanticRank !== undefined) {
-        score += 1 / (RRF_K + semanticRank);
+        score += 1 / (rrfK + semanticRank);
     }
     return score;
 }
 
-function mergeHybrid(fulltextResults, semanticResults, limit) {
+function mergeHybrid(fulltextResults, semanticResults, limit, rrfK) {
     const fulltextRankById = new Map(fulltextResults.map((r) => [ r.noteId, r.rank ]));
     const semanticRankById = new Map(semanticResults.map((r) => [ r.noteId, r.rank ]));
 
@@ -186,7 +184,7 @@ function mergeHybrid(fulltextResults, semanticResults, limit) {
             mtime: r.mtime,
             fulltextRank: fulltextRank ?? null,
             semanticRank: semanticRank ?? null,
-            score: computeRrfScore(fulltextRank, semanticRank),
+            score: computeRrfScore(fulltextRank, semanticRank, rrfK),
         };
     });
 
@@ -204,20 +202,29 @@ function toHybridOutput(results) {
 }
 
 export async function search(db, options = {}) {
-    const { query, mode = 'hybrid', limit = DEFAULT_LIMIT } = options;
+    const {
+        query, mode = 'hybrid',
+        limitDefault = DEFAULT_LIMIT,
+        limit = limitDefault,
+        limitMax = DEFAULT_LIMIT_MAX,
+        overfetchMultiplier = DEFAULT_OVERFETCH_MULTIPLIER,
+        overfetchCap = DEFAULT_OVERFETCH_CAP,
+        rrfK = DEFAULT_RRF_K,
+    } = options;
     validateQuery(query);
-    validateLimit(limit);
+    validateLimit(limit, limitMax);
+    const overfetchLimit = computeOverfetch(limit, overfetchMultiplier, overfetchCap);
 
     if (mode === 'fulltext') {
-        return toFulltextOutput(fulltextSearch(db, query, limit), limit);
+        return toFulltextOutput(fulltextSearch(db, query, overfetchLimit), limit);
     }
     if (mode === 'semantic') {
-        return toSemanticOutput(await semanticSearch(db, query, limit, options), limit);
+        return toSemanticOutput(await semanticSearch(db, query, overfetchLimit, options), limit);
     }
     if (mode === 'hybrid') {
-        const fulltextResults = fulltextSearch(db, query, limit);
-        const semanticResults = await semanticSearch(db, query, limit, options);
-        return toHybridOutput(mergeHybrid(fulltextResults, semanticResults, limit));
+        const fulltextResults = fulltextSearch(db, query, overfetchLimit);
+        const semanticResults = await semanticSearch(db, query, overfetchLimit, options);
+        return toHybridOutput(mergeHybrid(fulltextResults, semanticResults, limit, rrfK));
     }
 
     throw new Error(`search: unknown mode "${mode}"`);
@@ -250,14 +257,14 @@ function collapseToBestChunkPerNoteWithDetail(rows) {
     return bestByNote;
 }
 
-async function semanticSearchDetail(db, query, limit, { embed, embeddingModel, embeddingVersion }) {
+async function semanticSearchDetail(db, query, overfetchLimit, { embed, embeddingModel, embeddingVersion }) {
     if (typeof embed !== 'function') {
         throw new Error('search: semantic and hybrid modes require an `embed` function');
     }
 
     const vector = await embed(query);
     const rawRows = runSemanticQueryWithChunkDetail(
-        db, vector, computeOverfetch(limit), embeddingModel, embeddingVersion,
+        db, vector, overfetchLimit, embeddingModel, embeddingVersion,
     );
     const bestByNote = collapseToBestChunkPerNoteWithDetail(rawRows);
     const notesById = hydrateNotes(db, [ ...bestByNote.keys() ]);
@@ -278,63 +285,73 @@ async function semanticSearchDetail(db, query, limit, { embed, embeddingModel, e
     return collapsed.map((row, index) => ({ ...row, rank: index + 1 }));
 }
 
-function formatRrfFormula(fulltextRank, semanticRank, score) {
+function formatRrfFormula(fulltextRank, semanticRank, score, rrfK) {
     const terms = [];
     if (fulltextRank !== null) {
-        terms.push(`1/(${RRF_K}+${fulltextRank})`);
+        terms.push(`1/(${rrfK}+${fulltextRank})`);
     }
     if (semanticRank !== null) {
-        terms.push(`1/(${RRF_K}+${semanticRank})`);
+        terms.push(`1/(${rrfK}+${semanticRank})`);
     }
     return `${terms.join(' + ')} = ${score}`;
 }
 
-export async function explainSearch(db, options = {}) {
-    const { query, mode = 'hybrid', limit = DEFAULT_LIMIT } = options;
-    validateQuery(query);
-    validateLimit(limit);
+function toFulltextExplainResults(rows) {
+    return rows.map((r) => ({
+        note_title: r.noteTitle, file_line_count: r.fileLineCount,
+        bm25_score: r.score, rank: r.rank,
+    }));
+}
 
-    const pipeline = {
-        mode, limit, overfetchLimit: computeOverfetch(limit), fulltextExpression: query,
-    };
+function toSemanticExplainResults(rows) {
+    return rows.map((r) => ({
+        note_title: r.noteTitle, file_line_count: r.fileLineCount,
+        cosine_distance: r.distance,
+        winning_chunk: { char_start: r.charStart, char_end: r.charEnd },
+        rank: r.rank,
+    }));
+}
+
+function toHybridExplainResults(rows, rrfK) {
+    return rows.map((r) => ({
+        note_title: r.noteTitle, file_line_count: r.fileLineCount,
+        fulltext_rank: r.fulltextRank, semantic_rank: r.semanticRank,
+        rrf_score: r.score,
+        rrf_formula: formatRrfFormula(r.fulltextRank, r.semanticRank, r.score, rrfK),
+    }));
+}
+
+export async function explainSearch(db, options = {}) {
+    const {
+        query, mode = 'hybrid',
+        limitDefault = DEFAULT_LIMIT,
+        limit = limitDefault,
+        limitMax = DEFAULT_LIMIT_MAX,
+        overfetchMultiplier = DEFAULT_OVERFETCH_MULTIPLIER,
+        overfetchCap = DEFAULT_OVERFETCH_CAP,
+        rrfK = DEFAULT_RRF_K,
+    } = options;
+    validateQuery(query);
+    validateLimit(limit, limitMax);
+    const overfetchLimit = computeOverfetch(limit, overfetchMultiplier, overfetchCap);
+
+    const pipeline = { mode, limit, overfetchLimit, fulltextExpression: query };
 
     if (mode === 'fulltext') {
-        const rows = fulltextSearch(db, query, limit).slice(0, limit);
-        return {
-            results: rows.map((r) => ({
-                note_title: r.noteTitle, file_line_count: r.fileLineCount,
-                bm25_score: r.score, rank: r.rank,
-            })),
-            pipeline,
-        };
+        const rows = fulltextSearch(db, query, overfetchLimit).slice(0, limit);
+        return { results: toFulltextExplainResults(rows), pipeline };
     }
 
     if (mode === 'semantic') {
-        const rows = (await semanticSearchDetail(db, query, limit, options)).slice(0, limit);
-        return {
-            results: rows.map((r) => ({
-                note_title: r.noteTitle, file_line_count: r.fileLineCount,
-                cosine_distance: r.distance,
-                winning_chunk: { char_start: r.charStart, char_end: r.charEnd },
-                rank: r.rank,
-            })),
-            pipeline,
-        };
+        const rows = (await semanticSearchDetail(db, query, overfetchLimit, options)).slice(0, limit);
+        return { results: toSemanticExplainResults(rows), pipeline };
     }
 
     if (mode === 'hybrid') {
-        const fulltextResults = fulltextSearch(db, query, limit);
-        const semanticResults = await semanticSearch(db, query, limit, options);
-        const merged = mergeHybrid(fulltextResults, semanticResults, limit);
-        return {
-            results: merged.map((r) => ({
-                note_title: r.noteTitle, file_line_count: r.fileLineCount,
-                fulltext_rank: r.fulltextRank, semantic_rank: r.semanticRank,
-                rrf_score: r.score,
-                rrf_formula: formatRrfFormula(r.fulltextRank, r.semanticRank, r.score),
-            })),
-            pipeline,
-        };
+        const fulltextResults = fulltextSearch(db, query, overfetchLimit);
+        const semanticResults = await semanticSearch(db, query, overfetchLimit, options);
+        const merged = mergeHybrid(fulltextResults, semanticResults, limit, rrfK);
+        return { results: toHybridExplainResults(merged, rrfK), pipeline };
     }
 
     throw new Error(`search: unknown mode "${mode}"`);

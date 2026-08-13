@@ -14,7 +14,7 @@ import { getLogger, defaultLogDir, runWithLogger, getContextLogger } from '../lo
 import { loadConfig } from '../config.js';
 import {
     chunkText as realChunkText, loadTokenizer, tokenizeWithOffsets as realTokenizeWithOffsets,
-    embed as realEmbed,
+    embed as realEmbed, configureEmbedder,
 } from './embed.js';
 
 export function enqueuePath(db, path, now = Date.now()) {
@@ -448,7 +448,7 @@ async function resolveChunkText(providedChunkText) {
     return (body) => realChunkText(body, (text) => realTokenizeWithOffsets(tokenizer, text));
 }
 
-function defaultCreateWatcher(vaultRoot, db) {
+function defaultCreateWatcher(vaultRoot, db, { debounceMs } = {}) {
     let stopped = false;
 
     const debouncer = createDebouncer((path) => {
@@ -464,7 +464,7 @@ function defaultCreateWatcher(vaultRoot, db) {
         } else {
             deleteNoteByPath(db, path);
         }
-    });
+    }, { debounceMs });
 
     const child = spawnFswatch(vaultRoot, (absPath) => {
         if (!stopped) {
@@ -512,6 +512,8 @@ export async function startDaemon(options = {}) {
         embed = realEmbed,
         createWatcher = defaultCreateWatcher,
         drainIntervalMs = DEFAULT_DRAIN_INTERVAL_MS,
+        debounceMs = DEFAULT_DEBOUNCE_MS,
+        backoffSchedule = DEFAULT_BACKOFF_SCHEDULE_MS,
     } = options;
 
     getContextLogger().info('daemon started');
@@ -522,7 +524,7 @@ export async function startDaemon(options = {}) {
     const { db, reindexRequired } = openDb(dbPath);
 
     const chunkText = await resolveChunkText(options.chunkText);
-    const deps = { chunkText, embed, embeddingModel, embeddingVersion };
+    const deps = { chunkText, embed, embeddingModel, embeddingVersion, backoffSchedule };
 
     watermarkCatchup(db, vaultRoot);
     if (!reindexRequired) {
@@ -532,7 +534,7 @@ export async function startDaemon(options = {}) {
         existenceCheck(db, vaultRoot);
     }
 
-    const watcher = createWatcher(vaultRoot, db);
+    const watcher = createWatcher(vaultRoot, db, { debounceMs });
     const drainTimer = startDrainLoop(vaultRoot, db, deps, drainIntervalMs);
     if (drainTimer === null) {
         await drainQueueOnce(vaultRoot, db, deps);
@@ -557,9 +559,15 @@ export async function startDaemon(options = {}) {
 // `node src/indexer/daemon.js` with no caller supplying options.
 export async function main() {
     const config = loadConfig();
+    configureEmbedder({
+        dtype: config.index.embedding_dtype,
+        idleTimeoutMs: config.index.model_idle_unload_minutes * 60 * 1000,
+    });
     return startDaemon({
         vaultRoot: config.vault_path,
         dbPath: config.db_path,
+        debounceMs: config.index.debounce_ms,
+        backoffSchedule: config.index.retry_backoff_seconds.map((seconds) => seconds * 1000),
     });
 }
 

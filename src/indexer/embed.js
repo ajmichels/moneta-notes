@@ -164,10 +164,19 @@ async function defaultPipelineFactory(modelId, { dtype }) {
 }
 
 let sharedEmbedder = null;
+let sharedEmbedderOptions = {};
+
+// Entry points (daemon/cli/mcp `main()`s) call this once at startup with config.toml-backed
+// dtype/idle-unload values before the first real `embed()` call — `getSharedEmbedder()` only
+// reads `sharedEmbedderOptions` at lazy-creation time, so a call here after the singleton already
+// exists has no effect (never happens in practice: every entry point configures before using).
+export function configureEmbedder(options) {
+    sharedEmbedderOptions = options;
+}
 
 export function getSharedEmbedder() {
     if (sharedEmbedder === null) {
-        sharedEmbedder = createEmbedder({ pipelineFactory: defaultPipelineFactory });
+        sharedEmbedder = createEmbedder({ ...sharedEmbedderOptions, pipelineFactory: defaultPipelineFactory });
     }
     return sharedEmbedder;
 }

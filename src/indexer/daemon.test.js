@@ -800,4 +800,60 @@ describe('startDaemon', () => {
 
         await daemon.stop();
     });
+
+    it('passes options.debounceMs through to createWatcher (config.toml-backed, S009)', async () => {
+        const vaultRoot = makeTempVault();
+        const socketDir = makeTempVault();
+        const socketPath = join(socketDir, 'daemon.sock');
+
+        let receivedDebounceMs;
+        const daemon = await startDaemon({
+            vaultRoot,
+            dbPath: ':memory:',
+            socketPath,
+            createWatcher: (root, db, { debounceMs } = {}) => {
+                receivedDebounceMs = debounceMs;
+                return { stop() {} };
+            },
+            chunkText: fakeChunkText,
+            embed: fakeEmbed,
+            embeddingModel: 'test-model',
+            embeddingVersion: 'v1',
+            drainIntervalMs: null,
+            debounceMs: 4242,
+        });
+
+        expect(receivedDebounceMs).toBe(4242);
+        await daemon.stop();
+    });
+
+    it('passes options.backoffSchedule through to failed-attempt retry scheduling (S009)', async () => {
+        const vaultRoot = makeTempVault();
+        writeNote(vaultRoot, 'AlwaysFails.md', 'content', 1000);
+        const socketDir = makeTempVault();
+        const socketPath = join(socketDir, 'daemon.sock');
+
+        const failingEmbed = async () => { throw new Error('embed failed'); };
+
+        const daemon = await startDaemon({
+            vaultRoot,
+            dbPath: ':memory:',
+            socketPath,
+            createWatcher: () => ({ stop() {} }),
+            chunkText: fakeChunkText,
+            embed: failingEmbed,
+            embeddingModel: 'test-model',
+            embeddingVersion: 'v1',
+            drainIntervalMs: null,
+            backoffSchedule: [ 5000 ],
+        });
+
+        await vi.waitFor(() => {
+            const row = daemon.db.prepare('SELECT enqueued_at, next_attempt_at FROM index_queue WHERE path = ?')
+                .get('AlwaysFails.md');
+            expect(row.next_attempt_at - row.enqueued_at).toBe(5000);
+        });
+
+        await daemon.stop();
+    });
 });

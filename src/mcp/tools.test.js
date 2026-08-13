@@ -248,6 +248,25 @@ describe('searchTool', () => {
 
         expect(result.content[0].text).toContain('Late|2');
     });
+
+    it('uses deps.config.search.limit_default when input.limit is omitted (config.toml-backed, S009)', async () => {
+        const dbPath = makeTempDbPath();
+        const { db } = openDb(dbPath);
+        for (let i = 0; i < 5; i += 1) {
+            const noteId = insertNote(db, { path: `Note${i}.md` });
+            insertFtsRow(db, noteId, `Note${i}`, 'shared term');
+        }
+        db.close();
+
+        const deps = makeDeps({
+            dbPath, embed: fakeEmbed, embeddingModel: 'm', embeddingVersion: 'v1',
+            config: { search: { limit_default: 2, limit_max: 100, overfetch_multiplier: 5, overfetch_cap: 500, rrf_k: 60 } },
+        });
+
+        const result = await searchTool(deps, { query: 'shared', mode: 'fulltext', reason: 'testing config limit' });
+
+        expect(result.content[0].text.trim().split('\n')).toHaveLength(3); // header + 2 rows
+    });
 });
 
 describe('grepTool', () => {
@@ -276,6 +295,17 @@ describe('grepTool', () => {
 
         expect(result.isError).toBe(true);
         expect(result.content[0].text).toMatch(/note not found/i);
+    });
+
+    it('uses deps.config.grep.line_match_cap instead of the built-in default (config.toml-backed, S009)', async () => {
+        const vaultRoot = makeTempVault({ 'Recipe.md': 'hello\nhello\nhello\nhello\n' });
+
+        const result = await grepTool(
+            makeDeps({ vaultRoot, config: { grep: { line_match_cap: 2 } } }),
+            { pattern: 'hello', reason: 'testing config line_match_cap' },
+        );
+
+        expect(result.content[0].text).toBe('note_title|file_line_count|line_matches\nRecipe|4|L1, L2 (+2 more)\n');
     });
 });
 
@@ -399,6 +429,28 @@ describe('noteWriteTool', () => {
 
         expect(result.isError).toBeUndefined();
         expect(JSON.parse(result.content[0].text).line_count).toBe(1);
+    });
+
+    it('honors deps.config.notes.size_drop_threshold (config.toml-backed, S009)', async () => {
+        const vaultRoot = makeTempVault({});
+        const deps = makeDeps({ vaultRoot, config: { notes: { size_drop_threshold: 0.9 } } });
+        const created = await noteWriteTool(
+            deps,
+            {
+                note_title: 'Strict Threshold', hash: null,
+                content: 'l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10', reason: 'setup',
+            },
+        );
+        const { hash } = JSON.parse(created.content[0].text);
+
+        // Default threshold (0.5) would allow this drop to 5 lines; 0.9 rejects it.
+        const result = await noteWriteTool(
+            deps,
+            { note_title: 'Strict Threshold', hash, content: 'l1\nl2\nl3\nl4\nl5', reason: 'testing config threshold' },
+        );
+
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toMatch(/size-drop|below/i);
     });
 });
 

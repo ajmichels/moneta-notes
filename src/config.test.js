@@ -2,7 +2,9 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildDefaultConfig, defaultVaultPath, defaultDbPath, defaultConfigPath, loadConfig } from './config.js';
+import {
+    buildDefaultConfig, defaultVaultPath, defaultDbPath, defaultConfigPath, loadConfig, resolveConfig,
+} from './config.js';
 import { getLogger, runWithLogger } from './logger.js';
 
 const tempDirs = [];
@@ -76,6 +78,17 @@ describe('buildDefaultConfig', () => {
 
         expect(second.search.limit_default).toBe(20);
         expect(second.index.retry_backoff_seconds).toEqual([ 30, 120, 600 ]);
+    });
+});
+
+describe('resolveConfig', () => {
+    it('returns deps.config unchanged when present', () => {
+        const config = { search: { limit_default: 999 } };
+        expect(resolveConfig({ config })).toBe(config);
+    });
+
+    it('falls back to the built-in defaults when deps has no config', () => {
+        expect(resolveConfig({})).toEqual(buildDefaultConfig());
     });
 });
 

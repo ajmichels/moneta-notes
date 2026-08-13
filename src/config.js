@@ -103,3 +103,11 @@ export function loadConfig(configPath = defaultConfigPath()) {
 
     return deepMerge(defaults, overrides);
 }
+
+// cli/main.js and mcp/tools.js command handlers receive a plain `deps` object (built once, up
+// front, via loadConfig() in production; built ad hoc with only the fields a given test cares
+// about everywhere else) — this fallback means a test double that omits `config` entirely still
+// exercises real built-in defaults rather than throwing on `undefined.search`/`undefined.notes`.
+export function resolveConfig(deps) {
+    return deps.config ?? buildDefaultConfig();
+}

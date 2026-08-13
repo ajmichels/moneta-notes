@@ -329,6 +329,56 @@ describe('search: limit validation', () => {
     });
 });
 
+describe('search: config-backed limit/overfetch/rrf_k (S009)', () => {
+    it('uses limitDefault when limit is omitted', async () => {
+        const { db } = openDb(':memory:');
+        for (let i = 0; i < 5; i += 1) {
+            const noteId = insertNote(db, { path: `Note${i}.md` });
+            insertFtsRow(db, noteId, `Note${i}`, 'shared term');
+        }
+
+        const results = await search(db, { query: 'shared', mode: 'fulltext', limitDefault: 3 });
+
+        expect(results).toHaveLength(3);
+        db.close();
+    });
+
+    it('validates against a caller-supplied limitMax instead of the built-in 100', async () => {
+        const { db } = openDb(':memory:');
+        await expect(
+            search(db, { query: 'x', mode: 'fulltext', limit: 10, limitMax: 5 }),
+        ).rejects.toThrow(/limit must be an integer between 1 and 5/);
+        db.close();
+    });
+
+    it('caps overfetch using a caller-supplied overfetchMultiplier/overfetchCap', async () => {
+        const { db } = openDb(':memory:');
+        const { pipeline } = await explainSearch(db, {
+            query: 'x', mode: 'fulltext', limit: 10, overfetchMultiplier: 2, overfetchCap: 15,
+        });
+
+        // 10 * 2 = 20, capped to 15
+        expect(pipeline.overfetchLimit).toBe(15);
+        db.close();
+    });
+
+    it('uses a caller-supplied rrfK in the hybrid score and formula', async () => {
+        const { db } = openDb(':memory:');
+        const noteId = insertNote(db, { path: 'C.md' });
+        insertFtsRow(db, noteId, 'C', 'graph');
+        insertChunkWithVector(db, noteId, { seed: 0.5 });
+
+        const { results } = await explainSearch(db, {
+            query: 'graph', mode: 'hybrid', limit: 20, rrfK: 10,
+            embed: fakeEmbed(0.5), embeddingModel: 'test-model', embeddingVersion: 'v1',
+        });
+
+        expect(results[0].rrf_score).toBeCloseTo(1 / 11 + 1 / 11, 10);
+        expect(results[0].rrf_formula).toBe(`1/(10+1) + 1/(10+1) = ${results[0].rrf_score}`);
+        db.close();
+    });
+});
+
 describe('explainSearch: fulltext mode', () => {
     it('exposes the raw bm25 score, rank, and pipeline detail', async () => {
         const { db } = openDb(':memory:');

@@ -132,6 +132,25 @@ describe('runSearch', () => {
         expect(result.stdout).toContain('A|10|');
         db.close();
     });
+
+    it('uses deps.config.search.limit_default when --limit is omitted (config.toml-backed, S009)', async () => {
+        const { db } = openDb(':memory:');
+        for (let i = 0; i < 5; i += 1) {
+            const noteId = insertTestNote(db, `Note${i}.md`, 1);
+            db.prepare('INSERT INTO notes_fts (rowid, title, body) VALUES (?, ?, ?)').run(noteId, `Note${i}`, 'shared');
+        }
+
+        const result = await runSearch([ 'shared', '--mode=fulltext' ], {
+            db,
+            embed: async () => new Float32Array(1024), embeddingModel: 'm', embeddingVersion: 'v1',
+            config: {
+                search: { limit_default: 2, limit_max: 100, overfetch_multiplier: 5, overfetch_cap: 500, rrf_k: 60 },
+            },
+        });
+
+        expect(result.stdout.trim().split('\n')).toHaveLength(3); // header + 2 rows
+        db.close();
+    });
 });
 
 describe('runSearch: --explain', () => {
@@ -197,6 +216,15 @@ describe('runGrep', () => {
         const parsed = JSON.parse(result.stdout)[0];
         expect(parsed.note_title).toBe('Recipe');
         expect(parsed.line_matches[0].text).toBeUndefined();
+    });
+
+    it('uses deps.config.grep.line_match_cap instead of the built-in default (config.toml-backed, S009)', async () => {
+        const vaultRoot = makeTempVault();
+        writeFileSync(join(vaultRoot, 'Recipe.md'), 'hello\nhello\nhello\nhello\n');
+
+        const result = await runGrep([ 'hello' ], { vaultRoot, config: { grep: { line_match_cap: 2 } } });
+
+        expect(result.stdout).toContain('Recipe|4|L1, L2 (+2 more)');
     });
 
     it('supports --json --content, including match text', async () => {
@@ -367,6 +395,25 @@ describe('runWrite', () => {
             runWrite([ 'Bad Meta', '--content=x', '--metadata={not json' ], { vaultRoot, auditLogger }),
         ).rejects.toThrow(/--metadata is not valid JSON/);
     });
+
+    it('honors deps.config.notes.size_drop_threshold (config.toml-backed, S009)', async () => {
+        const vaultRoot = makeTempVault();
+        const auditLogger = getAuditLogger(makeTempVault());
+        const config = { notes: { size_drop_threshold: 0.9 } };
+        const created = await runWrite(
+            [ 'Strict Threshold', '--content=l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10' ],
+            { vaultRoot, auditLogger, config },
+        );
+        const { hash } = JSON.parse(created.stdout);
+
+        // Default threshold (0.5) would allow this drop to 5 lines; 0.9 rejects it.
+        await expect(
+            runWrite(
+                [ 'Strict Threshold', `--hash=${hash}`, '--content=l1\nl2\nl3\nl4\nl5' ],
+                { vaultRoot, auditLogger, config },
+            ),
+        ).rejects.toThrow(/size-drop|below/i);
+    });
 });
 
 describe('runEdit', () => {
@@ -418,6 +465,25 @@ describe('runEdit', () => {
             expect(lastLine).toContain('outcome=error');
             expect(lastLine).toMatch(/error_message=".*ambiguous.*"/i);
         });
+    });
+
+    it('honors deps.config.notes.size_drop_threshold (config.toml-backed, S009)', async () => {
+        const vaultRoot = makeTempVault();
+        const auditLogger = getAuditLogger(makeTempVault());
+        const config = { notes: { size_drop_threshold: 0.9 } };
+        const created = await runWrite(
+            [ 'Edit Strict Threshold', '--content=l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10' ],
+            { vaultRoot, auditLogger, config },
+        );
+        const { hash } = JSON.parse(created.stdout);
+
+        // Default threshold (0.5) would allow this drop; 0.9 rejects it.
+        await expect(
+            runEdit(
+                [ 'Edit Strict Threshold', `--hash=${hash}`, '--old=l6\nl7\nl8\nl9\nl10', '--new=' ],
+                { vaultRoot, auditLogger, config },
+            ),
+        ).rejects.toThrow(/size-drop|below/i);
     });
 });
 
