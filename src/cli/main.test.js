@@ -100,7 +100,7 @@ describe('runSearch', () => {
         );
 
         expect(result.exitCode).toBe(0);
-        expect(result.stdout).toBe('note_title|file_line_count\nA|10');
+        expect(result.stdout).toBe('note_title|file_line_count\nA|10\n');
         db.close();
     });
 
@@ -196,7 +196,7 @@ describe('runTags', () => {
 
         const result = await runTags([ 'list' ], { db });
 
-        expect(result.stdout).toBe('tag|notes_with_tag\nproject|1');
+        expect(result.stdout).toBe('tag|notes_with_tag\nproject|1\n');
         db.close();
     });
 
@@ -207,7 +207,7 @@ describe('runTags', () => {
 
         const result = await runTags([ 'notes', 'project' ], { db });
 
-        expect(result.stdout).toBe('note_title|file_line_count\nA|7');
+        expect(result.stdout).toBe('note_title|file_line_count\nA|7\n');
         db.close();
     });
 

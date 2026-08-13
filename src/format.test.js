@@ -5,33 +5,33 @@ import {
 } from './format.js';
 
 describe('formatJson', () => {
-    it('serializes data as compact JSON, no whitespace, no trailing newline', () => {
-        expect(formatJson({ a: 1 })).toBe('{"a":1}');
+    it('serializes data as compact JSON with a trailing newline', () => {
+        expect(formatJson({ a: 1 })).toBe('{"a":1}\n');
     });
 
     it('serializes an array', () => {
-        expect(formatJson([ 1, 2 ])).toBe('[1,2]');
+        expect(formatJson([ 1, 2 ])).toBe('[1,2]\n');
     });
 });
 
 describe('formatTable', () => {
-    it('renders a header row and one row per item, pipe-delimited', () => {
+    it('renders a header row and one row per item, pipe-delimited, with a trailing newline', () => {
         const text = formatTable(
             [ 'a', 'b' ],
             [ { a: 1, b: 2 }, { a: 3, b: 4 } ],
         );
 
-        expect(text).toBe('a|b\n1|2\n3|4');
+        expect(text).toBe('a|b\n1|2\n3|4\n');
     });
 
     it('renders a missing/null cell as an empty string, not "null" or "undefined"', () => {
         const text = formatTable([ 'a', 'b' ], [ { a: 1, b: null } ]);
 
-        expect(text).toBe('a|b\n1|');
+        expect(text).toBe('a|b\n1|\n');
     });
 
     it('renders just the header row for an empty result set', () => {
-        expect(formatTable([ 'a', 'b' ], [])).toBe('a|b');
+        expect(formatTable([ 'a', 'b' ], [])).toBe('a|b\n');
     });
 });
 
@@ -42,7 +42,7 @@ describe('formatSearchTable', () => {
             'fulltext',
         );
 
-        expect(text).toBe('note_title|file_line_count\nA|5');
+        expect(text).toBe('note_title|file_line_count\nA|5\n');
     });
 
     it('includes fulltext_rank/semantic_rank columns for hybrid mode, even with a null rank', () => {
@@ -51,7 +51,7 @@ describe('formatSearchTable', () => {
             'hybrid',
         );
 
-        expect(text).toBe('note_title|file_line_count|fulltext_rank|semantic_rank\nA|5|1|');
+        expect(text).toBe('note_title|file_line_count|fulltext_rank|semantic_rank\nA|5|1|\n');
     });
 });
 
@@ -99,7 +99,7 @@ describe('formatGrepTable', () => {
             },
         ]);
 
-        expect(text).toBe('note_title|file_line_count|line_matches\nRecipe|10|L2: hello world; L5: hello again');
+        expect(text).toBe('note_title|file_line_count|line_matches\nRecipe|10|L2: hello world; L5: hello again\n');
     });
 
     it('appends "(+N more)" when totalMatchCount exceeds the capped lineMatches length', () => {
@@ -112,21 +112,21 @@ describe('formatGrepTable', () => {
             },
         ]);
 
-        expect(text).toBe('note_title|file_line_count|line_matches\nBig|100|L1: x (+11 more)');
+        expect(text).toBe('note_title|file_line_count|line_matches\nBig|100|L1: x (+11 more)\n');
     });
 });
 
 describe('formatTagListTable', () => {
     it('maps tag/notesWithTag to tag/notes_with_tag', () => {
         const text = formatTagListTable([ { tag: 'project', notesWithTag: 3 } ]);
-        expect(text).toBe('tag|notes_with_tag\nproject|3');
+        expect(text).toBe('tag|notes_with_tag\nproject|3\n');
     });
 });
 
 describe('formatTagNotesTable', () => {
     it('maps noteTitle/fileLineCount to note_title/file_line_count', () => {
         const text = formatTagNotesTable([ { noteTitle: 'A', fileLineCount: 5 } ]);
-        expect(text).toBe('note_title|file_line_count\nA|5');
+        expect(text).toBe('note_title|file_line_count\nA|5\n');
     });
 });
 

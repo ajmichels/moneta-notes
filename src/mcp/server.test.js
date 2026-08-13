@@ -121,7 +121,7 @@ describe('createServer', () => {
         });
 
         expect(result.isError).toBeFalsy();
-        expect(result.content[0].text).toBe('note_title|file_line_count\nA|3');
+        expect(result.content[0].text).toBe('note_title|file_line_count\nA|3\n');
     });
 
     it('rejects a tool call missing the required reason argument', async () => {

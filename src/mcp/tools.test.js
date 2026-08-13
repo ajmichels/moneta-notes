@@ -191,7 +191,7 @@ describe('searchTool', () => {
         );
 
         expect(result.isError).toBeUndefined();
-        expect(result.content[0].text).toBe('note_title|file_line_count\nRecipe|5');
+        expect(result.content[0].text).toBe('note_title|file_line_count\nRecipe|5\n');
         db.close();
     });
 
@@ -234,7 +234,7 @@ describe('grepTool', () => {
 
         expect(result.isError).toBeUndefined();
         expect(result.content[0].text).toBe(
-            'note_title|file_line_count|line_matches\nRecipe|2|L2: some hello world text',
+            'note_title|file_line_count|line_matches\nRecipe|2|L2: some hello world text\n',
         );
     });
 
@@ -259,7 +259,7 @@ describe('tagListTool', () => {
 
         const result = await tagListTool(makeDeps({ db }), { reason: 'testing tag_list' });
 
-        expect(result.content[0].text).toBe('tag|notes_with_tag\nproject|1');
+        expect(result.content[0].text).toBe('tag|notes_with_tag\nproject|1\n');
         db.close();
     });
 });
@@ -274,7 +274,7 @@ describe('tagNotesTool', () => {
             makeDeps({ db }), { tag: 'project', reason: 'testing tag_notes' },
         );
 
-        expect(result.content[0].text).toBe('note_title|file_line_count\nA|3');
+        expect(result.content[0].text).toBe('note_title|file_line_count\nA|3\n');
         db.close();
     });
 });

@@ -1,5 +1,5 @@
 export function formatJson(data) {
-    return JSON.stringify(data);
+    return `${JSON.stringify(data)}\n`;
 }
 
 function formatCell(value) {
@@ -12,7 +12,7 @@ function formatCell(value) {
 export function formatTable(columns, rows) {
     const header = columns.join('|');
     const lines = rows.map((row) => columns.map((col) => formatCell(row[col])).join('|'));
-    return [ header, ...lines ].join('\n');
+    return `${[ header, ...lines ].join('\n')}\n`;
 }
 
 export function formatSearchTable(results, mode) {
