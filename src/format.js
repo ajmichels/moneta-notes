@@ -59,6 +59,14 @@ export function formatTagNotesTable(results) {
     return formatTable([ 'note_title', 'file_line_count' ], rows);
 }
 
+export function formatStats(stats, { json = false, daemonRunning } = {}) {
+    const withDaemon = { ...stats, daemon_running: daemonRunning };
+    if (json) {
+        return formatJson(withDaemon);
+    }
+    return `${Object.entries(withDaemon).map(([ key, value ]) => `${key}: ${value}`).join('\n')}\n`;
+}
+
 export function formatExplain({ results, pipeline }) {
     const header = `mode=${pipeline.mode} limit=${pipeline.limit} overfetch=${pipeline.overfetchLimit} `
         + `fts5_expression=${JSON.stringify(pipeline.fulltextExpression)}`;

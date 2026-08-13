@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
     formatJson, formatTable, formatSearchTable, formatExplain, formatGrepTable,
-    formatTagListTable, formatTagNotesTable,
+    formatTagListTable, formatTagNotesTable, formatStats,
 } from './format.js';
 
 describe('formatJson', () => {
@@ -127,5 +127,18 @@ describe('formatTagNotesTable', () => {
     it('maps noteTitle/fileLineCount to note_title/file_line_count', () => {
         const text = formatTagNotesTable([ { noteTitle: 'A', fileLineCount: 5 } ]);
         expect(text).toBe('note_title|file_line_count\nA|5');
+    });
+});
+
+describe('formatStats', () => {
+    it('renders key: value lines including daemon status', () => {
+        const text = formatStats({ note_count: 3 }, { daemonRunning: true });
+        expect(text).toContain('note_count: 3');
+        expect(text).toContain('daemon_running: true');
+    });
+
+    it('returns JSON when json is true', () => {
+        const text = formatStats({ note_count: 3 }, { json: true, daemonRunning: false });
+        expect(JSON.parse(text)).toEqual({ note_count: 3, daemon_running: false });
     });
 });
