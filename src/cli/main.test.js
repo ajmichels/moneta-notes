@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { join, dirname } from 'node:path';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync as readAuditLog } from 'node:fs';
 import { Readable } from 'node:stream';
 import {
@@ -10,6 +10,7 @@ import {
 import { openDb } from '../core/db.js';
 import { syncNoteTags } from '../core/tags.js';
 import { getAuditLogger } from '../logger.js';
+import { buildDefaultConfig } from '../config.js';
 
 function fakeStdin(text) {
     return Readable.from([ text ]);
@@ -59,24 +60,22 @@ describe('dispatch: centralized error handling', () => {
 });
 
 describe('resolveVaultRoot', () => {
-    it('throws a descriptive error when MNOTES_VAULT_ROOT is not set', () => {
-        expect(() => resolveVaultRoot({})).toThrow(/MNOTES_VAULT_ROOT/);
+    it('returns vault_path from the given config', () => {
+        expect(resolveVaultRoot({ vault_path: '/tmp/vault' })).toBe('/tmp/vault');
     });
 
-    it('returns the env value when set', () => {
-        expect(resolveVaultRoot({ MNOTES_VAULT_ROOT: '/tmp/vault' })).toBe('/tmp/vault');
+    it('defaults to loadConfig()\'s vault_path when no config is passed', () => {
+        expect(resolveVaultRoot()).toBe(buildDefaultConfig().vault_path);
     });
 });
 
 describe('resolveDbPath', () => {
-    it('falls back to the documented Application Support default when unset', () => {
-        expect(resolveDbPath({})).toBe(
-            join(homedir(), 'Library', 'Application Support', 'mnotes', 'index.db'),
-        );
+    it('returns db_path from the given config', () => {
+        expect(resolveDbPath({ db_path: '/tmp/index.db' })).toBe('/tmp/index.db');
     });
 
-    it('returns MNOTES_DB_PATH when set', () => {
-        expect(resolveDbPath({ MNOTES_DB_PATH: '/tmp/index.db' })).toBe('/tmp/index.db');
+    it('defaults to loadConfig()\'s db_path when no config is passed', () => {
+        expect(resolveDbPath()).toBe(buildDefaultConfig().db_path);
     });
 });
 

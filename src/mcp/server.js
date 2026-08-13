@@ -1,5 +1,4 @@
 import { DatabaseSync } from 'node:sqlite';
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -7,7 +6,8 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { openDb, SCHEMA_VERSION } from '../core/db.js';
 import { getAuditLogger, getLogger, defaultLogDir } from '../logger.js';
 import { embed } from '../indexer/embed.js';
-import { defaultAppSupportDir, DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_VERSION } from '../indexer/daemon.js';
+import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_VERSION } from '../indexer/daemon.js';
+import { loadConfig } from '../config.js';
 import { registerPrompts } from './prompts.js';
 import {
     searchTool, grepTool, tagListTool, tagNotesTool, noteReadTool, noteWriteTool,
@@ -166,18 +166,12 @@ export function createServer(deps) {
     return server;
 }
 
-function resolveVaultRoot(env = process.env) {
-    if (!env.MNOTES_VAULT_ROOT) {
-        throw new Error(
-            'MNOTES_VAULT_ROOT is not set — point it at your Obsidian vault directory '
-            + '(stand-in for config.toml\'s vault_path until S009 lands)',
-        );
-    }
-    return env.MNOTES_VAULT_ROOT;
+function resolveVaultRoot(config = loadConfig()) {
+    return config.vault_path;
 }
 
-function resolveDbPath(env = process.env) {
-    return env.MNOTES_DB_PATH ?? join(defaultAppSupportDir(), 'index.db');
+function resolveDbPath(config = loadConfig()) {
+    return config.db_path;
 }
 
 export async function main() {

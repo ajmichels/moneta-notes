@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { readFileSync } from 'node:fs';
@@ -10,10 +9,9 @@ import { noteRead, noteWrite, noteEdit, noteAppend, noteRename } from '../core/n
 import { titleToPath } from '../core/note-fs.js';
 import { logAudit, getAuditLogger, defaultLogDir } from '../logger.js';
 import { openDb } from '../core/db.js';
-import {
-    defaultSocketPath, defaultAppSupportDir, DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_VERSION,
-} from '../indexer/daemon.js';
+import { defaultSocketPath, DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_VERSION } from '../indexer/daemon.js';
 import { embed as realEmbed } from '../indexer/embed.js';
+import { loadConfig } from '../config.js';
 import { computeStats, checkDaemonRunning } from './stats.js';
 import { runReindexCommand } from './reindex.js';
 import {
@@ -21,18 +19,12 @@ import {
     formatStats, formatJson,
 } from '../format.js';
 
-export function resolveVaultRoot(env = process.env) {
-    if (!env.MNOTES_VAULT_ROOT) {
-        throw new Error(
-            'MNOTES_VAULT_ROOT is not set — point it at your Obsidian vault directory '
-            + '(stand-in for config.toml\'s vault_path until S009 lands)',
-        );
-    }
-    return env.MNOTES_VAULT_ROOT;
+export function resolveVaultRoot(config = loadConfig()) {
+    return config.vault_path;
 }
 
-export function resolveDbPath(env = process.env) {
-    return env.MNOTES_DB_PATH ?? join(defaultAppSupportDir(), 'index.db');
+export function resolveDbPath(config = loadConfig()) {
+    return config.db_path;
 }
 
 const COMMANDS = {};

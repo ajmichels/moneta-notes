@@ -9,6 +9,7 @@ import { stripMdExtension } from '../core/note-fs.js';
 import { extractTags, syncNoteTags } from '../core/tags.js';
 import { openDb, setMeta } from '../core/db.js';
 import { getLogger, defaultLogDir, runWithLogger, getContextLogger } from '../logger.js';
+import { loadConfig } from '../config.js';
 import {
     chunkText as realChunkText, loadTokenizer, tokenizeWithOffsets as realTokenizeWithOffsets,
     embed as realEmbed,
@@ -541,13 +542,12 @@ export async function startDaemon(options = {}) {
 
 // The actual process entry point — everything above is built as an importable, independently
 // testable function, but a real `launchd`-managed daemon process needs something that runs on
-// `node src/indexer/daemon.js` with no caller supplying options. Real vaultRoot/dbPath resolution
-// from `config.toml` is S009's job (this plan hardcodes every other default already, per its own
-// "Explicitly out of scope" section) — main() here reads two placeholder env vars instead.
+// `node src/indexer/daemon.js` with no caller supplying options.
 export async function main() {
+    const config = loadConfig();
     return startDaemon({
-        vaultRoot: process.env.MNOTES_VAULT_ROOT,
-        dbPath: process.env.MNOTES_DB_PATH,
+        vaultRoot: config.vault_path,
+        dbPath: config.db_path,
     });
 }
 
