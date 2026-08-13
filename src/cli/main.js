@@ -5,7 +5,10 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { search, explainSearch } from '../core/search.js';
 import { grep } from '../core/grep.js';
-import { formatSearchTable, formatExplain, formatGrepTable, formatJson } from '../format.js';
+import { tagList, tagNotes } from '../core/tags.js';
+import {
+    formatSearchTable, formatExplain, formatGrepTable, formatTagListTable, formatTagNotesTable, formatJson,
+} from '../format.js';
 
 export function resolveVaultRoot(env = process.env) {
     if (!env.MNOTES_VAULT_ROOT) {
@@ -115,6 +118,46 @@ export async function runGrep(args, deps) {
 }
 
 registerCommand('grep', runGrep);
+
+async function runTagsList(args, deps) {
+    const { values } = parseArgs({ args, options: { json: { type: 'boolean', default: false } } });
+    const tags = tagList(deps.db);
+
+    if (values.json) {
+        const mapped = tags.map((t) => ({ tag: t.tag, notes_with_tag: t.notesWithTag }));
+        return { stdout: formatJson(mapped), stderr: '', exitCode: 0 };
+    }
+
+    return { stdout: formatTagListTable(tags), stderr: '', exitCode: 0 };
+}
+
+async function runTagsNotes(args, deps) {
+    const { values, positionals } = parseArgs({
+        args, allowPositionals: true, options: { json: { type: 'boolean', default: false } },
+    });
+    const tagName = positionals[0];
+    const notes = tagNotes(deps.db, tagName);
+
+    if (values.json) {
+        const mapped = notes.map((n) => ({ note_title: n.noteTitle, file_line_count: n.fileLineCount }));
+        return { stdout: formatJson(mapped), stderr: '', exitCode: 0 };
+    }
+
+    return { stdout: formatTagNotesTable(notes), stderr: '', exitCode: 0 };
+}
+
+export async function runTags(args, deps) {
+    const [ sub, ...rest ] = args;
+    if (sub === 'list') {
+        return runTagsList(rest, deps);
+    }
+    if (sub === 'notes') {
+        return runTagsNotes(rest, deps);
+    }
+    return { stdout: '', stderr: `mnotes: unknown tags subcommand "${sub}"\n`, exitCode: 1 };
+}
+
+registerCommand('tags', runTags);
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
     main().then((exitCode) => {

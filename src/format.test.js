@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { formatJson, formatTable, formatSearchTable, formatExplain, formatGrepTable } from './format.js';
+import {
+    formatJson, formatTable, formatSearchTable, formatExplain, formatGrepTable,
+    formatTagListTable, formatTagNotesTable,
+} from './format.js';
 
 describe('formatJson', () => {
     it('serializes data as compact JSON, no whitespace, no trailing newline', () => {
@@ -110,5 +113,19 @@ describe('formatGrepTable', () => {
         ]);
 
         expect(text).toBe('note_title|file_line_count|line_matches\nBig|100|L1: x (+11 more)');
+    });
+});
+
+describe('formatTagListTable', () => {
+    it('maps tag/notesWithTag to tag/notes_with_tag', () => {
+        const text = formatTagListTable([ { tag: 'project', notesWithTag: 3 } ]);
+        expect(text).toBe('tag|notes_with_tag\nproject|3');
+    });
+});
+
+describe('formatTagNotesTable', () => {
+    it('maps noteTitle/fileLineCount to note_title/file_line_count', () => {
+        const text = formatTagNotesTable([ { noteTitle: 'A', fileLineCount: 5 } ]);
+        expect(text).toBe('note_title|file_line_count\nA|5');
     });
 });

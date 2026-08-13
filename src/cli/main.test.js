@@ -2,8 +2,11 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { join } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { dispatch, resolveVaultRoot, resolveDbPath, registerCommand, runSearch, runGrep } from './main.js';
+import {
+    dispatch, resolveVaultRoot, resolveDbPath, registerCommand, runSearch, runGrep, runTags,
+} from './main.js';
 import { openDb } from '../core/db.js';
+import { syncNoteTags } from '../core/tags.js';
 
 function insertTestNote(db, path, lineCount = 5) {
     db.prepare(
@@ -167,5 +170,35 @@ describe('runGrep', () => {
         const result = await runGrep([ 'hello', '--json' ], { vaultRoot });
 
         expect(JSON.parse(result.stdout)[0].note_title).toBe('Recipe');
+    });
+});
+
+describe('runTags', () => {
+    it('list: formats tag inventory', async () => {
+        const { db } = openDb(':memory:');
+        const noteId = insertTestNote(db, 'A.md');
+        syncNoteTags(db, noteId, [ 'project' ]);
+
+        const result = await runTags([ 'list' ], { db });
+
+        expect(result.stdout).toBe('tag|notes_with_tag\nproject|1');
+        db.close();
+    });
+
+    it('notes <tag>: formats notes carrying that tag', async () => {
+        const { db } = openDb(':memory:');
+        const noteId = insertTestNote(db, 'A.md', 7);
+        syncNoteTags(db, noteId, [ 'project' ]);
+
+        const result = await runTags([ 'notes', 'project' ], { db });
+
+        expect(result.stdout).toBe('note_title|file_line_count\nA|7');
+        db.close();
+    });
+
+    it('returns an error for an unknown tags subcommand', async () => {
+        const result = await runTags([ 'bogus' ], {});
+        expect(result.exitCode).toBe(1);
+        expect(result.stderr).toMatch(/unknown tags subcommand "bogus"/);
     });
 });

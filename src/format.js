@@ -49,6 +49,16 @@ export function formatGrepTable(results) {
     return formatTable([ 'note_title', 'file_line_count', 'line_matches' ], rows);
 }
 
+export function formatTagListTable(results) {
+    const rows = results.map((r) => ({ tag: r.tag, notes_with_tag: r.notesWithTag }));
+    return formatTable([ 'tag', 'notes_with_tag' ], rows);
+}
+
+export function formatTagNotesTable(results) {
+    const rows = results.map((r) => ({ note_title: r.noteTitle, file_line_count: r.fileLineCount }));
+    return formatTable([ 'note_title', 'file_line_count' ], rows);
+}
+
 export function formatExplain({ results, pipeline }) {
     const header = `mode=${pipeline.mode} limit=${pipeline.limit} overfetch=${pipeline.overfetchLimit} `
         + `fts5_expression=${JSON.stringify(pipeline.fulltextExpression)}`;
