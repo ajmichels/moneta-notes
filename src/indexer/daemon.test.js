@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync, utimesSync, readFileSync, mkdirSync
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { createConnection } from 'node:net';
-import { openDb } from '../core/db.js';
+import { openDb, getMeta } from '../core/db.js';
 import { getLogger, runWithLogger } from '../logger.js';
 import {
     enqueuePath, dequeueNextPath, processPath, deleteNoteByPath, recordFailure, drainQueueOnce,
@@ -619,6 +619,28 @@ describe('runReindex', () => {
 
         const summaryMsg = messages.find((m) => m.summary);
         expect(summaryMsg.summary).toEqual({ reindexed: 0, skipped: 0, failed: 1 });
+    });
+});
+
+describe('runReindex: records last_full_reindex_at on a full-vault run', () => {
+    it('writes meta.last_full_reindex_at after a full-vault reindex completes', async () => {
+        const vaultRoot = makeTempVault();
+        writeNote(vaultRoot, 'A.md', 'note a', 1000);
+        const db = makeTestDb();
+
+        await runReindex(vaultRoot, db, { ...baseDeps(), now: 5000 }, {}, () => {});
+
+        expect(getMeta(db, 'last_full_reindex_at')).toBe('5000');
+    });
+
+    it('does not touch last_full_reindex_at for a single-title reindex', async () => {
+        const vaultRoot = makeTempVault();
+        writeNote(vaultRoot, 'Only.md', 'note', 1000);
+        const db = makeTestDb();
+
+        await runReindex(vaultRoot, db, { ...baseDeps(), now: 5000 }, { noteTitle: 'Only' }, () => {});
+
+        expect(getMeta(db, 'last_full_reindex_at')).toBeNull();
     });
 });
 

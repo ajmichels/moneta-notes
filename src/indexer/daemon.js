@@ -6,7 +6,7 @@ import { createServer } from 'node:net';
 import { homedir } from 'node:os';
 import { noteRead } from '../core/notes.js';
 import { extractTags, syncNoteTags } from '../core/tags.js';
-import { openDb } from '../core/db.js';
+import { openDb, setMeta } from '../core/db.js';
 import { getLogger, defaultLogDir, runWithLogger, getContextLogger } from '../logger.js';
 import {
     chunkText as realChunkText, loadTokenizer, tokenizeWithOffsets as realTokenizeWithOffsets,
@@ -380,6 +380,11 @@ export async function runReindex(vaultRoot, db, deps, options = {}, onMessage = 
     }
 
     getContextLogger().info('reindex complete', counts);
+
+    if (noteTitle === null) {
+        setMeta(db, 'last_full_reindex_at', String(now));
+    }
+
     onMessage({ summary: counts });
 }
 
