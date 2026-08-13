@@ -1,8 +1,9 @@
-import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { titleToPath, pathToTitle, hashContent, countLines, noteRead } from './notes.js';
+import { titleToPath, pathToTitle, hashContent, countLines, noteRead, noteWrite } from './notes.js';
+import { getLogger, runWithLogger } from '../logger.js';
 
 const tempDirs = [];
 
@@ -132,5 +133,80 @@ describe('noteRead', () => {
         writeRawNote(vaultRoot, 'Broken', '---\nfoo: [unterminated\n---\nbody');
 
         expect(() => noteRead(vaultRoot, 'Broken')).toThrow();
+    });
+});
+
+describe('noteWrite (create)', () => {
+    it('creates a new note with only the computed id when no metadata is given', () => {
+        const vaultRoot = makeTempVault();
+
+        const result = noteWrite(vaultRoot, 'New Note', { content: 'hello world' });
+
+        expect(result.title).toBe('New Note');
+        expect(result.line_count).toBe(1);
+
+        const onDisk = noteRead(vaultRoot, 'New Note');
+        expect(onDisk.metadata).toEqual({ id: 'New Note' });
+        expect(onDisk.content).toBe('hello world');
+        expect(result.hash).toBe(onDisk.content_hash);
+    });
+
+    it('merges caller metadata and overwrites any caller-supplied id with the computed one', () => {
+        const vaultRoot = makeTempVault();
+
+        noteWrite(vaultRoot, 'Weekly Notes/2026-W32', {
+            metadata: { id: 'bogus-caller-value', tags: [ 'weekly' ] },
+            content: 'week body',
+        });
+
+        const onDisk = noteRead(vaultRoot, 'Weekly Notes/2026-W32');
+        expect(onDisk.metadata).toEqual({ id: '2026-W32', tags: [ 'weekly' ] });
+    });
+
+    it('logs a debug line via the context logger when a caller-supplied id is overwritten', async () => {
+        const vaultRoot = makeTempVault();
+        const logDir = mkdtempSync(join(tmpdir(), 'mnotes-notes-test-log-'));
+        const logger = getLogger('mcp-server', logDir);
+
+        runWithLogger(logger, () =>
+            noteWrite(vaultRoot, 'Logged Id', { metadata: { id: 'bogus' }, content: 'body' }));
+
+        await vi.waitFor(() => {
+            const line = readFileSync(join(logDir, 'mcp-server.log'), 'utf8').trim();
+            expect(line).toContain('DEBUG [mcp-server] overwrote caller-supplied id');
+            expect(line).toContain('note_title="Logged Id"');
+            expect(line).toContain('supplied_id="bogus"');
+            expect(line).toContain('computed_id="Logged Id"');
+        });
+        rmSync(logDir, { recursive: true, force: true });
+    });
+
+    it('does not log when no metadata is given (nothing caller-supplied to overwrite)', async () => {
+        const vaultRoot = makeTempVault();
+        const logDir = mkdtempSync(join(tmpdir(), 'mnotes-notes-test-log-'));
+        const logger = getLogger('mcp-server', logDir);
+
+        runWithLogger(logger, () => noteWrite(vaultRoot, 'No Metadata', { content: 'body' }));
+
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(existsSync(join(logDir, 'mcp-server.log'))).toBe(false);
+        rmSync(logDir, { recursive: true, force: true });
+    });
+
+    it('creates parent folders for a folder-prefixed title', () => {
+        const vaultRoot = makeTempVault();
+        noteWrite(vaultRoot, 'Daily Notes/2026-08-05', { content: 'daily body' });
+
+        expect(noteRead(vaultRoot, 'Daily Notes/2026-08-05').content).toBe('daily body');
+    });
+
+    it('errors when hash is null and the title already exists', () => {
+        const vaultRoot = makeTempVault();
+        writeRawNote(vaultRoot, 'Existing', 'already here');
+
+        expect(() => noteWrite(vaultRoot, 'Existing', { content: 'overwrite attempt' })).toThrow(
+            /already exists/i,
+        );
+        expect(noteRead(vaultRoot, 'Existing').content).toBe('already here');
     });
 });

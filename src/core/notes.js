@@ -1,7 +1,8 @@
-import { join, relative } from 'node:path';
+import { join, relative, dirname } from 'node:path';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import matter from 'gray-matter';
+import { getContextLogger } from '../logger.js';
 
 export function titleToPath(vaultRoot, title) {
     return join(vaultRoot, `${title}.md`);
@@ -72,4 +73,52 @@ export function noteRead(vaultRoot, title, { startLine, endLine } = {}) {
         metadata,
         content,
     };
+}
+
+function computeId(title) {
+    const segments = title.split('/');
+    return segments[segments.length - 1];
+}
+
+// `callerMetadata` is the metadata object passed to *this* call (null when the tool has no
+// metadata param, e.g. append/rename) — distinct from `baseMetadata`, which may already be a
+// merge of existing + caller metadata (S003 "Logging": only a caller-supplied `id` in this call's
+// own input is worth flagging, not the routine case of an existing id carrying forward unchanged).
+function withComputedId(baseMetadata, callerMetadata, title) {
+    const computedId = computeId(title);
+    if (callerMetadata && Object.prototype.hasOwnProperty.call(callerMetadata, 'id')) {
+        getContextLogger().debug('overwrote caller-supplied id', {
+            note_title: title,
+            supplied_id: callerMetadata.id,
+            computed_id: computedId,
+        });
+    }
+    return { ...(baseMetadata ?? {}), id: computedId };
+}
+
+function createNote(filePath, title, metadata, content) {
+    const data = withComputedId(metadata, metadata, title);
+    const raw = matter.stringify(content, data);
+
+    mkdirSync(dirname(filePath), { recursive: true });
+    writeFileSync(filePath, raw, 'utf8');
+
+    return { title, hash: hashContent(raw), line_count: countLines(content) };
+}
+
+export function noteWrite(vaultRoot, title, { hash = null, metadata = null, content } = {}) {
+    const filePath = titleToPath(vaultRoot, title);
+
+    if (hash !== null) {
+        throw new Error('note_write: updating an existing note is not yet implemented');
+    }
+
+    if (existsSync(filePath)) {
+        throw new Error(
+            `note_write: "${title}" already exists — a null hash only creates a new note. `
+            + 'Read the note first to get its current hash.',
+        );
+    }
+
+    return createNote(filePath, title, metadata, content);
 }
