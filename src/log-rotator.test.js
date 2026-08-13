@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, utimesSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { shouldRotate, rotateLogFile, rotateLogDirectory } from './log-rotator.js';
+import { shouldRotate, rotateLogFile, rotateLogDirectory, main } from './log-rotator.js';
 
 const tempDirs = [];
 
@@ -136,5 +136,18 @@ describe('rotateLogDirectory', () => {
                 { maxSizeBytes: 1024, maxAgeMs: Infinity, keepCount: 5 },
             ),
         ).not.toThrow();
+    });
+});
+
+describe('main', () => {
+    it('rotates the known log files in the given directory', () => {
+        const dir = makeTempDir();
+        const auditPath = join(dir, 'audit.log');
+        writeFileSync(auditPath, Buffer.alloc(20 * 1024 * 1024));
+
+        main(dir);
+
+        expect(readFileSync(auditPath, 'utf8')).toBe('');
+        expect(existsSync(`${auditPath}.1`)).toBe(true);
     });
 });

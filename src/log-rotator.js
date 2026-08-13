@@ -1,5 +1,7 @@
 import { existsSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { defaultLogDir } from './logger.js';
 
 export function shouldRotate(filePath, policy) {
     if (!existsSync(filePath)) {
@@ -47,4 +49,12 @@ export function rotateLogDirectory(logDir, fileNames = LOG_FILE_NAMES, policy = 
             rotateLogFile(filePath, policy.keepCount);
         }
     }
+}
+
+export function main(logDir = defaultLogDir()) {
+    rotateLogDirectory(logDir);
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+    main();
 }
