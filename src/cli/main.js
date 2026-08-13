@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import { search, explainSearch } from '../core/search.js';
 import { grep } from '../core/grep.js';
 import { tagList, tagNotes } from '../core/tags.js';
-import { noteRead, titleToPath, noteWrite } from '../core/notes.js';
+import { noteRead, titleToPath, noteWrite, noteEdit } from '../core/notes.js';
 import { logAudit } from '../logger.js';
 import {
     formatSearchTable, formatExplain, formatGrepTable, formatTagListTable, formatTagNotesTable, formatJson,
@@ -254,6 +254,36 @@ export async function runWrite(args, deps) {
 }
 
 registerCommand('write', runWrite);
+
+export async function runEdit(args, deps) {
+    const { values, positionals } = parseArgs({
+        args,
+        allowPositionals: true,
+        options: {
+            hash: { type: 'string' },
+            old: { type: 'string' },
+            new: { type: 'string' },
+            metadata: { type: 'string' },
+        },
+    });
+    const title = positionals[0];
+    const metadata = parseMetadataFlag(values.metadata);
+
+    try {
+        const result = noteEdit(deps.vaultRoot, title, {
+            hash: values.hash, oldTxt: values.old, newTxt: values.new, metadata,
+        });
+        logAudit(deps.auditLogger, { tool: 'edit', noteTitle: title, source: 'cli', outcome: 'success' });
+        return { stdout: formatJson(result), stderr: '', exitCode: 0 };
+    } catch (err) {
+        logAudit(deps.auditLogger, {
+            tool: 'edit', noteTitle: title, source: 'cli', outcome: 'error', errorMessage: err.message,
+        });
+        throw err;
+    }
+}
+
+registerCommand('edit', runEdit);
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
     main().then((exitCode) => {

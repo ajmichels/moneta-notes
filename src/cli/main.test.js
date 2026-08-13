@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync as readAudi
 import { Readable } from 'node:stream';
 import {
     dispatch, resolveVaultRoot, resolveDbPath, registerCommand, runSearch, runGrep, runTags, runRead,
-    runWrite,
+    runWrite, runEdit,
 } from './main.js';
 import { openDb } from '../core/db.js';
 import { syncNoteTags } from '../core/tags.js';
@@ -336,5 +336,57 @@ describe('runWrite', () => {
         await expect(
             runWrite([ 'Bad Meta', '--content=x', '--metadata={not json' ], { vaultRoot, auditLogger }),
         ).rejects.toThrow(/--metadata is not valid JSON/);
+    });
+});
+
+describe('runEdit', () => {
+    it('applies a surgical replace and logs a success audit entry', async () => {
+        const vaultRoot = makeTempVault();
+        const logDir = makeTempVault();
+        const auditLogger = getAuditLogger(logDir);
+        const created = await runWrite([ 'Editable', '--content=the quick fox' ], { vaultRoot, auditLogger });
+        const hash = JSON.parse(created.stdout).hash;
+
+        const result = await runEdit(
+            [ 'Editable', `--hash=${hash}`, '--old=quick', '--new=slow' ],
+            { vaultRoot, auditLogger },
+        );
+
+        expect(result.exitCode).toBe(0);
+        expect(JSON.parse(result.stdout).title).toBe('Editable');
+
+        await vi.waitFor(() => {
+            const lines = readAuditLog(join(logDir, 'audit.log'), 'utf8').trim().split('\n');
+            const lastLine = lines[lines.length - 1];
+            expect(lastLine).toContain('INFO  [audit] edit');
+            expect(lastLine).toContain('note_title="Editable"');
+            expect(lastLine).toContain('source=cli');
+            expect(lastLine).toContain('outcome=success');
+        });
+    });
+
+    it('propagates an ambiguous-match error via dispatch and logs an error audit entry', async () => {
+        const vaultRoot = makeTempVault();
+        const logDir = makeTempVault();
+        const auditLogger = getAuditLogger(logDir);
+        const created = await runWrite([ 'Ambiguous', '--content=foo bar foo' ], { vaultRoot, auditLogger });
+        const hash = JSON.parse(created.stdout).hash;
+
+        const result = await dispatch(
+            [ 'edit', 'Ambiguous', `--hash=${hash}`, '--old=foo', '--new=baz' ],
+            { vaultRoot, auditLogger },
+        );
+
+        expect(result.exitCode).toBe(1);
+        expect(result.stderr).toMatch(/ambiguous|matches \d+ times/i);
+
+        await vi.waitFor(() => {
+            const lines = readAuditLog(join(logDir, 'audit.log'), 'utf8').trim().split('\n');
+            const lastLine = lines[lines.length - 1];
+            expect(lastLine).toContain('INFO  [audit] edit');
+            expect(lastLine).toContain('note_title="Ambiguous"');
+            expect(lastLine).toContain('outcome=error');
+            expect(lastLine).toMatch(/error_message=".*ambiguous.*"/i);
+        });
     });
 });
