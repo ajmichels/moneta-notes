@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
-import { getLogger, defaultLogDir, getAuditLogger, logAudit } from './logger.js';
+import { getLogger, defaultLogDir, getAuditLogger, logAudit, runWithLogger, getContextLogger } from './logger.js';
 
 const tempDirs = [];
 
@@ -230,5 +230,58 @@ describe('logAudit', () => {
                 outcome: 'partial',
             }),
         ).toThrow(/outcome/);
+    });
+});
+
+describe('runWithLogger / getContextLogger', () => {
+    it('returns a no-op logger outside of any runWithLogger context', async () => {
+        const logger = getContextLogger();
+        await expect(logger.info('no context')).resolves.toBeUndefined();
+        await expect(logger.warn('no context', { key: 'value' })).resolves.toBeUndefined();
+    });
+
+    it('returns the active logger inside runWithLogger', () => {
+        const logDir = makeTempLogDir();
+        const logger = getLogger('indexer', logDir);
+
+        runWithLogger(logger, () => {
+            expect(getContextLogger()).toBe(logger);
+        });
+    });
+
+    it('keeps the context available across an await boundary', async () => {
+        const logDir = makeTempLogDir();
+        const logger = getLogger('indexer', logDir);
+
+        await runWithLogger(logger, async () => {
+            await Promise.resolve();
+            expect(getContextLogger()).toBe(logger);
+        });
+    });
+
+    it('isolates concurrent runWithLogger calls from each other', async () => {
+        const logDirA = makeTempLogDir();
+        const logDirB = makeTempLogDir();
+        const loggerA = getLogger('indexer', logDirA);
+        const loggerB = getLogger('mcp-server', logDirB);
+
+        await Promise.all([
+            runWithLogger(loggerA, async () => {
+                await Promise.resolve();
+                expect(getContextLogger()).toBe(loggerA);
+            }),
+            runWithLogger(loggerB, async () => {
+                await Promise.resolve();
+                expect(getContextLogger()).toBe(loggerB);
+            }),
+        ]);
+    });
+
+    it('reverts to the no-op logger once runWithLogger returns', () => {
+        const logDir = makeTempLogDir();
+        const logger = getLogger('indexer', logDir);
+
+        runWithLogger(logger, () => {});
+        expect(getContextLogger()).not.toBe(logger);
     });
 });

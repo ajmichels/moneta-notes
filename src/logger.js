@@ -1,9 +1,21 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { mkdirSync } from 'node:fs';
 import { appendFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 const LEVELS = [ 'trace', 'debug', 'info', 'warn', 'error', 'fatal' ];
+
+const loggerContext = new AsyncLocalStorage();
+const NOOP_LOGGER = Object.fromEntries(LEVELS.map(level => [ level, () => Promise.resolve() ]));
+
+export function runWithLogger(logger, fn) {
+    return loggerContext.run(logger, fn);
+}
+
+export function getContextLogger() {
+    return loggerContext.getStore() ?? NOOP_LOGGER;
+}
 
 export function defaultLogDir() {
     return join(homedir(), 'Library', 'Logs', 'com.ajmichels.mnotes');
