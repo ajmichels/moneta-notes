@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
-import { getLogger, defaultLogDir } from './logger.js';
+import { getLogger, defaultLogDir, getAuditLogger, logAudit } from './logger.js';
 
 const tempDirs = [];
 
@@ -103,5 +103,132 @@ describe('getLogger: directory creation and defaultLogDir', () => {
 
     it('defaultLogDir points at ~/Library/Logs/com.ajmichels.mnotes', () => {
         expect(defaultLogDir()).toBe(join(homedir(), 'Library', 'Logs', 'com.ajmichels.mnotes'));
+    });
+});
+
+describe('logAudit', () => {
+    it('writes only the allowlisted fields, dropping note body/diff even if passed', async () => {
+        const logDir = makeTempLogDir();
+        const auditLogger = getAuditLogger(logDir);
+
+        await logAudit(auditLogger, {
+            tool: 'note_write',
+            noteTitle: 'Weekly Notes/2026-W32',
+            source: 'mcp',
+            reason: 'testing redaction',
+            outcome: 'success',
+            body: 'SECRET NOTE CONTENT SHOULD NEVER APPEAR',
+            diff: '-old\n+SECRET DIFF LINE',
+        });
+
+        const line = readFileSync(join(logDir, 'audit.log'), 'utf8').trim();
+        expect(line).not.toContain('SECRET NOTE CONTENT');
+        expect(line).not.toContain('SECRET DIFF LINE');
+        expect(line).toContain('INFO  [audit] note_write');
+        expect(line).toContain('note_title="Weekly Notes/2026-W32"');
+        expect(line).toContain('source=mcp');
+        expect(line).toContain('reason="testing redaction"');
+        expect(line).toContain('outcome=success');
+        expect(line).not.toContain('error_message');
+    });
+
+    it('writes at info level even when outcome is "error", including the error message', async () => {
+        const logDir = makeTempLogDir();
+        const auditLogger = getAuditLogger(logDir);
+
+        await logAudit(auditLogger, {
+            tool: 'write',
+            noteTitle: 'Test.md',
+            source: 'cli',
+            outcome: 'error',
+            errorMessage: 'hash mismatch',
+        });
+
+        const line = readFileSync(join(logDir, 'audit.log'), 'utf8').trim();
+        expect(line).toContain('INFO  [audit] write');
+        expect(line).toContain('source=cli');
+        expect(line).not.toContain('reason=');
+        expect(line).toContain('error_message="hash mismatch"');
+    });
+
+    it('throws when source is "mcp" and reason is missing', () => {
+        const logDir = makeTempLogDir();
+        const auditLogger = getAuditLogger(logDir);
+
+        expect(() =>
+            logAudit(auditLogger, {
+                tool: 'note_write',
+                noteTitle: 'Test.md',
+                source: 'mcp',
+                outcome: 'success',
+            }),
+        ).toThrow(/reason/);
+    });
+
+    it('throws when source is "cli" and reason is non-null', () => {
+        const logDir = makeTempLogDir();
+        const auditLogger = getAuditLogger(logDir);
+
+        expect(() =>
+            logAudit(auditLogger, {
+                tool: 'write',
+                noteTitle: 'Test.md',
+                source: 'cli',
+                reason: 'should not be here',
+                outcome: 'success',
+            }),
+        ).toThrow(/reason/);
+    });
+
+    it('throws when outcome is "error" and errorMessage is missing', () => {
+        const logDir = makeTempLogDir();
+        const auditLogger = getAuditLogger(logDir);
+
+        expect(() =>
+            logAudit(auditLogger, {
+                tool: 'write',
+                noteTitle: 'Test.md',
+                source: 'cli',
+                outcome: 'error',
+            }),
+        ).toThrow(/errorMessage/);
+    });
+
+    it('throws when outcome is "success" and errorMessage is non-null', () => {
+        const logDir = makeTempLogDir();
+        const auditLogger = getAuditLogger(logDir);
+
+        expect(() =>
+            logAudit(auditLogger, {
+                tool: 'write',
+                noteTitle: 'Test.md',
+                source: 'cli',
+                outcome: 'success',
+                errorMessage: 'should not be here',
+            }),
+        ).toThrow(/errorMessage/);
+    });
+
+    it('throws on an unrecognized source or outcome value', () => {
+        const logDir = makeTempLogDir();
+        const auditLogger = getAuditLogger(logDir);
+
+        expect(() =>
+            logAudit(auditLogger, {
+                tool: 'write',
+                noteTitle: 'Test.md',
+                source: 'web',
+                outcome: 'success',
+            }),
+        ).toThrow(/source/);
+
+        expect(() =>
+            logAudit(auditLogger, {
+                tool: 'write',
+                noteTitle: 'Test.md',
+                source: 'cli',
+                outcome: 'partial',
+            }),
+        ).toThrow(/outcome/);
     });
 });
