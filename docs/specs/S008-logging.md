@@ -4,7 +4,9 @@ Status: **Approved**
 Owns: `src/logger.js`, `src/log-rotator.js`
 Depends on: none (used by every other component)
 Consumed by: `S005-indexing-daemon`, `S006-cli`, `S007-mcp-server`, `S009-config-and-install`
-(rotation LaunchAgent installation)
+(rotation LaunchAgent installation) — and, via `getContextLogger()`, every `core/` module
+(`S001`-`S004`), per CLAUDE.md's instruction that `core/` use the shared logger instead of ad hoc
+`console.log`.
 
 ## Purpose
 
@@ -32,6 +34,33 @@ Each entry point (indexer daemon, MCP server, CLI) sets its own `process.title` 
 `mnotes-indexer`), purely so it's identifiable in Activity Monitor/`ps`. This is unrelated to logging
 — `src/logger.js` never reads `process.title`. The log file path always comes from the explicit
 `component` argument passed to `getLogger`, never inferred from the process.
+
+## Context propagation into `core/`: `runWithLogger` / `getContextLogger`
+
+`core/` modules (`S001`-`S004`) throw on error and never touch CLI flags, MCP tool schemas, or output
+formatting — but per CLAUDE.md they still shouldn't reach for ad hoc `console.log` when something
+worth a line in the log is happening below the level of a thrown error (e.g. a schema migration
+applied, a drift condition detected and repaired). Passing an explicit `logger` parameter through
+every `core/` function would leak a boundary-layer concern (which log file, which component) into
+signatures that are supposed to stay plain-JS-in, plain-JS-out. Instead, `src/logger.js` exports a
+`node:async_hooks` `AsyncLocalStorage`-backed context:
+
+- `runWithLogger(logger, fn)` — each boundary layer calls this once, wrapping its main entry point
+  (the indexer daemon's run loop, the MCP server's per-request handler, the CLI's command dispatch),
+  passing the `getLogger(component, logDir)` instance for its own component. Every `core/` call made
+  underneath — including across `await` boundaries — sees that same logger.
+- `getContextLogger()` — what `core/` code calls instead of importing `getLogger` directly. Returns
+  the logger passed to the nearest enclosing `runWithLogger`, or a no-op logger (every level resolves
+  immediately, writes nothing) when called with no such context — the case for `core/`'s own unit
+  tests, which call `core/` functions directly without any boundary layer running, per CLAUDE.md's
+  "unit-test `core/` directly" testing philosophy. `core/` code never has to special-case "am I being
+  tested" — the fallback makes that invisible.
+
+Log lines written this way land in whichever file the calling boundary layer already owns
+(`indexer.log`, `mcp-server.log`, or — for CLI mutating commands — the CLI's own logger instance,
+see `S006`) under that same component name; `core/` never creates or names its own log file. This
+keeps the "one log file per boundary-layer component" file layout below intact — `core/` only ever
+borrows the active context's destination, it doesn't add new destinations.
 
 ## Log line format
 

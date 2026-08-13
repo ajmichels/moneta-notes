@@ -1027,6 +1027,52 @@ git commit -m "feat(logging): add log-rotator main entry point with direct-execu
 
 ---
 
+### Task 9 (post-hoc addendum): `runWithLogger` / `getContextLogger` — AsyncLocalStorage context for `core/`
+
+**Files:**
+- Modify: `src/logger.js`
+- Modify: `src/logger.test.js`
+
+**Interfaces:**
+- Produces: `runWithLogger(logger, fn) -> ReturnType<fn>` and `getContextLogger() ->
+  ReturnType<typeof getLogger>`, backed by a module-level `node:async_hooks` `AsyncLocalStorage`.
+  `getContextLogger()` returns the logger passed to the nearest enclosing `runWithLogger` call
+  (propagating across `await` boundaries, isolated between concurrent calls), or a no-op logger
+  (every level resolves immediately without writing) when called with no enclosing context.
+
+This task was added after the rest of this plan had already shipped, once `S001`'s `core/db.js`
+existed with no logging path and CLAUDE.md's "no ad hoc `console.log` in `core/`" instruction had no
+concrete mechanism to satisfy without leaking a boundary-layer `logger` parameter into every `core/`
+function signature. See `docs/specs/S008-logging.md`'s "Context propagation into `core/`" section for
+the full rationale.
+
+- [x] **Step 1: Write the failing tests** — 5 cases added to `src/logger.test.js`: no-op logger
+  outside any context, correct logger returned inside `runWithLogger`, context survives an `await`,
+  two concurrent `runWithLogger` calls stay isolated from each other, context reverts to the no-op
+  logger once `runWithLogger` returns.
+- [x] **Step 2: Run tests to verify they fail** — `runWithLogger is not a function`.
+- [x] **Step 3: Write minimal implementation**
+
+```js
+import { AsyncLocalStorage } from 'node:async_hooks';
+
+const loggerContext = new AsyncLocalStorage();
+const NOOP_LOGGER = Object.fromEntries(LEVELS.map(level => [ level, () => Promise.resolve() ]));
+
+export function runWithLogger(logger, fn) {
+    return loggerContext.run(logger, fn);
+}
+
+export function getContextLogger() {
+    return loggerContext.getStore() ?? NOOP_LOGGER;
+}
+```
+
+- [x] **Step 4: Run tests to verify they pass** — 21/21 green.
+- [x] **Step 5: Commit** — `feat(logging): add runWithLogger/getContextLogger AsyncLocalStorage context`.
+
+---
+
 ## Self-Review Notes
 
 - **Spec coverage**: `src/logger.js` covers every piece of S008's logging half — a hand-rolled
@@ -1047,7 +1093,9 @@ git commit -m "feat(logging): add log-rotator main entry point with direct-execu
   parameter value, overridable by any future caller, but doesn't read config; what each component
   (`indexer/daemon.js`, `mcp/server.js`, `cli/*`) actually logs at each call site, and each
   component setting its own `process.title` for Activity Monitor visibility (S005/S006/S007) — this
-  plan only builds `getLogger`/`getAuditLogger`/`logAudit`, not any of their call sites.
+  plan only builds `getLogger`/`getAuditLogger`/`logAudit`/`runWithLogger`/`getContextLogger`, not any
+  of their call sites. Each consuming spec's own plan is responsible for wiring `runWithLogger` at its
+  entry point(s) and `getContextLogger()`/`getLogger()`/`logAudit()` at its own call sites.
 - **Design decisions not verbatim in S008, made explicit for consistency**: (1) the audit entry's
   error-detail field is named `error_message` (S008 says outcome is `"success"` or `"error"` "with
   the error message" but doesn't name the key); (2) `logAudit` throws on shape violations
