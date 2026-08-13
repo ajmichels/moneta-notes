@@ -6,7 +6,7 @@ import { openDb } from '../core/db.js';
 import { getLogger, runWithLogger } from '../logger.js';
 import {
     enqueuePath, dequeueNextPath, processPath, deleteNoteByPath, recordFailure, drainQueueOnce,
-    watermarkCatchup, existenceCheck,
+    watermarkCatchup, existenceCheck, createDebouncer,
 } from './daemon.js';
 
 const tempDirs = [];
@@ -451,5 +451,70 @@ describe('existenceCheck', () => {
 
         expect(count).toBe(1);
         expect(db.prepare('SELECT path FROM notes').get().path).toBe('Still Here.md');
+    });
+});
+
+describe('createDebouncer', () => {
+    it('fires onSettle once after debounceMs of quiet for a path', () => {
+        let scheduled = null;
+        const settled = [];
+        const debouncer = createDebouncer((path) => settled.push(path), {
+            debounceMs: 15000,
+            scheduleFn: (fn, ms) => { scheduled = { fn, ms }; return 'timer'; },
+            cancelFn: () => {},
+        });
+
+        debouncer.notify('A.md');
+
+        expect(scheduled.ms).toBe(15000);
+        expect(settled).toEqual([]);
+        scheduled.fn();
+        expect(settled).toEqual([ 'A.md' ]);
+    });
+
+    it('resets the timer on repeated notify() calls for the same path, cancelling the previous one', () => {
+        const cancelled = [];
+        let timerCount = 0;
+        const debouncer = createDebouncer(() => {}, {
+            scheduleFn: () => { timerCount += 1; return `timer-${timerCount}`; },
+            cancelFn: (id) => cancelled.push(id),
+        });
+
+        debouncer.notify('A.md');
+        debouncer.notify('A.md');
+        debouncer.notify('A.md');
+
+        expect(cancelled).toEqual([ 'timer-1', 'timer-2' ]);
+    });
+
+    it('tracks independent timers per path', () => {
+        const scheduledFns = {};
+        const settled = [];
+        const debouncer = createDebouncer((path) => settled.push(path), {
+            scheduleFn: (fn) => { scheduledFns[fn.name || Math.random()] = fn; return fn; },
+            cancelFn: () => {},
+        });
+
+        debouncer.notify('A.md');
+        debouncer.notify('B.md');
+
+        for (const fn of Object.values(scheduledFns)) {
+            fn();
+        }
+        expect(settled.sort()).toEqual([ 'A.md', 'B.md' ]);
+    });
+
+    it('cancelAll() cancels every pending timer', () => {
+        const cancelled = [];
+        const debouncer = createDebouncer(() => {}, {
+            scheduleFn: () => 'timer',
+            cancelFn: (id) => cancelled.push(id),
+        });
+
+        debouncer.notify('A.md');
+        debouncer.notify('B.md');
+        debouncer.cancelAll();
+
+        expect(cancelled).toEqual([ 'timer', 'timer' ]);
     });
 });

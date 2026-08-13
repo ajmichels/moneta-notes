@@ -274,3 +274,30 @@ export function existenceCheck(db, vaultRoot) {
     getContextLogger().info('existence check complete', { deleted_count: deletedCount });
     return deletedCount;
 }
+
+const DEFAULT_DEBOUNCE_MS = 15000;
+
+export function createDebouncer(onSettle, options = {}) {
+    const { debounceMs = DEFAULT_DEBOUNCE_MS, scheduleFn = setTimeout, cancelFn = clearTimeout } = options;
+    const timers = new Map();
+
+    function notify(path) {
+        if (timers.has(path)) {
+            cancelFn(timers.get(path));
+        }
+        const timer = scheduleFn(() => {
+            timers.delete(path);
+            onSettle(path);
+        }, debounceMs);
+        timers.set(path, timer);
+    }
+
+    function cancelAll() {
+        for (const timer of timers.values()) {
+            cancelFn(timer);
+        }
+        timers.clear();
+    }
+
+    return { notify, cancelAll };
+}
