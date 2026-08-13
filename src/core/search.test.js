@@ -1,0 +1,182 @@
+import { describe, it, expect } from 'vitest';
+import { openDb } from './db.js';
+import { search } from './search.js';
+
+function insertNote(db, { path, contentHash = 'hash', lineCount = 10, mtime = 1000 }) {
+    db.prepare(
+        'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+    ).run(path, contentHash, lineCount, mtime, mtime);
+    return db.prepare('SELECT id FROM notes WHERE path = ?').get(path).id;
+}
+
+function insertFtsRow(db, noteId, title, body) {
+    db.prepare('INSERT INTO notes_fts (rowid, title, body) VALUES (?, ?, ?)').run(noteId, title, body);
+}
+
+function insertChunkWithVector(db, noteId, {
+    chunkIndex = 0,
+    seed,
+    embeddingModel = 'test-model',
+    embeddingVersion = 'v1',
+}) {
+    db.prepare(`
+        INSERT INTO chunks
+            (note_id, chunk_index, char_start, char_end, token_count, embedding_model, embedding_version)
+        VALUES (?, ?, 0, 100, 50, ?, ?)
+    `).run(noteId, chunkIndex, embeddingModel, embeddingVersion);
+
+    const chunkId = db.prepare(
+        'SELECT id FROM chunks WHERE note_id = ? AND chunk_index = ?',
+    ).get(noteId, chunkIndex).id;
+
+    const vector = makeVector(seed);
+    db.prepare('INSERT INTO chunk_vectors (rowid, embedding) VALUES (CAST(? AS INTEGER), ?)').run(
+        chunkId,
+        Buffer.from(vector.buffer),
+    );
+    return chunkId;
+}
+
+// A constant-fill vector has the same *direction* regardless of magnitude, so two constant-fill
+// vectors always have cosine distance 0 to each other no matter what seed produced them. Deriving
+// each dimension from the seed via a simple deterministic PRNG instead gives genuinely different
+// directions per seed (same seed always reproduces the same vector) so cosine distance actually
+// differentiates "close" from "far" in these tests.
+function makeVector(seed) {
+    const vector = new Float32Array(1024);
+    let state = Math.floor(seed * 1e6) + 1;
+    for (let i = 0; i < 1024; i += 1) {
+        state = (state * 1103515245 + 12345) & 0x7fffffff;
+        vector[i] = (state % 1000) / 1000;
+    }
+    return vector;
+}
+
+function fakeEmbed(seed) {
+    return async () => makeVector(seed);
+}
+
+describe('search: fulltext mode', () => {
+    it('returns note_title (derived from path) and file_line_count for a MATCH hit', async () => {
+        const { db } = openDb(':memory:');
+        const noteId = insertNote(db, { path: 'Projects/Moneta.md', lineCount: 42 });
+        insertFtsRow(db, noteId, 'Moneta', 'notes about a personal knowledge graph');
+
+        const results = await search(db, { query: 'knowledge graph', mode: 'fulltext', limit: 20 });
+
+        expect(results).toEqual([
+            { note_title: 'Projects/Moneta', file_line_count: 42 },
+        ]);
+        db.close();
+    });
+
+    it('ranks a note with more query-term occurrences above one with fewer', async () => {
+        const { db } = openDb(':memory:');
+        const strongId = insertNote(db, { path: 'Strong.md' });
+        const weakId = insertNote(db, { path: 'Weak.md' });
+        insertFtsRow(db, weakId, 'Weak', 'graph appears once here');
+        insertFtsRow(db, strongId, 'Strong', 'graph graph graph graph everywhere, graph');
+
+        const results = await search(db, { query: 'graph', mode: 'fulltext', limit: 20 });
+
+        expect(results.map((r) => r.note_title)).toEqual([ 'Strong', 'Weak' ]);
+        db.close();
+    });
+
+    it('truncates to limit after over-fetching', async () => {
+        const { db } = openDb(':memory:');
+        for (let i = 0; i < 5; i += 1) {
+            const noteId = insertNote(db, { path: `Note${i}.md` });
+            insertFtsRow(db, noteId, `Note${i}`, 'shared term');
+        }
+
+        const results = await search(db, { query: 'shared', mode: 'fulltext', limit: 2 });
+
+        expect(results).toHaveLength(2);
+        db.close();
+    });
+
+    it('throws when query is missing', async () => {
+        const { db } = openDb(':memory:');
+        await expect(search(db, { mode: 'fulltext', limit: 20 })).rejects.toThrow(/query/);
+        db.close();
+    });
+});
+
+describe('search: semantic mode', () => {
+    it('returns the note whose chunk vector is closest to the query embedding', async () => {
+        const { db } = openDb(':memory:');
+        const closeId = insertNote(db, { path: 'Close.md', lineCount: 5 });
+        const farId = insertNote(db, { path: 'Far.md', lineCount: 5 });
+        insertChunkWithVector(db, closeId, { seed: 0.5 });
+        insertChunkWithVector(db, farId, { seed: 0.9 });
+
+        const results = await search(db, {
+            query: 'anything',
+            mode: 'semantic',
+            limit: 20,
+            embed: fakeEmbed(0.5),
+            embeddingModel: 'test-model',
+            embeddingVersion: 'v1',
+        });
+
+        expect(results[0].note_title).toBe('Close');
+        db.close();
+    });
+
+    it('collapses multiple chunk hits from the same note to one row (best chunk wins)', async () => {
+        const { db } = openDb(':memory:');
+        const noteId = insertNote(db, { path: 'Multi.md' });
+        insertChunkWithVector(db, noteId, { chunkIndex: 0, seed: 0.9 });
+        insertChunkWithVector(db, noteId, { chunkIndex: 1, seed: 0.5 });
+
+        const results = await search(db, {
+            query: 'anything',
+            mode: 'semantic',
+            limit: 20,
+            embed: fakeEmbed(0.5),
+            embeddingModel: 'test-model',
+            embeddingVersion: 'v1',
+        });
+
+        expect(results).toHaveLength(1);
+        expect(results[0].note_title).toBe('Multi');
+        db.close();
+    });
+
+    it('excludes chunks from a stale embedding_model/version', async () => {
+        const { db } = openDb(':memory:');
+        const staleId = insertNote(db, { path: 'Stale.md' });
+        insertChunkWithVector(db, staleId, {
+            seed: 0.5,
+            embeddingModel: 'old-model',
+            embeddingVersion: 'v0',
+        });
+
+        const results = await search(db, {
+            query: 'anything',
+            mode: 'semantic',
+            limit: 20,
+            embed: fakeEmbed(0.5),
+            embeddingModel: 'test-model',
+            embeddingVersion: 'v1',
+        });
+
+        expect(results).toHaveLength(0);
+        db.close();
+    });
+
+    it('throws when no embed function is provided', async () => {
+        const { db } = openDb(':memory:');
+        await expect(
+            search(db, {
+                query: 'x',
+                mode: 'semantic',
+                limit: 20,
+                embeddingModel: 'test-model',
+                embeddingVersion: 'v1',
+            }),
+        ).rejects.toThrow(/embed/);
+        db.close();
+    });
+});
