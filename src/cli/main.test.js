@@ -1,12 +1,19 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { join, dirname } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync as readAuditLog } from 'node:fs';
+import { Readable } from 'node:stream';
 import {
     dispatch, resolveVaultRoot, resolveDbPath, registerCommand, runSearch, runGrep, runTags, runRead,
+    runWrite,
 } from './main.js';
 import { openDb } from '../core/db.js';
 import { syncNoteTags } from '../core/tags.js';
+import { getAuditLogger } from '../logger.js';
+
+function fakeStdin(text) {
+    return Readable.from([ text ]);
+}
 
 function insertTestNote(db, path, lineCount = 5) {
     db.prepare(
@@ -259,5 +266,75 @@ describe('runRead', () => {
 
         expect(result.exitCode).toBe(1);
         expect(result.stderr).toMatch(/Note not found: "Ghost"/);
+    });
+});
+
+describe('runWrite', () => {
+    it('creates a note from --content and logs a success audit entry', async () => {
+        const vaultRoot = makeTempVault();
+        const logDir = makeTempVault();
+        const auditLogger = getAuditLogger(logDir);
+
+        const result = await runWrite(
+            [ 'New Note', '--content=hello world' ],
+            { vaultRoot, auditLogger },
+        );
+
+        expect(result.exitCode).toBe(0);
+        expect(JSON.parse(result.stdout).title).toBe('New Note');
+
+        await vi.waitFor(() => {
+            const line = readAuditLog(join(logDir, 'audit.log'), 'utf8').trim();
+            expect(line).toContain('INFO  [audit] write');
+            expect(line).toContain('note_title="New Note"');
+            expect(line).toContain('source=cli');
+            expect(line).toContain('outcome=success');
+            expect(line).not.toContain('reason=');
+        });
+    });
+
+    it('reads content from stdin when --content is omitted', async () => {
+        const vaultRoot = makeTempVault();
+        const auditLogger = getAuditLogger(makeTempVault());
+
+        const result = await runWrite(
+            [ 'From Stdin' ],
+            { vaultRoot, auditLogger, stdin: fakeStdin('piped body') },
+        );
+
+        expect(JSON.parse(result.stdout).title).toBe('From Stdin');
+    });
+
+    it('logs an error audit entry and rethrows (via dispatch) on a hash mismatch', async () => {
+        const vaultRoot = makeTempVault();
+        const logDir = makeTempVault();
+        const auditLogger = getAuditLogger(logDir);
+        await runWrite([ 'Existing', '--content=first' ], { vaultRoot, auditLogger });
+
+        const result = await dispatch(
+            [ 'write', 'Existing', '--hash=wrong', '--content=second' ],
+            { vaultRoot, auditLogger },
+        );
+
+        expect(result.exitCode).toBe(1);
+
+        await vi.waitFor(() => {
+            const lines = readAuditLog(join(logDir, 'audit.log'), 'utf8').trim().split('\n');
+            const lastLine = lines[lines.length - 1];
+            expect(lastLine).toContain('INFO  [audit] write');
+            expect(lastLine).toContain('note_title="Existing"');
+            expect(lastLine).toContain('source=cli');
+            expect(lastLine).toContain('outcome=error');
+            expect(lastLine).toMatch(/error_message=".*hash mismatch.*"/i);
+        });
+    });
+
+    it('rejects invalid --metadata JSON with a descriptive error', async () => {
+        const vaultRoot = makeTempVault();
+        const auditLogger = getAuditLogger(makeTempVault());
+
+        await expect(
+            runWrite([ 'Bad Meta', '--content=x', '--metadata={not json' ], { vaultRoot, auditLogger }),
+        ).rejects.toThrow(/--metadata is not valid JSON/);
     });
 });

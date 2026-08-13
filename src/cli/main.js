@@ -7,7 +7,8 @@ import { readFileSync } from 'node:fs';
 import { search, explainSearch } from '../core/search.js';
 import { grep } from '../core/grep.js';
 import { tagList, tagNotes } from '../core/tags.js';
-import { noteRead, titleToPath } from '../core/notes.js';
+import { noteRead, titleToPath, noteWrite } from '../core/notes.js';
+import { logAudit } from '../logger.js';
 import {
     formatSearchTable, formatExplain, formatGrepTable, formatTagListTable, formatTagNotesTable, formatJson,
 } from '../format.js';
@@ -206,6 +207,53 @@ export async function runRead(args, deps) {
 }
 
 registerCommand('read', runRead);
+
+export async function readStdinContent(stream) {
+    const chunks = [];
+    for await (const chunk of stream) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks).toString('utf8');
+}
+
+export function parseMetadataFlag(raw) {
+    if (raw === undefined) {
+        return null;
+    }
+    try {
+        return JSON.parse(raw);
+    } catch (err) {
+        throw new Error(`--metadata is not valid JSON: ${err.message}`, { cause: err });
+    }
+}
+
+export async function runWrite(args, deps) {
+    const { values, positionals } = parseArgs({
+        args,
+        allowPositionals: true,
+        options: {
+            hash: { type: 'string' },
+            metadata: { type: 'string' },
+            content: { type: 'string' },
+        },
+    });
+    const title = positionals[0];
+    const metadata = parseMetadataFlag(values.metadata);
+    const content = values.content ?? await readStdinContent(deps.stdin ?? process.stdin);
+
+    try {
+        const result = noteWrite(deps.vaultRoot, title, { hash: values.hash ?? null, metadata, content });
+        logAudit(deps.auditLogger, { tool: 'write', noteTitle: title, source: 'cli', outcome: 'success' });
+        return { stdout: formatJson(result), stderr: '', exitCode: 0 };
+    } catch (err) {
+        logAudit(deps.auditLogger, {
+            tool: 'write', noteTitle: title, source: 'cli', outcome: 'error', errorMessage: err.message,
+        });
+        throw err;
+    }
+}
+
+registerCommand('write', runWrite);
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
     main().then((exitCode) => {
