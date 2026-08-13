@@ -1,4 +1,5 @@
 import { AutoTokenizer } from '@huggingface/transformers';
+import { getContextLogger } from '../logger.js';
 
 const DEFAULT_CHUNK_SIZE = 512;
 const DEFAULT_OVERLAP_TOKENS = 77;
@@ -90,4 +91,60 @@ export function tokenizeWithOffsets(tokenizer, text) {
     }
 
     return spans;
+}
+
+const DEFAULT_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+const DEFAULT_DTYPE = 'q8';
+
+export function createEmbedder(options = {}) {
+    const {
+        modelId = DEFAULT_MODEL_ID,
+        dtype = DEFAULT_DTYPE,
+        idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS,
+        pipelineFactory,
+        scheduleUnload = setTimeout,
+        cancelUnload = clearTimeout,
+    } = options;
+
+    let extractor = null;
+    let unloadTimer = null;
+
+    async function ensureLoaded() {
+        if (extractor === null) {
+            extractor = await pipelineFactory(modelId, { dtype });
+            getContextLogger().info('embedding pipeline loaded', { dtype });
+        }
+        return extractor;
+    }
+
+    function resetIdleTimer() {
+        if (unloadTimer !== null) {
+            cancelUnload(unloadTimer);
+        }
+        unloadTimer = scheduleUnload(() => {
+            extractor = null;
+            unloadTimer = null;
+            getContextLogger().info('embedding pipeline unloaded', { idle_minutes: idleTimeoutMs / (60 * 1000) });
+        }, idleTimeoutMs);
+    }
+
+    async function embed(text) {
+        const fn = await ensureLoaded();
+        resetIdleTimer();
+        return fn(text);
+    }
+
+    function isLoaded() {
+        return extractor !== null;
+    }
+
+    function unload() {
+        if (unloadTimer !== null) {
+            cancelUnload(unloadTimer);
+            unloadTimer = null;
+        }
+        extractor = null;
+    }
+
+    return { embed, isLoaded, unload };
 }

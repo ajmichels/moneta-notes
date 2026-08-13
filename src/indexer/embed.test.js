@@ -1,5 +1,19 @@
-import { describe, it, expect } from 'vitest';
-import { chunkText, loadTokenizer, tokenizeWithOffsets } from './embed.js';
+import { describe, it, expect, vi } from 'vitest';
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { getLogger, runWithLogger } from '../logger.js';
+import { chunkText, loadTokenizer, tokenizeWithOffsets, createEmbedder } from './embed.js';
+
+function fakePipelineFactory() {
+    let calls = 0;
+    async function factory() {
+        calls += 1;
+        return async (text) => new Float32Array(1024).fill(text.length);
+    }
+    factory.calls = () => calls;
+    return factory;
+}
 
 function fakeTokenizeWithOffsets(text) {
     const tokens = [];
@@ -97,4 +111,54 @@ describe('tokenizeWithOffsets: real Qwen3 tokenizer (slow, network on first run)
         }
         expect(tokens[tokens.length - 1].end).toBe(text.length);
     }, 120000);
+});
+
+describe('createEmbedder: lazy load', () => {
+    it('does not create the pipeline until the first embed() call', () => {
+        const factory = fakePipelineFactory();
+        createEmbedder({ pipelineFactory: factory });
+
+        expect(factory.calls()).toBe(0);
+    });
+
+    it('loads once and reuses the pipeline across multiple embed() calls', async () => {
+        const factory = fakePipelineFactory();
+        const embedder = createEmbedder({ pipelineFactory: factory });
+
+        const first = await embedder.embed('hello');
+        const second = await embedder.embed('world');
+
+        expect(factory.calls()).toBe(1);
+        expect(embedder.isLoaded()).toBe(true);
+        expect(first).toBeInstanceOf(Float32Array);
+        expect(second).toBeInstanceOf(Float32Array);
+    });
+
+    it('unload() drops the pipeline, forcing a reload on next embed()', async () => {
+        const factory = fakePipelineFactory();
+        const embedder = createEmbedder({ pipelineFactory: factory });
+        await embedder.embed('hello');
+
+        embedder.unload();
+
+        expect(embedder.isLoaded()).toBe(false);
+        await embedder.embed('again');
+        expect(factory.calls()).toBe(2);
+    });
+
+    it('logs an info line via the context logger when the pipeline first loads', async () => {
+        const logDir = mkdtempSync(join(tmpdir(), 'mnotes-embed-test-log-'));
+        const logger = getLogger('indexer', logDir);
+        const factory = fakePipelineFactory();
+        const embedder = createEmbedder({ pipelineFactory: factory, dtype: 'q8' });
+
+        await runWithLogger(logger, () => embedder.embed('hello'));
+
+        await vi.waitFor(() => {
+            const line = readFileSync(join(logDir, 'indexer.log'), 'utf8').trim();
+            expect(line).toContain('INFO  [indexer] embedding pipeline loaded');
+            expect(line).toContain('dtype="q8"');
+        });
+        rmSync(logDir, { recursive: true, force: true });
+    });
 });
