@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import {
-    titleToPath, pathToTitle, hashContent, countLines, noteRead, noteWrite, noteEdit,
+    titleToPath, pathToTitle, hashContent, countLines, noteRead, noteWrite, noteEdit, noteAppend,
 } from './notes.js';
 import { getLogger, runWithLogger } from '../logger.js';
 
@@ -422,5 +422,43 @@ describe('noteEdit', () => {
                 newTxt: 'l1',
             }),
         ).toThrow(/size-drop|below/i);
+    });
+});
+
+describe('noteAppend', () => {
+    it('appends content to the end of the body, joined by a newline', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Appendable', { content: 'first line' });
+
+        const result = noteAppend(vaultRoot, 'Appendable', created.hash, 'second line');
+
+        expect(noteRead(vaultRoot, 'Appendable').content).toBe('first line\nsecond line');
+        expect(result.line_count).toBe(2);
+        expect(result.hash).toBe(noteRead(vaultRoot, 'Appendable').content_hash);
+    });
+
+    it('appends to an empty body without leaving a leading blank line', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Empty Body', { content: '' });
+
+        noteAppend(vaultRoot, 'Empty Body', created.hash, 'new content');
+
+        expect(noteRead(vaultRoot, 'Empty Body').content).toBe('new content');
+    });
+
+    it('throws when hash is missing', () => {
+        const vaultRoot = makeTempVault();
+        noteWrite(vaultRoot, 'No Hash Append', { content: 'x' });
+
+        expect(() => noteAppend(vaultRoot, 'No Hash Append', null, 'y')).toThrow(/hash is required/i);
+    });
+
+    it('throws a staleness error on hash mismatch', () => {
+        const vaultRoot = makeTempVault();
+        noteWrite(vaultRoot, 'Stale Append', { content: 'x' });
+
+        expect(() => noteAppend(vaultRoot, 'Stale Append', 'wrong-hash', 'y')).toThrow(
+            /hash mismatch|changed since/i,
+        );
     });
 });

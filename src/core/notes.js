@@ -234,3 +234,42 @@ export function noteEdit(vaultRoot, title, { hash, oldTxt, newTxt, metadata = nu
 
     return { title, hash: hashContent(raw), line_count: newLineCount };
 }
+
+// gray-matter's parsed body always carries the file's trailing newline (e.g. content '' written
+// via matter.stringify round-trips as body '\n', not ''), so a naive concatenation would introduce
+// a spurious blank line. Reconstruct the same "logical" body noteRead's windowing already produces.
+function normalizeBody(body) {
+    const totalLines = countLines(body);
+    if (totalLines === 0) {
+        return '';
+    }
+    return body.split('\n').slice(0, totalLines).join('\n');
+}
+
+export function noteAppend(vaultRoot, title, hash, content) {
+    if (!hash) {
+        throw new Error(`note_append: hash is required for "${title}"`);
+    }
+
+    const filePath = titleToPath(vaultRoot, title);
+    const currentRaw = readRawNote(filePath, title);
+    const currentHash = hashContent(currentRaw);
+
+    if (currentHash !== hash) {
+        throw new Error(
+            `note_append: hash mismatch for "${title}" — note has changed since last read `
+            + `(expected ${hash}, found ${currentHash}). Read the note again before appending.`,
+        );
+    }
+
+    const { data: existingMetadata, content: existingRawBody } = matter(currentRaw);
+    const existingBody = normalizeBody(existingRawBody);
+    const newBody = existingBody === '' ? content : `${existingBody}\n${content}`;
+
+    const data = withComputedId(existingMetadata, null, title);
+    const raw = matter.stringify(newBody, data);
+
+    writeFileSync(filePath, raw, 'utf8');
+
+    return { title, hash: hashContent(raw), line_count: countLines(newBody) };
+}
