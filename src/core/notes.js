@@ -24,18 +24,20 @@ export function countLines(content) {
     return content.endsWith('\n') ? lines.length - 1 : lines.length;
 }
 
-export function noteRead(vaultRoot, title, { startLine, endLine } = {}) {
-    const filePath = titleToPath(vaultRoot, title);
-
-    let raw;
+function readRawNote(filePath, title) {
     try {
-        raw = readFileSync(filePath, 'utf8');
+        return readFileSync(filePath, 'utf8');
     } catch (err) {
         if (err.code === 'ENOENT') {
             throw new Error(`Note not found: "${title}"`, { cause: err });
         }
         throw err;
     }
+}
+
+export function noteRead(vaultRoot, title, { startLine, endLine } = {}) {
+    const filePath = titleToPath(vaultRoot, title);
+    const raw = readRawNote(filePath, title);
 
     const { data: metadata, content: body } = matter(raw);
     const totalLines = countLines(body);
@@ -106,19 +108,61 @@ function createNote(filePath, title, metadata, content) {
     return { title, hash: hashContent(raw), line_count: countLines(content) };
 }
 
-export function noteWrite(vaultRoot, title, { hash = null, metadata = null, content } = {}) {
-    const filePath = titleToPath(vaultRoot, title);
-
-    if (hash !== null) {
-        throw new Error('note_write: updating an existing note is not yet implemented');
+function mergeMetadata(existing, patch) {
+    if (!patch) {
+        return { ...existing };
     }
+    const merged = { ...existing };
+    for (const [ key, value ] of Object.entries(patch)) {
+        if (value === null) {
+            delete merged[key];
+        } else {
+            merged[key] = value;
+        }
+    }
+    return merged;
+}
 
-    if (existsSync(filePath)) {
+function updateNote(filePath, title, hash, metadata, content) {
+    const currentRaw = readRawNote(filePath, title);
+    const currentHash = hashContent(currentRaw);
+
+    if (currentHash !== hash) {
         throw new Error(
-            `note_write: "${title}" already exists — a null hash only creates a new note. `
-            + 'Read the note first to get its current hash.',
+            `note_write: hash mismatch for "${title}" — note has changed since last read `
+            + `(expected ${hash}, found ${currentHash}). Read the note again before writing.`,
         );
     }
 
-    return createNote(filePath, title, metadata, content);
+    const { data: existingMetadata } = matter(currentRaw);
+    const data = withComputedId(mergeMetadata(existingMetadata, metadata), metadata, title);
+    const raw = matter.stringify(content, data);
+
+    writeFileSync(filePath, raw, 'utf8');
+
+    return { title, hash: hashContent(raw), line_count: countLines(content) };
+}
+
+export function noteWrite(vaultRoot, title, { hash = null, metadata = null, content } = {}) {
+    const filePath = titleToPath(vaultRoot, title);
+    const fileExists = existsSync(filePath);
+
+    if (hash === null) {
+        if (fileExists) {
+            throw new Error(
+                `note_write: "${title}" already exists — a null hash only creates a new note. `
+                + 'Read the note first to get its current hash.',
+            );
+        }
+        return createNote(filePath, title, metadata, content);
+    }
+
+    if (!fileExists) {
+        throw new Error(
+            `note_write: "${title}" does not exist — cannot match hash "${hash}" against a `
+            + 'nonexistent note.',
+        );
+    }
+
+    return updateNote(filePath, title, hash, metadata, content);
 }

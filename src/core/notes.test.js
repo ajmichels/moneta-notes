@@ -210,3 +210,89 @@ describe('noteWrite (create)', () => {
         expect(noteRead(vaultRoot, 'Existing').content).toBe('already here');
     });
 });
+
+describe('noteWrite (update)', () => {
+    it('replaces content in full when hash matches, id/other metadata untouched', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Update Me', {
+            metadata: { tags: [ 'a' ] },
+            content: 'original body',
+        });
+
+        const result = noteWrite(vaultRoot, 'Update Me', {
+            hash: created.hash,
+            content: 'replaced body',
+        });
+
+        const onDisk = noteRead(vaultRoot, 'Update Me');
+        expect(onDisk.content).toBe('replaced body');
+        expect(onDisk.metadata).toEqual({ id: 'Update Me', tags: [ 'a' ] });
+        expect(result.hash).toBe(onDisk.content_hash);
+        expect(result.line_count).toBe(1);
+    });
+
+    it('shallow-merges metadata: overwrites named keys, leaves others untouched', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Merge Me', {
+            metadata: { tags: [ 'a' ], status: 'draft' },
+            content: 'body',
+        });
+
+        noteWrite(vaultRoot, 'Merge Me', {
+            hash: created.hash,
+            metadata: { status: 'final' },
+            content: 'body',
+        });
+
+        expect(noteRead(vaultRoot, 'Merge Me').metadata).toEqual({
+            id: 'Merge Me',
+            tags: [ 'a' ],
+            status: 'final',
+        });
+    });
+
+    it('deletes a metadata key when the patch sets it to null', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Delete Key', {
+            metadata: { tags: [ 'a' ], status: 'draft' },
+            content: 'body',
+        });
+
+        noteWrite(vaultRoot, 'Delete Key', {
+            hash: created.hash,
+            metadata: { status: null },
+            content: 'body',
+        });
+
+        expect(noteRead(vaultRoot, 'Delete Key').metadata).toEqual({ id: 'Delete Key', tags: [ 'a' ] });
+    });
+
+    it('ignores a caller-supplied id even on update', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Id Guard', { content: 'body' });
+
+        noteWrite(vaultRoot, 'Id Guard', {
+            hash: created.hash,
+            metadata: { id: 'not-the-real-id' },
+            content: 'body',
+        });
+
+        expect(noteRead(vaultRoot, 'Id Guard').metadata.id).toBe('Id Guard');
+    });
+
+    it('throws a staleness error on hash mismatch and leaves the file untouched', () => {
+        const vaultRoot = makeTempVault();
+        noteWrite(vaultRoot, 'Stale', { content: 'original' });
+
+        expect(() => noteWrite(vaultRoot, 'Stale', { hash: 'not-the-real-hash', content: 'new' }))
+            .toThrow(/hash mismatch|changed since/i);
+        expect(noteRead(vaultRoot, 'Stale').content).toBe('original');
+    });
+
+    it('throws when a non-null hash is given but the note does not exist', () => {
+        const vaultRoot = makeTempVault();
+        expect(() => noteWrite(vaultRoot, 'Ghost', { hash: 'abc123', content: 'x' })).toThrow(
+            /does not exist/i,
+        );
+    });
+});
