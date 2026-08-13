@@ -2,14 +2,15 @@
 
 Status: **Approved**
 Owns: `src/config.js`, `scripts/install.sh`, `scripts/uninstall.sh`, `launchd/*.plist.template`
-Depends on: `S002-search`, `S003-notes`, `S004-grep-tags`, `S005-indexing-daemon`,
+Depends on: `S002-search`, `S003-notes`, `S004-grep-tags`, `S005-indexing-daemon`, `S007-mcp-server`,
 `S008-logging` (config knobs flagged across all of these land here)
 
 ## Purpose
 
 Finalizes `config.toml`'s full shape (collecting every tunable flagged across S002/S003/S004/S005/S008
 into one coherent schema), and the install/uninstall flow — now covering **two** LaunchAgents (the
-indexing daemon from the README, plus S008's log-rotation agent) instead of one.
+indexing daemon from the README, plus S008's log-rotation agent) instead of one, plus registering (and
+deregistering) `mnotes-mcp` as an actual Claude Code MCP server rather than leaving that step manual.
 
 ## `config.toml` schema
 
@@ -100,17 +101,30 @@ step, not part of this script). Steps, in order:
    step, with a visible "downloading embedding model, this may take a minute..." message — so the
    first real note write after install doesn't stall on a surprise multi-minute download in the middle
    of the daemon's first indexing pass.
+9. **Register the MCP server with Claude Code**: `which claude` — if missing, print a clear warning
+   (the same "warn and continue" posture as step 1's `rg` check — Claude Desktop users or anyone
+   registering the server by hand don't need the CLI present) naming the manual `claude mcp add`
+   command to run later. If `claude` is present, check first via `claude mcp get mnotes` — if it
+   already exists (exit `0`), leave it untouched and say so (same never-clobber posture as step 3's
+   config file); otherwise register it with
+   `claude mcp add mnotes -s user -- <node> <repo>/src/mcp/server.js` (`-s user`: available in every
+   Claude Code session on this machine, not just one project directory — matching how the daemon,
+   config, and index are already all machine-level, not project-level, resources).
 
 ## Uninstall (`scripts/uninstall.sh`)
 
-1. **Bootout both launchd jobs**: `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.ajmichels.mnotes.plist`
+1. **Deregister the MCP server from Claude Code**: `claude mcp remove mnotes -s user`, only if
+   `claude` is present on `PATH` — tolerating "not registered" the same way step 2 below tolerates
+   "not currently loaded" for the launchd jobs, since uninstall must be safe to run even if install
+   never got that far (or `claude` was never installed on this machine at all).
+2. **Bootout both launchd jobs**: `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.ajmichels.mnotes.plist`
    and the log-rotation agent's equivalent.
-2. **Delete both Property List files**.
-3. **Delete Logs directory**.
-4. **Delete Application Support directory** (the SQLite index and socket file — safe to delete
+3. **Delete both Property List files**.
+4. **Delete Logs directory**.
+5. **Delete Application Support directory** (the SQLite index and socket file — safe to delete
    unconditionally since the index is a pure derived cache per S001; nothing here is a data-loss risk,
    a future reinstall's daemon startup just rebuilds it from the vault on first run).
-5. **Delete Configuration directory** (`~/.config/mnotes/`).
+6. **Delete Configuration directory** (`~/.config/mnotes/`).
 
 Never touches the vault itself — uninstalling `mnotes` removes the tool's own state, not your notes.
 

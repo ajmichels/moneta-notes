@@ -1,3 +1,28 @@
 vault_path = "/Users/jsmith/Documents/Notes"
 db_path = "/Users/jsmith/Library/Application Support/mnotes/index.db"
 embedding_model = "Qwen3-Embedding-0.6B"
+
+[search]
+limit_default = 20          # S002
+limit_max = 100              # S002
+overfetch_multiplier = 5     # S002
+overfetch_cap = 500          # S002
+rrf_k = 60                   # S002 (README-stated default)
+
+[notes]
+size_drop_threshold = 0.50   # S003 — reject a write/edit dropping below this fraction of prior line count
+
+[grep]
+line_match_cap = 10          # S004 — line numbers shown per note before "(+N more)"
+
+[index]
+debounce_ms = 15000                    # S005 — per-path fswatch debounce window
+model_idle_unload_minutes = 10         # S005
+embedding_dtype = "q8"                 # S005 — fp32 | fp16 | q8
+retry_backoff_seconds = [30, 120, 600] # S005 — one entry per retry after the initial attempt
+retry_max_attempts = 4                 # S005 — initial attempt + len(retry_backoff_seconds)
+
+[logging]
+rotation_max_size_mb = 10    # S008
+rotation_max_age_days = 7    # S008
+rotation_keep = 5            # S008
