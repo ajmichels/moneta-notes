@@ -122,6 +122,17 @@ For each dequeued path:
    forever, but a future edit to that file (new `fswatch` event) or an explicit `mnotes reindex <title>`
    will re-enqueue it.
 
+**Serialized against IPC-triggered reindexing.** An explicit `mnotes reindex` (IPC, below) doesn't go
+through this same dequeue loop — it enqueues its target path(s) and processes them directly so it can
+stream per-path progress back over the connection. Both entry points funnel through one process-wide
+serialization gate (`createSerialGate` in `indexer/daemon.js`), so a background drain tick and an
+IPC-triggered reindex can never call the per-path reindex logic on the same path at the same time. A
+periodic drain tick that finds the gate already busy just skips that tick — safe, since the next tick
+picks up anything still in `index_queue` — while an IPC request queues behind whatever's in flight
+rather than racing it. Without this, a manual reindex issued mid-drain-pass could re-embed the same
+note twice concurrently (wasted work, and two interleaved delete+insert passes racing to write the same
+`chunks`/`chunk_vectors` rows).
+
 ## Chunking
 
 Token-based, fixed-size windows with overlap, operating on the note **body** only (frontmatter

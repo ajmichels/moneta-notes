@@ -400,19 +400,22 @@ export function defaultSocketPath() {
     return join(defaultAppSupportDir(), 'daemon.sock');
 }
 
-function handleIpcRequest(line, socket, vaultRoot, db, deps) {
+function handleIpcRequest(line, socket, ctx) {
+    const { vaultRoot, db, deps, gate } = ctx;
     const request = JSON.parse(line);
     if (request.action !== 'reindex') {
         socket.end(`${JSON.stringify({ error: `unknown action "${request.action}"` })}\n`);
         return;
     }
-    runReindex(
+    // Runs under the same gate as the periodic drain loop (see createSerialGate) — an IPC-triggered
+    // reindex and a background drain tick must never call processPath on the same path at once.
+    gate.schedule(() => runReindex(
         vaultRoot, db, deps, { noteTitle: request.noteTitle ?? null },
         (msg) => socket.write(`${JSON.stringify(msg)}\n`),
-    ).then(() => socket.end());
+    )).then(() => socket.end());
 }
 
-function handleIpcConnection(socket, vaultRoot, db, deps) {
+function handleIpcConnection(socket, ctx) {
     let buffer = '';
     socket.on('data', (chunk) => {
         buffer += chunk.toString('utf8');
@@ -421,17 +424,18 @@ function handleIpcConnection(socket, vaultRoot, db, deps) {
             const line = buffer.slice(0, newlineIndex);
             buffer = buffer.slice(newlineIndex + 1);
             newlineIndex = buffer.indexOf('\n');
-            handleIpcRequest(line, socket, vaultRoot, db, deps);
+            handleIpcRequest(line, socket, ctx);
         }
     });
 }
 
-export function createIpcServer(socketPath, vaultRoot, db, deps) {
+export function createIpcServer(socketPath, vaultRoot, db, deps, gate = createSerialGate()) {
     if (existsSync(socketPath)) {
         rmSync(socketPath);
     }
 
-    const server = createServer((socket) => handleIpcConnection(socket, vaultRoot, db, deps));
+    const ctx = { vaultRoot, db, deps, gate };
+    const server = createServer((socket) => handleIpcConnection(socket, ctx));
     server.listen(socketPath);
     return server;
 }
@@ -481,24 +485,44 @@ function defaultCreateWatcher(vaultRoot, db, { debounceMs } = {}) {
     };
 }
 
-function startDrainLoop(vaultRoot, db, deps, drainIntervalMs) {
+// Serializes drainQueueOnce (the periodic background pass) against runReindex (an IPC-triggered
+// `mnotes reindex`) so the two never call processPath on the same path concurrently. Without this,
+// a manual reindex issued while a background pass is mid-flight could have both re-dequeue/re-embed
+// the same still-queued note at once — wasted embedding work, and two interleaved
+// delete-then-insert passes racing to write the same chunks/chunk_vectors rows. A queued path isn't
+// removed from index_queue until its embed finishes, so nothing here can be safely run concurrently
+// with itself either — the same gate covers both cases.
+export function createSerialGate() {
+    let queueTail = Promise.resolve();
+    let pending = 0;
+
+    function schedule(fn) {
+        // `pending` increments synchronously (not inside the .then() below) so isBusy() is accurate
+        // immediately after schedule() returns, with no microtask-timing gap for an eager caller.
+        pending += 1;
+        const result = queueTail.then(fn, fn);
+        queueTail = result.catch(() => {});
+        result.finally(() => { pending -= 1; });
+        return result;
+    }
+
+    return { schedule, isBusy: () => pending > 0 };
+}
+
+function startDrainLoop(vaultRoot, db, deps, drainIntervalMs, gate) {
     if (drainIntervalMs === null) {
         return null;
     }
     // A single drainQueueOnce pass can outlast drainIntervalMs by a lot (e.g. draining a large
     // initial backlog while each note takes hundreds of ms to embed). Without this guard,
-    // setInterval fires a new overlapping pass anyway, and since a queued path isn't deleted from
-    // index_queue until its embed finishes, every overlapping pass re-dequeues and re-embeds the
-    // same still-queued note before any of them get a chance to delete it.
-    let draining = false;
+    // setInterval fires a new overlapping pass anyway — skipping a tick while the gate is busy is
+    // safe since the next tick picks up anything left in the queue.
     return setInterval(() => {
-        if (draining) {
+        if (gate.isBusy()) {
             return;
         }
-        draining = true;
-        drainQueueOnce(vaultRoot, db, deps)
-            .catch((err) => getContextLogger().error('queue drain failed', { error_message: err.message }))
-            .finally(() => { draining = false; });
+        gate.schedule(() => drainQueueOnce(vaultRoot, db, deps))
+            .catch((err) => getContextLogger().error('queue drain failed', { error_message: err.message }));
     }, drainIntervalMs);
 }
 
@@ -534,13 +558,14 @@ export async function startDaemon(options = {}) {
         existenceCheck(db, vaultRoot);
     }
 
+    const gate = createSerialGate();
     const watcher = createWatcher(vaultRoot, db, { debounceMs });
-    const drainTimer = startDrainLoop(vaultRoot, db, deps, drainIntervalMs);
+    const drainTimer = startDrainLoop(vaultRoot, db, deps, drainIntervalMs, gate);
     if (drainTimer === null) {
         await drainQueueOnce(vaultRoot, db, deps);
     }
 
-    const ipcServer = createIpcServer(socketPath, vaultRoot, db, deps);
+    const ipcServer = createIpcServer(socketPath, vaultRoot, db, deps, gate);
 
     async function stop() {
         if (drainTimer !== null) {

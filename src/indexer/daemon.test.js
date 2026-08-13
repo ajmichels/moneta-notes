@@ -8,7 +8,7 @@ import { getLogger, runWithLogger } from '../logger.js';
 import {
     enqueuePath, dequeueNextPath, processPath, deleteNoteByPath, recordFailure, drainQueueOnce,
     watermarkCatchup, existenceCheck, createDebouncer, assertFswatchAvailable, spawnFswatch, runReindex,
-    createIpcServer, defaultSocketPath, startDaemon,
+    createIpcServer, defaultSocketPath, startDaemon, createSerialGate,
 } from './daemon.js';
 
 const tempDirs = [];
@@ -537,14 +537,22 @@ describe('spawnFswatch (real binary)', () => {
 
         const seenPaths = await new Promise((resolve, reject) => {
             const found = [];
+            // Both timers below fire (or are cancelled) as a pair — without clearing the loser, an
+            // early resolve (the fswatch event usually arrives well before 300ms) leaves the
+            // writeNote timer pending, firing after afterEach() has already removed the vault.
+            const timers = [];
+            function settle(result) {
+                for (const timer of timers) clearTimeout(timer);
+                resolve(result);
+            }
             const child = spawnFswatch(vaultRoot, (path) => {
                 found.push(path);
                 child.kill();
-                resolve(found);
+                settle(found);
             });
             child.on('error', reject);
-            setTimeout(() => writeNote(vaultRoot, 'Triggered.md', 'content', undefined), 300);
-            setTimeout(() => { child.kill(); resolve(found); }, 5000);
+            timers.push(setTimeout(() => writeNote(vaultRoot, 'Triggered.md', 'content', undefined), 300));
+            timers.push(setTimeout(() => { child.kill(); settle(found); }, 5000));
         });
 
         expect(seenPaths.length).toBeGreaterThan(0);
@@ -660,7 +668,7 @@ describe('createIpcServer', () => {
         const socketDir = makeTempVault();
         const socketPath = join(socketDir, 'daemon.sock');
 
-        const server = createIpcServer(socketPath, vaultRoot, db, { ...baseDeps(), now: 0 });
+        const server = createIpcServer(socketPath, vaultRoot, db, { ...baseDeps(), now: 0 }, createSerialGate());
 
         const messages = await new Promise((resolve, reject) => {
             const received = [];
@@ -797,6 +805,74 @@ describe('startDaemon', () => {
             expect(daemon.db.prepare('SELECT COUNT(*) c FROM index_queue').get().c).toBe(0);
         });
         expect(embedCalls).toBe(1);
+
+        await daemon.stop();
+    });
+
+    it('serializes an IPC-triggered reindex against an in-flight background drain pass', async () => {
+        const vaultRoot = makeTempVault();
+        writeNote(vaultRoot, 'Slow.md', 'content', 1000);
+        const socketDir = makeTempVault();
+        const socketPath = join(socketDir, 'daemon.sock');
+
+        let embedCalls = 0;
+        let releaseEmbed;
+        const embedGate = new Promise((resolve) => { releaseEmbed = resolve; });
+        const slowEmbed = async (text) => {
+            embedCalls += 1;
+            await embedGate;
+            return fakeEmbed(text);
+        };
+
+        const daemon = await startDaemon({
+            vaultRoot,
+            dbPath: ':memory:',
+            socketPath,
+            createWatcher: () => ({ stop() {} }),
+            chunkText: fakeChunkText,
+            embed: slowEmbed,
+            embeddingModel: 'test-model',
+            embeddingVersion: 'v1',
+            drainIntervalMs: 5,
+        });
+
+        // Let the background drain loop pick up the pre-existing note and block on its first embed.
+        await vi.waitFor(() => expect(embedCalls).toBe(1));
+
+        // Fire an IPC reindex for the same note while the drain pass is still mid-embed. If the two
+        // weren't serialized, this would start a second, concurrent processPath call on the same
+        // path.
+        const received = [];
+        const requestDone = new Promise((resolve, reject) => {
+            const client = createConnection(socketPath, () => {
+                client.write(`${JSON.stringify({ action: 'reindex', noteTitle: 'Slow' })}\n`);
+            });
+            let buffer = '';
+            client.on('data', (chunk) => {
+                buffer += chunk.toString('utf8');
+                let newlineIndex = buffer.indexOf('\n');
+                while (newlineIndex !== -1) {
+                    received.push(JSON.parse(buffer.slice(0, newlineIndex)));
+                    buffer = buffer.slice(newlineIndex + 1);
+                    newlineIndex = buffer.indexOf('\n');
+                }
+            });
+            client.on('end', resolve);
+            client.on('error', reject);
+        });
+
+        // Give the IPC request time to arrive — a broken (unserialized) implementation would start
+        // its own embed call here, immediately bumping embedCalls to 2.
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(embedCalls).toBe(1);
+
+        releaseEmbed();
+        await requestDone;
+
+        // The note's mtime never changed, so once the gate frees up, the queued reindex sees an
+        // already-current row and skips re-embedding instead of doing redundant work.
+        expect(embedCalls).toBe(1);
+        expect(received.find((m) => m.summary)).toBeDefined();
 
         await daemon.stop();
     });
