@@ -1,8 +1,8 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, utimesSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, utimesSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { shouldRotate } from './log-rotator.js';
+import { shouldRotate, rotateLogFile } from './log-rotator.js';
 
 const tempDirs = [];
 
@@ -71,5 +71,37 @@ describe('shouldRotate: age threshold', () => {
                 maxAgeMs: 7 * 24 * 60 * 60 * 1000,
             }),
         ).toBe(false);
+    });
+});
+
+describe('rotateLogFile', () => {
+    it('shifts numbered files up by one and recreates an empty active file', () => {
+        const dir = makeTempDir();
+        const filePath = join(dir, 'test.log');
+        writeFileSync(filePath, 'active content');
+        writeFileSync(`${filePath}.1`, 'rotated-1');
+        writeFileSync(`${filePath}.2`, 'rotated-2');
+
+        rotateLogFile(filePath, 5);
+
+        expect(readFileSync(filePath, 'utf8')).toBe('');
+        expect(readFileSync(`${filePath}.1`, 'utf8')).toBe('active content');
+        expect(readFileSync(`${filePath}.2`, 'utf8')).toBe('rotated-1');
+        expect(readFileSync(`${filePath}.3`, 'utf8')).toBe('rotated-2');
+    });
+
+    it('deletes the oldest file beyond the keep count', () => {
+        const dir = makeTempDir();
+        const filePath = join(dir, 'test.log');
+        writeFileSync(filePath, 'active content');
+        for (let n = 1; n <= 5; n += 1) {
+            writeFileSync(`${filePath}.${n}`, `rotated-${n}`);
+        }
+
+        rotateLogFile(filePath, 5);
+
+        expect(existsSync(`${filePath}.6`)).toBe(false);
+        expect(readFileSync(`${filePath}.5`, 'utf8')).toBe('rotated-4');
+        expect(readFileSync(`${filePath}.1`, 'utf8')).toBe('active content');
     });
 });
