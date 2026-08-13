@@ -123,7 +123,9 @@ function mergeMetadata(existing, patch) {
     return merged;
 }
 
-function updateNote(filePath, title, hash, metadata, content) {
+export const SIZE_DROP_THRESHOLD = 0.5; // fraction of current line count; config.toml-backed under S009
+
+function updateNote(filePath, title, hash, metadata, content, force) {
     const currentRaw = readRawNote(filePath, title);
     const currentHash = hashContent(currentRaw);
 
@@ -134,16 +136,27 @@ function updateNote(filePath, title, hash, metadata, content) {
         );
     }
 
-    const { data: existingMetadata } = matter(currentRaw);
+    const { data: existingMetadata, content: existingBody } = matter(currentRaw);
+    const currentLineCount = countLines(existingBody);
+    const newLineCount = countLines(content);
+
+    if (!force && newLineCount < currentLineCount * SIZE_DROP_THRESHOLD) {
+        throw new Error(
+            `note_write: size-drop guard tripped for "${title}" — new content is ${newLineCount} `
+            + `lines, down from ${currentLineCount} (below ${SIZE_DROP_THRESHOLD * 100}% threshold). `
+            + 'Pass force: true to override.',
+        );
+    }
+
     const data = withComputedId(mergeMetadata(existingMetadata, metadata), metadata, title);
     const raw = matter.stringify(content, data);
 
     writeFileSync(filePath, raw, 'utf8');
 
-    return { title, hash: hashContent(raw), line_count: countLines(content) };
+    return { title, hash: hashContent(raw), line_count: newLineCount };
 }
 
-export function noteWrite(vaultRoot, title, { hash = null, metadata = null, content } = {}) {
+export function noteWrite(vaultRoot, title, { hash = null, metadata = null, content, force = false } = {}) {
     const filePath = titleToPath(vaultRoot, title);
     const fileExists = existsSync(filePath);
 
@@ -164,5 +177,5 @@ export function noteWrite(vaultRoot, title, { hash = null, metadata = null, cont
         );
     }
 
-    return updateNote(filePath, title, hash, metadata, content);
+    return updateNote(filePath, title, hash, metadata, content, force);
 }

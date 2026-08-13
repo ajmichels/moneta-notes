@@ -296,3 +296,45 @@ describe('noteWrite (update)', () => {
         );
     });
 });
+
+describe('noteWrite size-drop guard', () => {
+    it('rejects an update that drops body line count below the threshold', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Shrinking', {
+            content: 'line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10',
+        });
+
+        expect(() => noteWrite(vaultRoot, 'Shrinking', { hash: created.hash, content: 'line1\nline2' }))
+            .toThrow(/size-drop|below/i);
+        expect(noteRead(vaultRoot, 'Shrinking').total_lines).toBe(10);
+    });
+
+    it('allows the drop when force: true is passed', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Forced Shrink', {
+            content: 'l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10',
+        });
+
+        const result = noteWrite(vaultRoot, 'Forced Shrink', {
+            hash: created.hash,
+            content: 'l1',
+            force: true,
+        });
+
+        expect(result.line_count).toBe(1);
+    });
+
+    it('does not trip at exactly the threshold boundary', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Boundary', {
+            content: 'a\nb\nc\nd\ne\nf\ng\nh\ni\nj',
+        });
+
+        const result = noteWrite(vaultRoot, 'Boundary', {
+            hash: created.hash,
+            content: 'a\nb\nc\nd\ne',
+        });
+
+        expect(result.line_count).toBe(5);
+    });
+});
