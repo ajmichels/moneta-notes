@@ -1,7 +1,8 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
-import { dispatch, resolveVaultRoot, resolveDbPath, registerCommand, runSearch } from './main.js';
+import { homedir, tmpdir } from 'node:os';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { dispatch, resolveVaultRoot, resolveDbPath, registerCommand, runSearch, runGrep } from './main.js';
 import { openDb } from '../core/db.js';
 
 function insertTestNote(db, path, lineCount = 5) {
@@ -10,6 +11,20 @@ function insertTestNote(db, path, lineCount = 5) {
     ).run(path, 'hash', lineCount, 1000, 1000);
     return db.prepare('SELECT id FROM notes WHERE path = ?').get(path).id;
 }
+
+const tempDirs = [];
+
+function makeTempVault() {
+    const dir = mkdtempSync(join(tmpdir(), 'mnotes-cli-test-'));
+    tempDirs.push(dir);
+    return dir;
+}
+
+afterEach(() => {
+    while (tempDirs.length > 0) {
+        rmSync(tempDirs.pop(), { recursive: true, force: true });
+    }
+});
 
 describe('dispatch: unknown command', () => {
     it('returns exitCode 1 and a descriptive stderr message', async () => {
@@ -130,5 +145,27 @@ describe('runSearch: --explain', () => {
         expect(parsed.pipeline.mode).toBe('fulltext');
         expect(typeof parsed.results[0].bm25_score).toBe('number');
         db.close();
+    });
+});
+
+describe('runGrep', () => {
+    it('formats a text match by default', async () => {
+        const vaultRoot = makeTempVault();
+        writeFileSync(join(vaultRoot, 'Recipe.md'), 'line one\nsome hello world text\n');
+
+        const result = await runGrep([ 'hello' ], { vaultRoot });
+
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout).toContain('note_title|file_line_count|line_matches');
+        expect(result.stdout).toContain('Recipe|3|L2: some hello world text');
+    });
+
+    it('supports --json', async () => {
+        const vaultRoot = makeTempVault();
+        writeFileSync(join(vaultRoot, 'Recipe.md'), 'hello world\n');
+
+        const result = await runGrep([ 'hello', '--json' ], { vaultRoot });
+
+        expect(JSON.parse(result.stdout)[0].note_title).toBe('Recipe');
     });
 });

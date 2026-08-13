@@ -34,6 +34,21 @@ function formatExplainRow(r, rank, mode) {
         + `| semantic_rank=${r.semantic_rank ?? '-'} | rrf=${r.rrf_formula}`;
 }
 
+function formatLineMatches(lineMatches, totalMatchCount) {
+    const rendered = lineMatches.map((m) => `L${m.line}: ${m.text}`).join('; ');
+    const more = totalMatchCount - lineMatches.length;
+    return more > 0 ? `${rendered} (+${more} more)` : rendered;
+}
+
+export function formatGrepTable(results) {
+    const rows = results.map((r) => ({
+        note_title: r.noteTitle,
+        file_line_count: r.fileLineCount,
+        line_matches: formatLineMatches(r.lineMatches, r.totalMatchCount),
+    }));
+    return formatTable([ 'note_title', 'file_line_count', 'line_matches' ], rows);
+}
+
 export function formatExplain({ results, pipeline }) {
     const header = `mode=${pipeline.mode} limit=${pipeline.limit} overfetch=${pipeline.overfetchLimit} `
         + `fts5_expression=${JSON.stringify(pipeline.fulltextExpression)}`;

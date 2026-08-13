@@ -4,7 +4,8 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { search, explainSearch } from '../core/search.js';
-import { formatSearchTable, formatExplain, formatJson } from '../format.js';
+import { grep } from '../core/grep.js';
+import { formatSearchTable, formatExplain, formatGrepTable, formatJson } from '../format.js';
 
 export function resolveVaultRoot(env = process.env) {
     if (!env.MNOTES_VAULT_ROOT) {
@@ -86,6 +87,34 @@ export async function runSearch(args, deps) {
 }
 
 registerCommand('search', runSearch);
+
+export async function runGrep(args, deps) {
+    const { values, positionals } = parseArgs({
+        args,
+        allowPositionals: true,
+        options: {
+            regex: { type: 'boolean', default: false },
+            note: { type: 'string' },
+            json: { type: 'boolean', default: false },
+        },
+    });
+    const pattern = positionals[0];
+    const results = grep(deps.vaultRoot, pattern, { regex: values.regex, noteTitle: values.note ?? null });
+
+    if (values.json) {
+        const mapped = results.map((r) => ({
+            note_title: r.noteTitle,
+            file_line_count: r.fileLineCount,
+            total_match_count: r.totalMatchCount,
+            line_matches: r.lineMatches,
+        }));
+        return { stdout: formatJson(mapped), stderr: '', exitCode: 0 };
+    }
+
+    return { stdout: formatGrepTable(results), stderr: '', exitCode: 0 };
+}
+
+registerCommand('grep', runGrep);
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
     main().then((exitCode) => {

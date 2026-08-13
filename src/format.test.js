@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { formatJson, formatTable, formatSearchTable, formatExplain } from './format.js';
+import { formatJson, formatTable, formatSearchTable, formatExplain, formatGrepTable } from './format.js';
 
 describe('formatJson', () => {
     it('serializes data as compact JSON, no whitespace, no trailing newline', () => {
@@ -82,5 +82,33 @@ describe('formatExplain', () => {
             pipeline: { mode: 'hybrid', limit: 20, overfetchLimit: 100, fulltextExpression: 'x' },
         });
         expect(text).toContain('1 | A | 10 | fulltext_rank=1 | semantic_rank=- | rrf=1/(60+1) = 0.0164');
+    });
+});
+
+describe('formatGrepTable', () => {
+    it('renders line_matches as "L<line>: <text>" joined by "; "', () => {
+        const text = formatGrepTable([
+            {
+                noteTitle: 'Recipe',
+                fileLineCount: 10,
+                lineMatches: [ { line: 2, text: 'hello world' }, { line: 5, text: 'hello again' } ],
+                totalMatchCount: 2,
+            },
+        ]);
+
+        expect(text).toBe('note_title|file_line_count|line_matches\nRecipe|10|L2: hello world; L5: hello again');
+    });
+
+    it('appends "(+N more)" when totalMatchCount exceeds the capped lineMatches length', () => {
+        const text = formatGrepTable([
+            {
+                noteTitle: 'Big',
+                fileLineCount: 100,
+                lineMatches: [ { line: 1, text: 'x' } ],
+                totalMatchCount: 12,
+            },
+        ]);
+
+        expect(text).toBe('note_title|file_line_count|line_matches\nBig|100|L1: x (+11 more)');
     });
 });
