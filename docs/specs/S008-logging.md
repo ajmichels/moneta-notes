@@ -12,19 +12,59 @@ Finalizes the README's "proposed, not yet locked in" logging section: library ch
 mechanism, file layout, and the audit-trail shape — now covering CLI-sourced mutations too (per
 S006), not just MCP tool calls as the README originally framed it.
 
-## Library: pino
+## Library: none — hand-rolled plain-text writer
 
-Structured JSON-lines logging via `pino`, one shared logger module (`src/logger.js`) that every other
-component imports rather than using `console.log` directly — matches CLAUDE.md's existing instruction
-that every log line carry a consistent shape (timestamp, component, level, message) regardless of
-which part of the system emitted it. Each component (`indexer`, `mcp-server`) gets its own file
-destination via a `pino` child logger tagged with a `component` field, rather than separate `pino`
-instances.
+No third-party logging library. One shared module (`src/logger.js`) that every other component
+imports rather than using `console.log` directly — matches CLAUDE.md's existing instruction that
+every log line carry a consistent shape (timestamp, component, level, message) regardless of which
+part of the system emitted it. `getLogger(component, logDir)` is an explicit factory: callers name
+their own component (`'indexer'`, `'mcp-server'`, `'audit'`) and get back a small object, one method
+per level, bound to `<logDir>/<component>.log`.
 
-No `pino-pretty` in production (per the README's own note) — logs are JSON lines, meant to be
-`jq`-queried or read via a viewer, not formatted for direct terminal reading. The CLI does not use
-this logger for its normal output (that's stdout/stderr per S006); it only writes to the audit log for
-mutating commands (see below).
+Plain, single-line, human-readable text — not JSON lines. Chosen over `pino`/structured JSON
+deliberately: these logs are read directly (`tail -f`, `grep`) far more often than fed through a JSON
+log processor, and `pino`'s dependency weight and binary-line format aren't worth it for this
+project's log volume. See "Log line format" below for the exact grammar — still consistently
+parseable, just without a JSON parser. The CLI does not use this logger for its normal output (that's
+stdout/stderr per S006); it only writes to the audit log for mutating commands (see below).
+
+Each entry point (indexer daemon, MCP server, CLI) sets its own `process.title` at startup (e.g.
+`mnotes-indexer`), purely so it's identifiable in Activity Monitor/`ps`. This is unrelated to logging
+— `src/logger.js` never reads `process.title`. The log file path always comes from the explicit
+`component` argument passed to `getLogger`, never inferred from the process.
+
+## Log line format
+
+Every log line shares the same prefix, followed by optional trailing context:
+
+```
+<ISO-8601 timestamp> <LEVEL padded to 5 chars> [<component>] <message> [<key>=<value> ...]
+```
+
+Example:
+```
+2026-08-13T18:22:10.512Z INFO  [indexer] daemon started
+2026-08-13T18:23:01.004Z WARN  [indexer] hash mismatch during processing note_title="Weekly Notes/2026-W32"
+```
+
+- **Level** is upper-cased and right-padded with spaces to 5 characters (`INFO `, `WARN `, `ERROR`,
+  `DEBUG`, `TRACE`, `FATAL`) so columns line up under `tail -f`.
+- **Trailing context** — an optional plain object passed alongside the message — renders as
+  `key=value` pairs in the object's own key order, space-separated. String values are always
+  double-quoted (internal `"` escaped as `\"`) so the grammar never has to guess whether a value needs
+  quoting from its content; non-string values (numbers, booleans) render bare. **Keys whose value is
+  `null`/`undefined` are omitted from the line entirely** — no placeholder token — so, e.g., a CLI
+  audit entry with no `reason` doesn't carry a dangling `reason=` field.
+- Fully `grep`/`awk`-able as plain text: `grep ERROR indexer.log`, `grep 'outcome=error' audit.log`.
+- **Write failures never throw or crash the process.** A failed `appendFile` (disk full, permissions)
+  is reported via `console.error` — safe under MCP's stdio transport, since stdout is reserved for
+  JSON-RPC frames and stderr is the standard side channel for logs/diagnostics — and then swallowed;
+  the calling component keeps running. Each logger method returns the write's promise, so tests can
+  `await` a call and immediately read the file, but that promise always resolves, never rejects — a
+  production call site that doesn't await it (the normal fire-and-forget path) can never see an
+  unhandled rejection from a log call. This is distinct from `logAudit`'s shape-validation errors
+  (below), which throw synchronously and immediately — a malformed audit entry is a programming error
+  caught before any I/O is attempted, and CLAUDE.md's "fail loudly" applies there, not to I/O faults.
 
 ## Rotation: separate LaunchAgent, not in-process, not `newsyslog`
 
@@ -78,12 +118,18 @@ assume access to.
   start (rather than the README's "maybe split later if noisy" framing) because it now has two
   sources, not one: every MCP tool call (per S007) **and** every CLI mutating command (`write`,
   `edit`, `append`, `rename` — per S006's decision that these get logged too, just without a `reason`).
-  Entry shape: `{ tool, note_title, source<"mcp"|"cli">, reason<string|null>, timestamp, outcome }` —
-  `reason` is always present for `source: "mcp"` (required by every MCP tool) and always `null` for
-  `source: "cli"` (S006 explicitly has no `--reason` flag). `outcome` is `"success"` or `"error"` (with
-  the error message, matching S007's error-passthrough approach — an audit trail that hides *why*
-  something failed is much less useful). All at `info` level regardless of outcome — a failed mutation
-  is still a normal, expected audit event, not a system error.
+  `tool` is the line's message; `note_title`, `source<"mcp"|"cli">`, `reason<string, present only when
+  source:"mcp">`, `outcome<"success"|"error">`, and `error_message<string, present only when
+  outcome:"error">` are trailing context fields per the Log line format above, e.g.:
+  ```
+  2026-08-13T18:24:00.113Z INFO  [audit] note_write note_title="Weekly Notes/2026-W32" source=mcp reason="testing redaction" outcome=success
+  2026-08-13T18:24:05.221Z INFO  [audit] write note_title="Test.md" source=cli outcome=error error_message="hash mismatch"
+  ```
+  `reason` is required by every MCP tool call and rendered only for `source: "mcp"`; it's always absent
+  for `source: "cli"` (S006 explicitly has no `--reason` flag). `error_message` is required and
+  rendered only when `outcome: "error"` (matching S007's error-passthrough approach — an audit trail
+  that hides *why* something failed is much less useful). All at `info` level regardless of outcome —
+  a failed mutation is still a normal, expected audit event, not a system error.
 
 CLI **read-only** commands (`search`, `grep`, `tags`, `read`) are not logged anywhere beyond their own
 stdout/stderr — only mutations go to `audit.log`, matching the README's original "CLI is interactive,

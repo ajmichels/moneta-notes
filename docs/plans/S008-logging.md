@@ -2,87 +2,99 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Implement `src/logger.js` (shared `pino`-based logger factory + audit-trail writer) and
+**Goal:** Implement `src/logger.js` (shared plain-text logger factory + audit-trail writer) and
 `src/log-rotator.js` (standalone rotation script, run by its own LaunchAgent) per
 `docs/specs/S008-logging.md`.
 
-**Architecture:** `src/logger.js` exports `getLogger(component, logDir)`, a factory that returns a
-`pino` instance writing structured JSON lines to `<logDir>/<component>.log`, bound with a
-`component` field and a consistent line shape (string `level`, ISO `timestamp`, `msg`). A thin
-`getAuditLogger(logDir)` wrapper gets the `'audit'` component's logger, and `logAudit(auditLogger,
-entry)` is the only way anything writes to it — it validates the entry against S008's exact shape
-(`tool`, `note_title`, `source`, `reason`, `outcome`, plus an `error_message` on failure) and
-allowlists fields by destructuring, so any extra data a caller accidentally passes (note body, diff)
-is silently dropped rather than persisted. `defaultLogDir()` centralizes the real
-`~/Library/Logs/com.ajmichels.mnotes` path so callers (indexer, MCP server) never hardcode it, while
-every test passes an explicit temp directory instead — the same `dbPath`-style testability pattern
-S001 established for `openDb`.
+**Architecture:** `src/logger.js` exports `getLogger(component, logDir)`, a factory that returns an
+object with one method per level (`trace`, `debug`, `info`, `warn`, `error`, `fatal`), each appending a
+single formatted line to `<logDir>/<component>.log`. No third-party logging library — writes are
+plain `node:fs/promises` `appendFile` calls, formatted by hand into the line grammar S008 defines
+(`<timestamp> <LEVEL> [<component>] <message> <key>=<value> ...`). A write failure is caught inside
+the logger itself (`console.error` + swallow) and never rejects the promise a caller might be
+awaiting — production call sites fire-and-forget (`logger.info(...)`, no `await`), while tests can
+`await logger.info(...)` before asserting against the file, since the promise still resolves once the
+write attempt (success or handled failure) completes. A thin `getAuditLogger(logDir)` wrapper gets the
+`'audit'` component's logger, and `logAudit(auditLogger, entry)` is the only way anything writes to
+it — it validates the entry against S008's exact shape (`tool`, `note_title`, `source`, `reason`,
+`outcome`, `error_message`) and allowlists fields by destructuring, so any extra data a caller
+accidentally passes (note body, diff) is silently dropped rather than persisted. Unlike write
+failures, `logAudit`'s shape-validation errors throw synchronously and immediately — a malformed
+entry is a caller bug, not an I/O fault, and CLAUDE.md's "fail loudly" applies there.
+`defaultLogDir()` centralizes the real `~/Library/Logs/com.ajmichels.mnotes` path so callers (indexer,
+MCP server) never hardcode it, while every test passes an explicit temp directory instead — the same
+`dbPath`-style testability pattern S001 established for `openDb`.
 
-`src/log-rotator.js` is a one-shot script (not a long-running process): `shouldRotate(filePath,
-policy)` checks a single file's size/age against thresholds, `rotateLogFile(filePath, keepCount)`
-does the actual numbered-suffix shift-and-truncate, `rotateLogDirectory(logDir, fileNames, policy)`
-applies both across the three known log files, and `main(logDir)` is the entry point invoked when the
-file is run directly (guarded so importing it in tests has no side effects). The LaunchAgent plist
-that schedules `main()` and the `config.toml` keys that would make the policy numbers configurable
-are both S009's concern, not this plan's.
+`process.title` (set by each entry point for Activity Monitor/`ps` visibility) is entirely outside
+this plan's scope — `src/logger.js` never reads it, and setting it is each consuming component's own
+startup concern (S005/S006/S007), not something built or tested here.
 
-**Tech Stack:** `pino` (structured JSON logging), Node built-ins (`node:fs`, `node:os`, `node:path`,
-`node:url`), Vitest with real temp directories and real files (no mocking `pino` or the filesystem,
-per CLAUDE.md).
+`src/log-rotator.js` is a one-shot script (not a long-running process), unaffected by the
+plain-text-vs-pino decision since it operates on file size/mtime, not log content:
+`shouldRotate(filePath, policy)` checks a single file's size/age against thresholds,
+`rotateLogFile(filePath, keepCount)` does the actual numbered-suffix shift-and-truncate,
+`rotateLogDirectory(logDir, fileNames, policy)` applies both across the three known log files, and
+`main(logDir)` is the entry point invoked when the file is run directly (guarded so importing it in
+tests has no side effects). The LaunchAgent plist that schedules `main()` and the `config.toml` keys
+that would make the policy numbers configurable are both S009's concern, not this plan's.
+
+**Tech Stack:** Node built-ins only (`node:fs`, `node:fs/promises`, `node:os`, `node:path`,
+`node:url`) — no logging dependency. Vitest with real temp directories and real files (no mocking the
+filesystem, per CLAUDE.md).
 
 ## Global Constraints
 
 - Plain JavaScript, ES modules, no TypeScript, no build step (CLAUDE.md).
 - `src/logger.js` and `src/log-rotator.js` are top-level `src/` modules per the README's file
-  layout — not under `core/`, since they're cross-cutting infra consumed by `indexer/`, `cli/`, and
-  `mcp/`, not domain/search/notes logic.
+  layout — not under `core/` or `utils/`, since they're cross-cutting infra consumed by `indexer/`,
+  `cli/`, and `mcp/`, not domain/search/notes logic.
 - `kebab-case` filenames; `camelCase` functions/variables (CLAUDE.md) — except where a spec-mandated
-  on-disk JSON field name is itself snake_case (`note_title`, `error_message` in the audit entry
-  shape). JS call sites stay camelCase (`noteTitle`, `errorMessage`); the snake_case only appears as
-  an object *key* at the point `logAudit` builds the log line.
+  on-disk field name is itself snake_case (`note_title`, `error_message` in the audit entry shape). JS
+  call sites stay camelCase (`noteTitle`, `errorMessage`); the snake_case only appears as a context
+  object *key* at the point `logAudit` builds the log line.
 - Test files colocated: `src/logger.js` → `src/logger.test.js`, `src/log-rotator.js` →
   `src/log-rotator.test.js` (CLAUDE.md).
-- Real temp directories and real files in every test — never mock `pino`, `fs`, or a destination
-  stream (CLAUDE.md's "real, not mocked" testing philosophy, established in S001 for the DB layer,
-  applied here to the filesystem).
-- `pino` destinations are opened with `sync: true` so every test can `readFileSync` immediately after
-  a log call with no flush/wait — appropriate for a personal, single-user, low-volume tool where
-  synchronous file I/O overhead is a non-issue.
+- Real temp directories and real files in every test — never mock `fs` or a destination stream
+  (CLAUDE.md's "real, not mocked" testing philosophy, established in S001 for the DB layer, applied
+  here to the filesystem). Tests that need to assert on a written line `await` the logger call first
+  (writes are async but their returned promise always resolves) rather than mocking synchronous I/O.
 - 4-space indentation, single quotes, trailing commas on multiline (matches existing
   `eslint.config.js`-enforced style).
 - `func-style: declaration` — use `function foo() {}`, not `const foo = () => {}`, for named
   functions (arrow functions are fine for inline callbacks).
 - Never log full note content or diffs (CLAUDE.md, S008) — enforced structurally in `logAudit` via an
   explicit field allowlist (destructuring only known keys), not by trusting callers to omit content.
+- A log write failure must never throw or produce an unhandled rejection — caught and reported via
+  `console.error` inside the logger, never propagated to the caller. Validation errors in `logAudit`
+  are the one deliberate exception (see Architecture above) — those throw synchronously, before any
+  write is attempted.
 - Exact rotation policy numbers (10MB / 7 days / keep 5) and file layout (`indexer.log`,
   `mcp-server.log`, `audit.log`) are per `docs/specs/S008-logging.md`, copied verbatim into the tasks
   below. The LaunchAgent plist and `config.toml` keys that would make these numbers configurable are
   explicitly out of scope (S009) — this plan hardcodes them as default parameter values so every
   function stays overridable/testable without reading config itself.
 - What each consuming component actually logs (daemon lifecycle events in S005, protocol events in
-  S007, individual tool-call sites) is that component's own concern — this plan only builds the
-  shared `logger.js`/`log-rotator.js` infrastructure, no call sites in `indexer/`, `cli/`, or `mcp/`.
+  S007, individual tool-call sites, and each component setting its own `process.title`) is that
+  component's own concern — this plan only builds the shared `logger.js`/`log-rotator.js`
+  infrastructure, no call sites in `indexer/`, `cli/`, or `mcp/`.
 
 ---
 
-### Task 1: `getLogger` — per-component file destination
+### Task 1: `getLogger` — plain-text writer, line format, per-component file destination
 
 **Files:**
-- Modify: `package.json` (add `pino` dependency)
 - Create: `src/logger.js`
 - Create: `src/logger.test.js`
 
 **Interfaces:**
-- Produces: `getLogger(component: string, logDir: string) -> pino.Logger` — a logger bound with a
-  `component` field, writing JSON lines to `<logDir>/<component>.log`. Later tasks refine the line
-  shape and add directory auto-creation; later files (`log-rotator.js`) treat `<logDir>/<component>.log`
-  as the file to rotate.
+- Produces: `getLogger(component: string, logDir: string) -> { trace, debug, info, warn, error,
+  fatal }` — each method takes `(msg: string, context?: object)`, appends one formatted line to
+  `<logDir>/<component>.log`, and returns a promise that always resolves (see Architecture above).
+  Line grammar: `<ISO timestamp> <LEVEL padded to 5 chars> [<component>] <msg> <key>=<value> ...`.
+  String context values are always double-quoted (`"` escaped as `\"`); non-string values render bare;
+  `null`/`undefined` context values are omitted entirely, not rendered as a placeholder.
 
-- [ ] **Step 1: Add the `pino` dependency**
-
-Run: `pnpm add pino@^9`
-
-- [ ] **Step 2: Write the failing test**
+- [ ] **Step 1: Write the failing tests**
 
 Create `src/logger.test.js`:
 
@@ -108,138 +120,139 @@ afterEach(() => {
 });
 
 describe('getLogger', () => {
-    it('writes a JSON line tagged with the component and the log message', () => {
+    it('writes a line tagged with the component, level, and message', async () => {
         const logDir = makeTempLogDir();
         const logger = getLogger('indexer', logDir);
-        logger.info('daemon started');
+        await logger.info('daemon started');
 
-        const line = JSON.parse(readFileSync(join(logDir, 'indexer.log'), 'utf8').trim());
-        expect(line.component).toBe('indexer');
-        expect(line.msg).toBe('daemon started');
+        const line = readFileSync(join(logDir, 'indexer.log'), 'utf8').trim();
+        expect(line).toMatch(/^\S+ INFO {2}\[indexer\] daemon started$/);
     });
 
-    it('routes different components to separate files in the same directory', () => {
+    it('routes different components to separate files in the same directory', async () => {
         const logDir = makeTempLogDir();
         const indexerLogger = getLogger('indexer', logDir);
         const mcpLogger = getLogger('mcp-server', logDir);
 
-        indexerLogger.info('from indexer');
-        mcpLogger.info('from mcp');
+        await indexerLogger.info('from indexer');
+        await mcpLogger.info('from mcp');
 
-        const indexerLine = JSON.parse(readFileSync(join(logDir, 'indexer.log'), 'utf8').trim());
-        const mcpLine = JSON.parse(readFileSync(join(logDir, 'mcp-server.log'), 'utf8').trim());
-        expect(indexerLine.msg).toBe('from indexer');
-        expect(mcpLine.msg).toBe('from mcp');
+        const indexerLine = readFileSync(join(logDir, 'indexer.log'), 'utf8').trim();
+        const mcpLine = readFileSync(join(logDir, 'mcp-server.log'), 'utf8').trim();
+        expect(indexerLine).toContain('from indexer');
+        expect(mcpLine).toContain('from mcp');
+    });
+
+    it('pads level labels to a consistent width', async () => {
+        const logDir = makeTempLogDir();
+        const logger = getLogger('indexer', logDir);
+        await logger.warn('short level');
+        await logger.error('longer level');
+
+        const [warnLine, errorLine] = readFileSync(join(logDir, 'indexer.log'), 'utf8')
+            .trim()
+            .split('\n');
+        expect(warnLine).toMatch(/WARN {2}\[indexer\]/);
+        expect(errorLine).toMatch(/ERROR \[indexer\]/);
+    });
+
+    it('renders trailing context as quoted-string or bare key=value pairs, in key order', async () => {
+        const logDir = makeTempLogDir();
+        const logger = getLogger('indexer', logDir);
+        await logger.warn('hash mismatch', { note_title: 'Weekly Notes/2026-W32', retries: 3 });
+
+        const line = readFileSync(join(logDir, 'indexer.log'), 'utf8').trim();
+        expect(line).toBe(
+            `${line.slice(0, 24)}WARN  [indexer] hash mismatch note_title="Weekly Notes/2026-W32" retries=3`,
+        );
+    });
+
+    it('omits null/undefined context values entirely, with no placeholder', async () => {
+        const logDir = makeTempLogDir();
+        const logger = getLogger('indexer', logDir);
+        await logger.info('partial context', { note_title: 'Test.md', reason: null, extra: undefined });
+
+        const line = readFileSync(join(logDir, 'indexer.log'), 'utf8').trim();
+        expect(line).toContain('note_title="Test.md"');
+        expect(line).not.toContain('reason');
+        expect(line).not.toContain('extra');
+    });
+
+    it('throws a TypeError for a non-string message', () => {
+        const logDir = makeTempLogDir();
+        const logger = getLogger('indexer', logDir);
+        expect(() => logger.info(42)).toThrow(TypeError);
+    });
+
+    it('throws a TypeError for a non-object context', () => {
+        const logDir = makeTempLogDir();
+        const logger = getLogger('indexer', logDir);
+        expect(() => logger.info('msg', 'not an object')).toThrow(TypeError);
     });
 });
 ```
 
-- [ ] **Step 3: Run test to verify it fails**
+- [ ] **Step 2: Run tests to verify they fail**
 
 Run: `pnpm vitest run src/logger.test.js`
-Expected: FAIL — `src/logger.js` doesn't exist yet (`Cannot find module './logger.js'` or similar).
+Expected: FAIL — `src/logger.js` doesn't exist yet.
 
-- [ ] **Step 4: Write minimal implementation**
+- [ ] **Step 3: Write minimal implementation**
 
 Create `src/logger.js`:
 
 ```js
-import pino from 'pino';
+import { appendFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-export function getLogger(component, logDir) {
-    const destination = pino.destination({
-        dest: join(logDir, `${component}.log`),
-        sync: true,
-    });
-
-    return pino({ base: { component } }, destination);
-}
-```
-
-- [ ] **Step 5: Run test to verify it passes**
-
-Run: `pnpm vitest run src/logger.test.js`
-Expected: PASS
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add package.json pnpm-lock.yaml src/logger.js src/logger.test.js
-git commit -m "feat(logging): add getLogger factory with per-component file destinations"
-```
-
----
-
-### Task 2: Consistent line shape — string level label, `timestamp` field
-
-**Files:**
-- Modify: `src/logger.js`
-- Modify: `src/logger.test.js`
-
-**Interfaces:**
-- Consumes: `getLogger` from Task 1.
-- Produces: every line from `getLogger` now carries a string `level` (`"info"`, `"warn"`, ...) instead
-  of pino's default numeric level, and a `timestamp` field (ISO-8601 string) instead of pino's default
-  numeric `time` field — matching CLAUDE.md's "consistent shape (timestamp, component, level,
-  message)" requirement literally, not just conceptually.
-
-- [ ] **Step 1: Write the failing test**
-
-Add to `src/logger.test.js`:
-
-```js
-describe('getLogger: consistent line shape', () => {
-    it('writes level as a string label and timestamp as an ISO string', () => {
-        const logDir = makeTempLogDir();
-        const logger = getLogger('indexer', logDir);
-        logger.warn('something odd');
-
-        const line = JSON.parse(readFileSync(join(logDir, 'indexer.log'), 'utf8').trim());
-        expect(line.level).toBe('warn');
-        expect(typeof line.timestamp).toBe('string');
-        expect(new Date(line.timestamp).toISOString()).toBe(line.timestamp);
-        expect(line.time).toBeUndefined();
-    });
-});
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `pnpm vitest run src/logger.test.js`
-Expected: FAIL — `line.level` is a number (`40`), not `'warn'`; `line.timestamp` is `undefined`
-(pino's default field is `time`, a number).
-
-- [ ] **Step 3: Write minimal implementation**
-
-Update `src/logger.js`:
-
-```js
-import pino from 'pino';
-import { join } from 'node:path';
+const LEVELS = [ 'trace', 'debug', 'info', 'warn', 'error', 'fatal' ];
 
 export function getLogger(component, logDir) {
-    const destination = pino.destination({
-        dest: join(logDir, `${component}.log`),
-        sync: true,
-    });
-
-    return pino(
-        {
-            base: { component },
-            formatters: {
-                level(label) {
-                    return { level: label };
-                },
-            },
-            timestamp: () => `,"timestamp":"${new Date().toISOString()}"`,
-        },
-        destination,
+    const logFile = join(logDir, `${component}.log`);
+    return Object.fromEntries(
+        LEVELS.map(level => [ level, (msg, context) => writeLine(logFile, component, level, msg, context) ]),
     );
 }
+
+function writeLine(logFile, component, level, msg, context) {
+    if (typeof msg !== 'string') {
+        throw new TypeError('msg must be a string');
+    }
+    if (context !== undefined && (typeof context !== 'object' || context === null)) {
+        throw new TypeError('context must be an object');
+    }
+
+    const line = formatLine(component, level, msg, context);
+    return appendFile(logFile, `${line}\n`).catch(err => {
+        // eslint-disable-next-line no-console
+        console.error(`[logger] failed to write to ${logFile}: ${err.message}`);
+    });
+}
+
+function formatLine(component, level, msg, context) {
+    const timestamp = new Date().toISOString();
+    const levelLabel = level.toUpperCase().padEnd(5, ' ');
+    let line = `${timestamp} ${levelLabel} [${component}] ${msg}`;
+
+    if (context) {
+        for (const [ key, value ] of Object.entries(context)) {
+            if (value === null || value === undefined) continue;
+            line += ` ${key}=${formatValue(value)}`;
+        }
+    }
+
+    return line;
+}
+
+function formatValue(value) {
+    if (typeof value === 'string') {
+        return `"${value.replace(/"/g, '\\"')}"`;
+    }
+    return String(value);
+}
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4: Run tests to verify they pass**
 
 Run: `pnpm vitest run src/logger.test.js`
 Expected: PASS
@@ -248,12 +261,12 @@ Expected: PASS
 
 ```bash
 git add src/logger.js src/logger.test.js
-git commit -m "feat(logging): use string level labels and a timestamp field"
+git commit -m "feat(logging): add getLogger plain-text writer with per-component file destinations"
 ```
 
 ---
 
-### Task 3: Recursive log-directory creation, `defaultLogDir`
+### Task 2: Recursive log-directory creation, `defaultLogDir`
 
 **Files:**
 - Modify: `src/logger.js`
@@ -272,14 +285,14 @@ Add to `src/logger.test.js` (new import at top: `import { homedir } from 'node:o
 
 ```js
 describe('getLogger: directory creation and defaultLogDir', () => {
-    it('creates the log directory recursively if it does not exist yet', () => {
+    it('creates the log directory recursively if it does not exist yet', async () => {
         const base = makeTempLogDir();
         const nested = join(base, 'nested', 'logs');
         const logger = getLogger('indexer', nested);
-        logger.info('created nested dir');
+        await logger.info('created nested dir');
 
-        const line = JSON.parse(readFileSync(join(nested, 'indexer.log'), 'utf8').trim());
-        expect(line.msg).toBe('created nested dir');
+        const line = readFileSync(join(nested, 'indexer.log'), 'utf8').trim();
+        expect(line).toContain('created nested dir');
     });
 
     it('defaultLogDir points at ~/Library/Logs/com.ajmichels.mnotes', () => {
@@ -291,18 +304,21 @@ describe('getLogger: directory creation and defaultLogDir', () => {
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `pnpm vitest run src/logger.test.js`
-Expected: FAIL — the nested-directory test throws `ENOENT` from `pino.destination` (parent directory
-doesn't exist); `defaultLogDir` is not exported (`defaultLogDir is not a function` or `undefined`).
+Expected: FAIL — the nested-directory test throws `ENOENT` (parent directory doesn't exist);
+`defaultLogDir` is not exported.
 
 - [ ] **Step 3: Write minimal implementation**
 
-Update `src/logger.js`:
+Update `src/logger.js` — add `mkdirSync` (directory creation happens once, synchronously, at
+`getLogger` call time, not per log line — negligible cost) and `defaultLogDir`:
 
 ```js
-import pino from 'pino';
 import { mkdirSync } from 'node:fs';
+import { appendFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+
+const LEVELS = [ 'trace', 'debug', 'info', 'warn', 'error', 'fatal' ];
 
 export function defaultLogDir() {
     return join(homedir(), 'Library', 'Logs', 'com.ajmichels.mnotes');
@@ -311,25 +327,14 @@ export function defaultLogDir() {
 export function getLogger(component, logDir) {
     mkdirSync(logDir, { recursive: true });
 
-    const destination = pino.destination({
-        dest: join(logDir, `${component}.log`),
-        sync: true,
-    });
-
-    return pino(
-        {
-            base: { component },
-            formatters: {
-                level(label) {
-                    return { level: label };
-                },
-            },
-            timestamp: () => `,"timestamp":"${new Date().toISOString()}"`,
-        },
-        destination,
+    const logFile = join(logDir, `${component}.log`);
+    return Object.fromEntries(
+        LEVELS.map(level => [ level, (msg, context) => writeLine(logFile, component, level, msg, context) ]),
     );
 }
 ```
+
+(Rest of the file — `writeLine`, `formatLine`, `formatValue` — unchanged from Task 1.)
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -345,26 +350,28 @@ git commit -m "feat(logging): create log directory recursively, add defaultLogDi
 
 ---
 
-### Task 4: Audit trail — `getAuditLogger`, `logAudit`, content redaction guarantee
+### Task 3: Audit trail — `getAuditLogger`, `logAudit`, content redaction guarantee
 
 **Files:**
 - Modify: `src/logger.js`
 - Modify: `src/logger.test.js`
 
 **Interfaces:**
-- Consumes: `getLogger` from Tasks 1–3.
-- Produces: `getAuditLogger(logDir) -> pino.Logger` (the `'audit'` component's logger) and
-  `logAudit(auditLogger, entry) -> void`, where `entry` is
+- Consumes: `getLogger` from Tasks 1–2.
+- Produces: `getAuditLogger(logDir) -> ReturnType<typeof getLogger>` (the `'audit'` component's
+  logger) and `logAudit(auditLogger, entry) -> Promise<void>`, where `entry` is
   `{ tool, noteTitle, source<'mcp'|'cli'>, reason?, outcome<'success'|'error'>, errorMessage? }`.
   `logAudit` validates the entry against S008's rules (`reason` required and non-null iff
   `source === 'mcp'`, `null` iff `source === 'cli'`; `errorMessage` required iff
-  `outcome === 'error'`, must be `null` iff `outcome === 'success'`) and throws (per CLAUDE.md's
-  "fail loudly") on any violation. It writes at `info` level unconditionally — a failed mutation is
-  a normal audit event, not a system error, per S008 — with only the allowlisted fields
-  (`tool`, `note_title`, `source`, `reason`, `outcome`, `error_message`); any other property on
-  `entry` (e.g. a caller accidentally passing `body` or `diff`) is dropped by destructuring, never
-  reaching the log line. `timestamp`, `component`, and `level` come for free from the underlying
-  `getLogger` machinery built in Tasks 1–3.
+  `outcome === 'error'`, must be `null` iff `outcome === 'success'`) and throws synchronously (per
+  CLAUDE.md's "fail loudly") on any violation, before attempting any write. It writes at `info` level
+  unconditionally — a failed mutation is still a normal, expected audit event, not a system error, per
+  S008 — with `tool` as the message and only the allowlisted context fields (`note_title`, `source`,
+  `reason`, `outcome`, `error_message`); any other property on `entry` (e.g. a caller accidentally
+  passing `body` or `diff`) is dropped by destructuring, never reaching the log line. `timestamp`,
+  component, and level come for free from the underlying `getLogger` machinery built in Tasks 1–2, and
+  `null` fields (e.g. `reason` for a CLI entry) are omitted from the rendered line per Task 1's
+  formatting rule.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -373,11 +380,11 @@ Add to `src/logger.test.js` (extend the `getLogger`/`defaultLogDir` import to in
 
 ```js
 describe('logAudit', () => {
-    it('writes only the allowlisted fields, dropping note body/diff even if passed', () => {
+    it('writes only the allowlisted fields, dropping note body/diff even if passed', async () => {
         const logDir = makeTempLogDir();
         const auditLogger = getAuditLogger(logDir);
 
-        logAudit(auditLogger, {
+        await logAudit(auditLogger, {
             tool: 'note_write',
             noteTitle: 'Weekly Notes/2026-W32',
             source: 'mcp',
@@ -387,31 +394,22 @@ describe('logAudit', () => {
             diff: '-old\n+SECRET DIFF LINE',
         });
 
-        const raw = readFileSync(join(logDir, 'audit.log'), 'utf8');
-        expect(raw).not.toContain('SECRET NOTE CONTENT');
-        expect(raw).not.toContain('SECRET DIFF LINE');
-
-        const line = JSON.parse(raw.trim());
-        expect(line).toEqual(
-            expect.objectContaining({
-                tool: 'note_write',
-                note_title: 'Weekly Notes/2026-W32',
-                source: 'mcp',
-                reason: 'testing redaction',
-                outcome: 'success',
-                error_message: null,
-                level: 'info',
-            }),
-        );
-        expect(line.body).toBeUndefined();
-        expect(line.diff).toBeUndefined();
+        const line = readFileSync(join(logDir, 'audit.log'), 'utf8').trim();
+        expect(line).not.toContain('SECRET NOTE CONTENT');
+        expect(line).not.toContain('SECRET DIFF LINE');
+        expect(line).toContain('INFO  [audit] note_write');
+        expect(line).toContain('note_title="Weekly Notes/2026-W32"');
+        expect(line).toContain('source=mcp');
+        expect(line).toContain('reason="testing redaction"');
+        expect(line).toContain('outcome=success');
+        expect(line).not.toContain('error_message');
     });
 
-    it('writes at info level even when outcome is "error", including the error message', () => {
+    it('writes at info level even when outcome is "error", including the error message', async () => {
         const logDir = makeTempLogDir();
         const auditLogger = getAuditLogger(logDir);
 
-        logAudit(auditLogger, {
+        await logAudit(auditLogger, {
             tool: 'write',
             noteTitle: 'Test.md',
             source: 'cli',
@@ -419,11 +417,11 @@ describe('logAudit', () => {
             errorMessage: 'hash mismatch',
         });
 
-        const line = JSON.parse(readFileSync(join(logDir, 'audit.log'), 'utf8').trim());
-        expect(line.level).toBe('info');
-        expect(line.source).toBe('cli');
-        expect(line.reason).toBeNull();
-        expect(line.error_message).toBe('hash mismatch');
+        const line = readFileSync(join(logDir, 'audit.log'), 'utf8').trim();
+        expect(line).toContain('INFO  [audit] write');
+        expect(line).toContain('source=cli');
+        expect(line).not.toContain('reason=');
+        expect(line).toContain('error_message="hash mismatch"');
     });
 
     it('throws when source is "mcp" and reason is missing', () => {
@@ -516,8 +514,7 @@ Expected: FAIL — `getAuditLogger`/`logAudit` are not exported.
 
 - [ ] **Step 3: Write minimal implementation**
 
-Update `src/logger.js` — add `getAuditLogger` and `logAudit` (the rest of the file unchanged from
-Task 3):
+Update `src/logger.js` — add `getAuditLogger` and `logAudit` (rest of the file unchanged from Task 2):
 
 ```js
 export function getAuditLogger(logDir) {
@@ -546,8 +543,7 @@ export function logAudit(auditLogger, entry) {
         throw new Error('logAudit: errorMessage must be null when outcome is "success"');
     }
 
-    auditLogger.info({
-        tool,
+    return auditLogger.info(tool, {
         note_title: noteTitle,
         source,
         reason,
@@ -571,7 +567,7 @@ git commit -m "feat(logging): add audit trail writer with field allowlist and sh
 
 ---
 
-### Task 5: `shouldRotate` — size threshold
+### Task 4: `shouldRotate` — size threshold
 
 **Files:**
 - Create: `src/log-rotator.js`
@@ -580,7 +576,7 @@ git commit -m "feat(logging): add audit trail writer with field allowlist and sh
 **Interfaces:**
 - Produces: `shouldRotate(filePath: string, policy: { maxSizeBytes, maxAgeMs }) -> boolean` — `false`
   for a missing file (no throw; a fresh install with no logs yet must not crash the rotator), `true`
-  once file size reaches `maxSizeBytes`. Age handling is added in Task 6.
+  once file size reaches `maxSizeBytes`. Age handling is added in Task 5.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -669,7 +665,7 @@ git commit -m "feat(logging): add shouldRotate size-threshold check"
 
 ---
 
-### Task 6: `shouldRotate` — age threshold
+### Task 5: `shouldRotate` — age threshold
 
 **Files:**
 - Modify: `src/log-rotator.js`
@@ -721,7 +717,7 @@ describe('shouldRotate: age threshold', () => {
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `pnpm vitest run src/log-rotator.test.js`
-Expected: FAIL — the "older than threshold" test returns `false` (Task 5's implementation only
+Expected: FAIL — the "older than threshold" test returns `false` (Task 4's implementation only
 checks size).
 
 - [ ] **Step 3: Write minimal implementation**
@@ -757,7 +753,7 @@ git commit -m "feat(logging): add age threshold to shouldRotate"
 
 ---
 
-### Task 7: `rotateLogFile` — numbered-suffix shift, keep-N cap
+### Task 6: `rotateLogFile` — numbered-suffix shift, keep-N cap
 
 **Files:**
 - Modify: `src/log-rotator.js`
@@ -816,7 +812,7 @@ Expected: FAIL — `rotateLogFile is not a function` (not yet exported).
 
 - [ ] **Step 3: Write minimal implementation**
 
-Update `src/log-rotator.js` — add `rotateLogFile` (the rest of the file unchanged from Task 6):
+Update `src/log-rotator.js` — add `rotateLogFile` (rest of the file unchanged from Task 5):
 
 ```js
 import { existsSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -859,14 +855,14 @@ git commit -m "feat(logging): add rotateLogFile numbered-suffix shift and keep-N
 
 ---
 
-### Task 8: `rotateLogDirectory` — apply policy across the known log files
+### Task 7: `rotateLogDirectory` — apply policy across the known log files
 
 **Files:**
 - Modify: `src/log-rotator.js`
 - Modify: `src/log-rotator.test.js`
 
 **Interfaces:**
-- Consumes: `shouldRotate` (Task 6), `rotateLogFile` (Task 7).
+- Consumes: `shouldRotate` (Task 5), `rotateLogFile` (Task 6).
 - Produces: `DEFAULT_ROTATION_POLICY` (`{ maxSizeBytes: 10MB, maxAgeMs: 7 days, keepCount: 5 }`),
   `LOG_FILE_NAMES` (`['indexer.log', 'mcp-server.log', 'audit.log']`), and
   `rotateLogDirectory(logDir: string, fileNames = LOG_FILE_NAMES, policy = DEFAULT_ROTATION_POLICY)
@@ -920,7 +916,7 @@ Expected: FAIL — `rotateLogDirectory is not a function`.
 - [ ] **Step 3: Write minimal implementation**
 
 Update `src/log-rotator.js` — add the constants and `rotateLogDirectory` (rest of the file unchanged
-from Task 7; add `join` to a new `node:path` import):
+from Task 6; add `join` to a new `node:path` import):
 
 ```js
 import { join } from 'node:path';
@@ -957,14 +953,14 @@ git commit -m "feat(logging): add rotateLogDirectory with default rotation polic
 
 ---
 
-### Task 9: `main` entry point, direct-execution guard
+### Task 8: `main` entry point, direct-execution guard
 
 **Files:**
 - Modify: `src/log-rotator.js`
 - Modify: `src/log-rotator.test.js`
 
 **Interfaces:**
-- Consumes: `rotateLogDirectory` (Task 8), `defaultLogDir` (from `src/logger.js`, Task 3).
+- Consumes: `rotateLogDirectory` (Task 7), `defaultLogDir` (from `src/logger.js`, Task 2).
 - Produces: `main(logDir = defaultLogDir()) -> void`, the function the LaunchAgent invokes by running
   `node src/log-rotator.js` (S009 wires the plist; not this plan's concern). Guarded by an
   ESM-equivalent of `require.main === module` so importing the module in tests — or from anywhere
@@ -997,7 +993,7 @@ Expected: FAIL — `main is not a function`.
 - [ ] **Step 3: Write minimal implementation**
 
 Update `src/log-rotator.js` — add `main` and the direct-execution guard (rest of the file unchanged
-from Task 8; add a `node:url` import):
+from Task 7; add a `node:url` import):
 
 ```js
 import { fileURLToPath } from 'node:url';
@@ -1033,36 +1029,43 @@ git commit -m "feat(logging): add log-rotator main entry point with direct-execu
 
 ## Self-Review Notes
 
-- **Spec coverage**: `src/logger.js` covers every piece of S008's logging half — `pino`-based
-  structured JSON, one shared module rather than ad hoc `console.log` (CLAUDE.md), per-component file
-  destinations (`indexer.log`, `mcp-server.log`), a consistent line shape (`component`, string
-  `level`, `timestamp`, `msg`), and the `audit.log` trail with its exact entry shape (`tool`,
-  `note_title`, `source`, `reason`, `outcome`) plus the "never log full note content or diffs"
-  guarantee, enforced structurally via `logAudit`'s field allowlist rather than left to caller
-  discipline. `src/log-rotator.js` covers the rotation half — size (10MB) **or** age (7 days)
-  threshold, keep-last-5 numbered-suffix rotation, and a one-shot `main()` entry point suited to
-  `RunAtLoad` + `StartCalendarInterval` LaunchAgent scheduling (a long-running process was explicitly
-  rejected by S008 in favor of OS-level/scheduled rotation).
+- **Spec coverage**: `src/logger.js` covers every piece of S008's logging half — a hand-rolled
+  plain-text writer (no third-party dependency), one shared module rather than ad hoc `console.log`
+  (CLAUDE.md), per-component file destinations (`indexer.log`, `mcp-server.log`) via an explicit
+  `component` parameter (never `process.title`), a consistent line shape (`timestamp`, padded `level`,
+  bracketed `component`, `msg`, trailing `key=value` context), non-throwing write failures reported to
+  stderr, and the `audit.log` trail with its exact entry shape (`tool`, `note_title`, `source`,
+  `reason`, `outcome`, `error_message`) plus the "never log full note content or diffs" guarantee,
+  enforced structurally via `logAudit`'s field allowlist rather than left to caller discipline.
+  `src/log-rotator.js` covers the rotation half — size (10MB) **or** age (7 days) threshold,
+  keep-last-5 numbered-suffix rotation, and a one-shot `main()` entry point suited to `RunAtLoad` +
+  `StartCalendarInterval` LaunchAgent scheduling — unaffected by the plain-text-vs-`pino` decision
+  since it operates on raw file size/mtime, not log content.
 - **Explicitly out of scope, per S008 and this plan**: the `log-rotator.js` LaunchAgent plist itself
   and `scripts/install.sh` wiring (S009); the exact `config.toml` keys that would make the rotation
   policy numbers configurable (S009) — this plan hardcodes `DEFAULT_ROTATION_POLICY` as a default
   parameter value, overridable by any future caller, but doesn't read config; what each component
-  (`indexer/daemon.js`, `mcp/server.js`, `cli/*`) actually logs at each call site (S005/S006/S007) —
-  this plan only builds `getLogger`/`getAuditLogger`/`logAudit`, not any of their call sites.
+  (`indexer/daemon.js`, `mcp/server.js`, `cli/*`) actually logs at each call site, and each
+  component setting its own `process.title` for Activity Monitor visibility (S005/S006/S007) — this
+  plan only builds `getLogger`/`getAuditLogger`/`logAudit`, not any of their call sites.
 - **Design decisions not verbatim in S008, made explicit for consistency**: (1) the audit entry's
   error-detail field is named `error_message` (S008 says outcome is `"success"` or `"error"` "with
-  the error message" but doesn't name the JSON key); (2) `logAudit` throws on shape violations
+  the error message" but doesn't name the key); (2) `logAudit` throws on shape violations
   (missing/extra `reason`, missing/extra `errorMessage`, invalid `source`/`outcome`) rather than
   silently coercing, matching CLAUDE.md's "fail loudly" architecture rule generalized from `core/` to
-  this shared infra module; (3) `pino` destinations use `sync: true` throughout, chosen for test
-  determinism and appropriate for this project's low log volume — not spec-mandated but consistent
-  with S008's own reasoning for avoiding in-process complexity; (4) JS call sites for `logAudit` use
-  camelCase (`noteTitle`, `errorMessage`) per CLAUDE.md's naming conventions, while the persisted JSON
-  keys stay snake_case (`note_title`, `error_message`) to match S008's literal entry shape.
+  this shared infra module — this is the one deliberate exception to "write failures never throw",
+  since a shape violation is a caller bug caught before any I/O, not an I/O fault; (3) string context
+  values are always double-quoted, even ones with no whitespace (e.g. `note_title="Test.md"`) — chosen
+  over conditionally quoting only-when-needed so the line grammar never has to be parsed by guessing
+  intent from content; (4) JS call sites for `logAudit` use camelCase (`noteTitle`, `errorMessage`)
+  per CLAUDE.md's naming conventions, while the persisted context keys stay snake_case (`note_title`,
+  `error_message`) to match S008's literal entry shape.
 - **Placeholder scan**: no TODOs/TBDs; every step has complete, runnable code.
-- **Type/signature consistency**: `getLogger(component, logDir) -> pino.Logger` is unchanged in
-  signature from Task 1 through Task 4 (only its internal options grow); `getAuditLogger`/`logAudit`
-  (Task 4) build on it without modification. `shouldRotate(filePath, policy) -> boolean` (Task 5) and
-  `rotateLogFile(filePath, keepCount) -> void` (Task 7) keep identical signatures through
-  `rotateLogDirectory` (Task 8) and `main` (Task 9); `DEFAULT_ROTATION_POLICY`/`LOG_FILE_NAMES`
-  introduced in Task 8 are the only defaults, referenced consistently by `main` in Task 9.
+- **Type/signature consistency**: `getLogger(component, logDir) -> { trace, debug, info, warn, error,
+  fatal }` is unchanged in signature from Task 1 through Task 3 (only its internal implementation
+  grows); `getAuditLogger`/`logAudit` (Task 3) build on it without modification.
+  `shouldRotate(filePath, policy) -> boolean` (Task 4) and `rotateLogFile(filePath, keepCount) ->
+  void` (Task 6) keep identical signatures through `rotateLogDirectory` (Task 7) and `main` (Task 8);
+  `DEFAULT_ROTATION_POLICY`/`LOG_FILE_NAMES` introduced in Task 7 are the only defaults, referenced
+  consistently by `main` in Task 8.
+</content>
