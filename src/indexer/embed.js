@@ -126,6 +126,12 @@ export function createEmbedder(options = {}) {
             unloadTimer = null;
             getContextLogger().info('embedding pipeline unloaded', { idle_minutes: idleTimeoutMs / (60 * 1000) });
         }, idleTimeoutMs);
+        // Don't let this timer alone keep a short-lived process (e.g. the CLI) alive for up to
+        // idleTimeoutMs after it would otherwise have exited. Guarded because test doubles for
+        // scheduleUnload return plain values without a real Timer's .unref().
+        if (typeof unloadTimer?.unref === 'function') {
+            unloadTimer.unref();
+        }
     }
 
     async function embed(text) {
