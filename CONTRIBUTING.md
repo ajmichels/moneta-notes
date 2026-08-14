@@ -2,6 +2,22 @@
 
 Thanks for your interest in contributing to moneta-notes.
 
+## Signed commits
+
+All commits to `main` must be cryptographically signed (GPG or SSH) — GitHub
+enforces this on the branch and will reject unsigned pushes/merges. Set up
+commit signing per
+[GitHub's guide](https://docs.github.com/en/authentication/managing-commit-signature-verification/signing-commits),
+then enable it for this repo (or globally):
+
+```
+git config commit.gpgsign true
+```
+
+This is separate from, and in addition to, the DCO sign-off below — a
+cryptographic signature verifies *who* made the commit, while the DCO
+sign-off certifies *the right to submit it*.
+
 ## Developer Certificate of Origin
 
 This project requires that all contributions be certified under the
