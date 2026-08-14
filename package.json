@@ -10,7 +10,7 @@
     "cli"
   ],
   "author": "AJ Michels <ajmichels.web@gmail.com>",
-  "license": "ISC",
+  "license": "Apache-2.0",
   "main": "./src/mcp/server.js",
   "type": "module",
   "bin": {

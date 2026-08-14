@@ -1,0 +1,28 @@
+name: DCO
+
+on:
+  pull_request:
+
+jobs:
+  check-signoff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check commits for Signed-off-by trailer
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -e
+          missing=0
+          for commit in $(git rev-list --no-merges "$BASE_SHA..$HEAD_SHA"); do
+            message=$(git log -1 --format='%B' "$commit")
+            if ! echo "$message" | grep -qE '^Signed-off-by: .+ <.+>$'; then
+              echo "::error::Commit $commit is missing a Signed-off-by trailer. See CONTRIBUTING.md."
+              missing=1
+            fi
+          done
+          exit $missing
