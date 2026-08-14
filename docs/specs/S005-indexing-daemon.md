@@ -113,12 +113,17 @@ whose `next_attempt_at` is still in the future (backoff not yet elapsed).
 
 For each dequeued path:
 
-1. **Skip-unchanged check**: compare the file's current mtime to `notes.mtime`. If unchanged, this was
-   a spurious enqueue (shouldn't normally happen given the debounce logic, but cheap to guard against
-   regardless) — remove from queue, done. If changed, read the file and compute `content_hash`; if
+1. **Skip-unchanged check**: compare the file's current mtime to `notes.mtime`, **and** whether the
+   note's existing `chunks` all match the currently configured `embedding_model`/`embedding_version`
+   (`hasStaleChunks` in `indexer/daemon.js`). Only skips (removes from queue, done) if both hold — file
+   unchanged *and* chunks current. If the mtime changed, read the file and compute `content_hash`; if
    that matches the stored hash (content genuinely unchanged, e.g. a `touch` or a save that rewrote
-   identical bytes), update `notes.mtime` only and skip straight to done — no re-chunking or
-   re-embedding for unchanged content.
+   identical bytes) **and** chunks are current, update `notes.mtime` only and skip straight to done —
+   no re-chunking or re-embedding for unchanged, already-current content. A stale `embedding_model`/
+   `embedding_version` alone (file untouched) falls through to step 2 just like a real content change
+   — this is what makes bumping `embed.js`'s embedding version (e.g. after a pooling-strategy change)
+   an effective way to force a full re-embed via a plain `mnotes reindex`, with no separate migration
+   mechanism needed.
 2. If the hash actually changed: re-chunk (see Chunking below), re-embed each chunk, extract tags
    (S004) and link targets (S011), and upsert everything per S001's idempotent-reindex procedure
    (`notes` upsert, delete+reinsert `chunks`/`chunk_vectors`/`notes_fts` row/`note_tags`/`note_links`).
@@ -164,6 +169,19 @@ excluded — matches S001's `chunks.char_start`/`char_end` being offsets into th
 - **Precision**: `q8` (8-bit quantized) via `onnx-community/Qwen3-Embedding-0.6B-ONNX`'s `dtype`
   option — smallest memory footprint of the three available options (`fp32`/`fp16`/`q8`), acceptable
   quality tradeoff for a retrieval/similarity use case (not generation).
+- **Pooling**: `last_token`, not `mean`. Qwen3-Embedding is a causal decoder-only model trained for
+  last-token pooling — under causal attention only the final token has attended to the whole input,
+  so mean-pooling drags in under-contextualized early-token states and collapses short notes toward a
+  generic embedding-space "hub" that scores artificially high against nearly any query. `indexer/
+  embed.js`'s `defaultPipelineFactory` passes `pooling: 'last_token'` to Transformers.js'
+  `feature-extraction` pipeline for every embed call, document and query alike; `normalize: true`
+  (L2 normalization) applies on top either way.
+- **Query-side instruction prefix**: `embed.js`'s `embedQuery()` (used by `core/search.js` for the
+  query text only — never for chunk/document text) prepends Qwen3-Embedding's documented
+  `"Instruct: {task_description}\nQuery: {query}"` format before embedding, per the model's trained
+  query/document asymmetry. The task description (`embed.js`'s `QUERY_INSTRUCTION`): "Given a query,
+  retrieve relevant notes from a notes vault that answer or relate to the query." Chunk/document text
+  (`embed()`, no query prefix) is always embedded plain.
 - **Lazy load**: the pipeline isn't loaded at daemon startup — it loads on first actual use (the first
   chunk that needs embedding after startup, whether from catch-up or a live event).
 - **Idle unload**: after **10 minutes** with no embedding calls, the daemon dereferences the loaded
@@ -182,8 +200,10 @@ its own.
 - **Protocol**: newline-delimited JSON messages over the socket connection.
 - **`mnotes reindex` (no title)**: CLI connects, sends `{ action: "reindex" }`. Daemon walks the vault
   and enqueues every `.md` file's path (not just changed ones — this is the ad hoc "safe to run
-  anytime" full-vault command from the README; unchanged files are still cheap since the skip-
-  -unchanged check in the drainer handles them, no forced re-embedding). Daemon streams one JSON
+  anytime" full-vault command from the README; unchanged-and-current files are still cheap since the
+  skip-unchanged check in the drainer handles them — but a file with stale chunks, per the
+  embedding-version check above, does get re-embedded even with no content change). Daemon streams
+  one JSON
   message per completed path (including per-attempt failure messages as they happen, per the retry
   behavior above) back over the same connection, then a final summary message
   (`{ reindexed, skipped, failed }` counts) once every enqueued path has reached a final state

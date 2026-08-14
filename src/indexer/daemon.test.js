@@ -105,6 +105,39 @@ describe('processPath: skip-unchanged', () => {
 
         expect(result).toEqual({ status: 'unchanged' });
     });
+
+    it('reindexes an mtime-unchanged note when its chunks are stale (embedding_model/version mismatch)', async () => {
+        const vaultRoot = makeTempVault();
+        const db = makeTestDb();
+        writeNote(vaultRoot, 'A.md', 'body text', 1000);
+        await processPath(vaultRoot, db, 'A.md', baseDeps());
+
+        const bumpedDeps = { ...baseDeps(), embeddingVersion: 'v2' };
+        const result = await processPath(vaultRoot, db, 'A.md', bumpedDeps);
+
+        expect(result).toEqual({ status: 'reindexed' });
+        const note = db.prepare('SELECT id FROM notes WHERE path = ?').get('A.md');
+        const chunkRow = db.prepare('SELECT embedding_version FROM chunks WHERE note_id = ?').get(note.id);
+        expect(chunkRow.embedding_version).toBe('v2');
+    });
+
+    it('reindexes a hash-unchanged note when its chunks are stale (embedding_model/version mismatch)', async () => {
+        const vaultRoot = makeTempVault();
+        const db = makeTestDb();
+        writeNote(vaultRoot, 'A.md', 'body text', 1000);
+        await processPath(vaultRoot, db, 'A.md', baseDeps());
+        // Newer mtime with byte-identical content reaches the content_hash skip point (not the
+        // earlier mtime one) — this is the "editor rewrote identical bytes" path.
+        writeNote(vaultRoot, 'A.md', 'body text', 2000);
+
+        const bumpedDeps = { ...baseDeps(), embeddingVersion: 'v2' };
+        const result = await processPath(vaultRoot, db, 'A.md', bumpedDeps);
+
+        expect(result).toEqual({ status: 'reindexed' });
+        const note = db.prepare('SELECT id FROM notes WHERE path = ?').get('A.md');
+        const chunkRow = db.prepare('SELECT embedding_version FROM chunks WHERE note_id = ?').get(note.id);
+        expect(chunkRow.embedding_version).toBe('v2');
+    });
 });
 
 describe('processPath: content changed', () => {
@@ -213,9 +246,9 @@ describe('processPath: idempotent reprocessing', () => {
         const first = await processPath(vaultRoot, db, 'Stable.md', baseDeps());
         expect(first.status).toBe('reindexed');
 
-        // Force a re-check by bumping mtime without changing content — the daemon's real trigger for
-        // this path (an editor rewriting identical bytes) but exercised directly here since this test
-        // is about processPath's idempotency, not the debounce/fswatch layer that would normally cause it.
+        // Force a re-check by bumping mtime without changing content — the daemon's real trigger
+        // (an editor rewriting identical bytes) but exercised directly here since this test is
+        // about processPath's idempotency, not the debounce/fswatch layer that triggers it.
         utimesSync(join(vaultRoot, 'Stable.md'), 2000, 2000);
         const second = await processPath(vaultRoot, db, 'Stable.md', baseDeps());
         expect(second.status).toBe('unchanged');

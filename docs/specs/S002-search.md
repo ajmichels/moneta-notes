@@ -47,7 +47,10 @@ possibility in the default mode, not just an opt-in `fulltext` mode.
 
 ### Semantic retrieval and chunk collapse
 
-1. Embed `query` verbatim (same embedding pipeline as indexing, `indexer/embed.js` per S005).
+1. Embed `query` via `indexer/embed.js`'s `embedQuery()` — same underlying pipeline as indexing
+   (`indexer/embed.js` per S005), but with Qwen3-Embedding's query-side instruction prefix applied
+   (`embedQuery()`, not the document-side `embed()` chunks are indexed with — see S005's "Embedding
+   pipeline lifecycle").
 2. Query `chunk_vectors` for the nearest `min(limit × 5, 500)` chunks by cosine distance, filtered to
    `chunks.embedding_model` / `chunks.embedding_version` matching the currently configured model.
    Chunks from a stale (not-yet-re-embedded) model version are silently excluded — comparing vectors

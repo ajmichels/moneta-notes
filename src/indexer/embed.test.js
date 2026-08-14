@@ -3,7 +3,10 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { getLogger, runWithLogger } from '../logger.js';
-import { chunkText, loadTokenizer, tokenizeWithOffsets, createEmbedder, embed } from './embed.js';
+import {
+    chunkText, loadTokenizer, tokenizeWithOffsets, createEmbedder, embed, embedQuery,
+    buildQueryPrompt, defaultPipelineFactory,
+} from './embed.js';
 import { cleanupTempDir } from '../../vitest.helpers.js';
 
 function fakePipelineFactory() {
@@ -203,11 +206,62 @@ describe('createEmbedder: idle unload', () => {
     });
 });
 
+describe('defaultPipelineFactory: pooling and normalization', () => {
+    it('invokes the extractor with last_token pooling and normalize enabled', async () => {
+        const output = { data: Float32Array.from([ 0.1, 0.2, 0.3 ]) };
+        const extractor = vi.fn().mockResolvedValue(output);
+        const pipelineMock = vi.fn().mockResolvedValue(extractor);
+
+        vi.resetModules();
+        vi.doMock('@huggingface/transformers', async (importOriginal) => {
+            const actual = await importOriginal();
+            return { ...actual, pipeline: pipelineMock };
+        });
+
+        try {
+            const { defaultPipelineFactory: isolatedFactory } = await import('./embed.js');
+            const embedFn = await isolatedFactory('some-model-id', { dtype: 'q8' });
+            const vector = await embedFn('hello world');
+
+            expect(pipelineMock).toHaveBeenCalledWith('feature-extraction', 'some-model-id', { dtype: 'q8' });
+            expect(extractor).toHaveBeenCalledWith('hello world', { pooling: 'last_token', normalize: true });
+            expect(vector).toEqual(Float32Array.from([ 0.1, 0.2, 0.3 ]));
+        } finally {
+            vi.doUnmock('@huggingface/transformers');
+            vi.resetModules();
+        }
+    });
+
+    it('is the pipeline factory actually used by the shared embedder', () => {
+        expect(typeof defaultPipelineFactory).toBe('function');
+    });
+});
+
+describe('buildQueryPrompt', () => {
+    it('wraps query text in the Qwen3 "Instruct: ...\\nQuery: ..." format', () => {
+        expect(buildQueryPrompt('book recommendations')).toBe(
+            'Instruct: Given a query, retrieve relevant notes from a notes vault that answer or '
+            + 'relate to the query\nQuery: book recommendations',
+        );
+    });
+});
+
 describe('embed: real pipeline (slow, network on first run)', () => {
     it('returns a normalized 1024-dim Float32Array for real text', async () => {
         const vector = await embed('hello world');
 
         expect(vector).toBeInstanceOf(Float32Array);
         expect(vector.length).toBe(1024);
+    }, 120000);
+});
+
+describe('embedQuery: real pipeline (slow, network on first run)', () => {
+    it('embeds the instruction-prefixed query text, distinct from a plain embed() of the same text', async () => {
+        const queryVector = await embedQuery('hello world');
+        const docVector = await embed('hello world');
+
+        expect(queryVector).toBeInstanceOf(Float32Array);
+        expect(queryVector.length).toBe(1024);
+        expect(queryVector).not.toEqual(docVector);
     }, 120000);
 });

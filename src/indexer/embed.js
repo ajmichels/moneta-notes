@@ -155,10 +155,15 @@ export function createEmbedder(options = {}) {
     return { embed, isLoaded, unload };
 }
 
-async function defaultPipelineFactory(modelId, { dtype }) {
+// Qwen3-Embedding is a causal decoder-only model trained for last-token pooling, not mean pooling
+// — under causal attention only the final token has attended to the whole input, so mean-pooling
+// drags in under-contextualized early-token states (this was the S005 pooling bug: it collapsed
+// short notes toward a generic embedding-space "hub" that scored artificially high against nearly
+// any query).
+export async function defaultPipelineFactory(modelId, { dtype }) {
     const extractor = await pipeline('feature-extraction', modelId, { dtype });
     return async (text) => {
-        const output = await extractor(text, { pooling: 'mean', normalize: true });
+        const output = await extractor(text, { pooling: 'last_token', normalize: true });
         return Float32Array.from(output.data);
     };
 }
@@ -183,4 +188,18 @@ export function getSharedEmbedder() {
 
 export async function embed(text) {
     return getSharedEmbedder().embed(text);
+}
+
+// Qwen3-Embedding's documented usage applies this instruction prefix on the query side only, never
+// on the document/chunk side — it's how the model was trained to discriminate a search query from
+// the passages it's being matched against (S005).
+export const QUERY_INSTRUCTION = 'Given a query, retrieve relevant notes from a notes vault that '
+    + 'answer or relate to the query';
+
+export function buildQueryPrompt(text) {
+    return `Instruct: ${QUERY_INSTRUCTION}\nQuery: ${text}`;
+}
+
+export async function embedQuery(text) {
+    return getSharedEmbedder().embed(buildQueryPrompt(text));
 }

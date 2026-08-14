@@ -7,7 +7,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { SCHEMA_VERSION } from '../core/db.js';
 import { getAuditLogger, getLogger, defaultLogDir } from '../logger.js';
-import { embed, configureEmbedder } from '../indexer/embed.js';
+import { embedQuery, configureEmbedder } from '../indexer/embed.js';
 import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_VERSION } from '../indexer/daemon.js';
 import { loadConfig } from '../config.js';
 import { registerPrompts } from './prompts.js';
@@ -208,7 +208,7 @@ export async function main() {
         dbPath,
         vaultRoot,
         config,
-        embed,
+        embed: embedQuery,
         embeddingModel: DEFAULT_EMBEDDING_MODEL,
         embeddingVersion: DEFAULT_EMBEDDING_VERSION,
         auditLogger,

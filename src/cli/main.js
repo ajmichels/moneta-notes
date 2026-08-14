@@ -11,7 +11,7 @@ import { titleToPath, resolveTitle } from '../core/note-fs.js';
 import { logAudit, getAuditLogger, defaultLogDir } from '../logger.js';
 import { openDb } from '../core/db.js';
 import { defaultSocketPath, DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_VERSION } from '../indexer/daemon.js';
-import { embed as realEmbed, configureEmbedder } from '../indexer/embed.js';
+import { embedQuery as realEmbedQuery, configureEmbedder } from '../indexer/embed.js';
 import { loadConfig, resolveConfig } from '../config.js';
 import { computeStats, checkDaemonRunning } from './stats.js';
 import { runReindexCommand } from './reindex.js';
@@ -478,7 +478,7 @@ function buildRealDeps() {
         dbPath,
         db,
         config,
-        embed: realEmbed,
+        embed: realEmbedQuery,
         embeddingModel: DEFAULT_EMBEDDING_MODEL,
         embeddingVersion: DEFAULT_EMBEDDING_VERSION,
         auditLogger: getAuditLogger(defaultLogDir()),

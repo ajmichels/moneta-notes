@@ -35,6 +35,14 @@ export function dequeueNextPath(db, now = Date.now()) {
     return row ? row.path : null;
 }
 
+function hasStaleChunks(db, noteId, embeddingModel, embeddingVersion) {
+    const row = db.prepare(`
+        SELECT COUNT(*) AS count FROM chunks
+        WHERE note_id = ? AND NOT (embedding_model = ? AND embedding_version = ?)
+    `).get(noteId, embeddingModel, embeddingVersion);
+    return row.count > 0;
+}
+
 function upsertNoteRow(db, path, contentHash, lineCount, mtime, updatedAt) {
     db.prepare(`
         INSERT INTO notes (path, content_hash, line_count, mtime, updated_at)
@@ -206,7 +214,8 @@ export async function processPath(vaultRoot, db, path, deps) {
 
     const currentMtime = Math.floor(stats.mtimeMs / 1000);
     const existing = db.prepare('SELECT id, mtime, content_hash FROM notes WHERE path = ?').get(path);
-    if (existing && existing.mtime === currentMtime) {
+    if (existing && existing.mtime === currentMtime
+        && !hasStaleChunks(db, existing.id, embeddingModel, embeddingVersion)) {
         getContextLogger().debug('skipping unchanged path', { note_title: title });
         return { status: 'unchanged' };
     }
@@ -217,7 +226,8 @@ export async function processPath(vaultRoot, db, path, deps) {
         return { status: 'deleted' };
     }
 
-    if (existing && existing.content_hash === read.content_hash) {
+    if (existing && existing.content_hash === read.content_hash
+        && !hasStaleChunks(db, existing.id, embeddingModel, embeddingVersion)) {
         db.prepare('UPDATE notes SET mtime = ?, updated_at = ? WHERE id = ?')
             .run(currentMtime, Math.floor(now / 1000), existing.id);
         getContextLogger().debug('skipping unchanged path', { note_title: title });
@@ -439,7 +449,7 @@ export function createIpcServer(socketPath, vaultRoot, db, deps, gate = createSe
 }
 
 export const DEFAULT_EMBEDDING_MODEL = 'Qwen3-Embedding-0.6B';
-export const DEFAULT_EMBEDDING_VERSION = 'q8-v1';
+export const DEFAULT_EMBEDDING_VERSION = 'q8-v2';
 const DEFAULT_DRAIN_INTERVAL_MS = 2000;
 
 async function resolveChunkText(providedChunkText) {
