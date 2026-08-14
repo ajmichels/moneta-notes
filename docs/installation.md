@@ -60,9 +60,10 @@ In order:
 3. **Writes `~/.config/mnotes/config.toml`** — but only if it doesn't already exist, and only if at
    least one answer differs from its suggested default. If you accept both defaults, **no file is
    written at all** — every value already has a built-in default in `src/config.js`, and the file only
-   ever contains genuinely-overridden keys. See [config.example.toml](../config.example.toml) for the
-   full schema and every tunable that can go in this file. An existing `config.toml` (e.g. re-running
-   install after an upgrade) is always left untouched.
+   ever contains genuinely-overridden keys. See [Configuration](configuration.md) for every tunable
+   that can go in this file (or [config.example.toml](../config.example.toml) for the same schema as a
+   copy-pasteable file). An existing `config.toml` (e.g. re-running install after an upgrade) is always
+   left untouched.
 4. **Creates `~/Library/Application Support/mnotes/`** — holds the SQLite index (`index.db`, schema
    created by the daemon on first run, not by this script) and the daemon's Unix socket
    (`daemon.sock`).
@@ -104,6 +105,7 @@ claude mcp list        # confirm "mnotes" is registered, if you use Claude Code
 
 ## Next steps
 
+- [Configuration](configuration.md) — every `config.toml` option, what it does, and its default.
 - [Usage](usage.md) — the full `mnotes` command reference and MCP tool overview.
 - [Process Management](process-management.md) — starting/stopping the daemon, logs, troubleshooting.
 - [Uninstallation](uninstallation.md) — removing everything this script created.

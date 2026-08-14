@@ -29,6 +29,7 @@ project does; if anything here conflicts with a spec, the spec wins.
 | Guide | Covers |
 |---|---|
 | [Installation](docs/installation.md) | Prerequisites, running `scripts/install.sh`, what it creates, verifying the install |
+| [Configuration](docs/configuration.md) | Every `config.toml` option: what it does, its default |
 | [Usage](docs/usage.md) | The full `mnotes` CLI command reference plus the MCP tool surface |
 | [Process Management](docs/process-management.md) | Starting/stopping/restarting the indexing daemon, log locations, troubleshooting |
 | [Uninstallation](docs/uninstallation.md) | Running `scripts/uninstall.sh`, what it removes, what it leaves alone |

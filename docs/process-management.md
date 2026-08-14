@@ -73,7 +73,7 @@ grep 'outcome=error' ~/Library/Logs/com.ajmichels.mnotes/audit.log
 
 Rotation (handled by the log-rotation LaunchAgent, not the daemon itself): each file rotates at 10MB or
 7 days, whichever comes first, keeping the last 5 rotated files (`indexer.log.1`, `indexer.log.2`, ...).
-Rotation policy is config-backed — see `[logging]` in [config.example.toml](../config.example.toml).
+Rotation policy is config-backed — see `[logging]` in [Configuration](configuration.md#logging).
 
 ## Troubleshooting
 
