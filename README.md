@@ -24,6 +24,15 @@ project does; if anything here conflicts with a spec, the spec wins.
 
 ---
 
+## Name
+
+*Moneta* was an epithet of the Roman goddess Juno — Juno Moneta, "Juno who warns/reminds," from the
+Latin verb *monere* (to remind, to warn, to advise). Her temple on the Capitoline Hill also housed
+Rome's mint, which is why *moneta* is the root of "money" and "mint" in English and the Romance
+languages. The reminding/advising sense is the one that gave this project its name.
+
+---
+
 ## Documentation
 
 | Guide | Covers |
