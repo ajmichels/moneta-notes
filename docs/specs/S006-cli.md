@@ -30,16 +30,24 @@ command is still an error regardless of a trailing `--help`.
 
 ## Output format
 
-**Mirrors MCP tool output exactly** — the same pipe-delimited columnar text for list-style commands
-(`search`, `grep`, `tags list`, `tags notes`) and the same structured JSON for `write`/`edit`/`append`/
-`rename`, produced by the same formatting function each MCP tool handler calls. This is a direct
-consequence of the architecture rule that `cli/` and `mcp/` must not duplicate logic — one formatter
-per tool, shared by both surfaces, rather than a second "human-friendly" renderer that could drift
-from what Claude actually sees. **`grep`'s `--content` flag (see Commands below) is the one
-deliberate exception**: `formatGrepTable`'s `includeText` option is still the single shared formatter
-(no duplicated rendering logic), but the CLI is the only caller that ever passes `includeText: true`
-— a human at a terminal running `grep` interactively benefits from seeing match text inline, where
-the MCP tool (S007) never does, for context-budget reasons specific to that surface.
+**Mirrors MCP tool output** — the same pipe-delimited columnar text for list-style commands
+(`search`, `grep`, `tags list`, `tags notes`, `links`) and the same structured JSON for
+`write`/`edit`/`append`/`rename`, produced by the same formatting function each MCP tool handler calls.
+This is a direct consequence of the architecture rule that `cli/` and `mcp/` must not duplicate logic —
+one formatter per tool, shared by both surfaces, rather than a second "human-friendly" renderer that
+could drift from what Claude actually sees. Two deliberate exceptions, both opt-in flags/options on the
+otherwise-shared formatter rather than a parallel rendering path:
+
+- **`grep`'s `--content` flag**: `formatGrepTable`'s `includeText` option is still the single shared
+  formatter, but the CLI is the only caller that ever passes `includeText: true` — a human at a
+  terminal running `grep` interactively benefits from seeing match text inline, where the MCP tool
+  (S007) never does, for context-budget reasons specific to that surface.
+- **Column alignment**: every `formatTable`-based CLI table (`search`, `grep`, `tags list`,
+  `tags notes`, `links`, `links broken`) passes `align: true`, which pads each column to its widest
+  cell and inserts a hyphen-filled separator row under the header, so columns line up visually in a
+  terminal. MCP's calls to the same formatters leave `align` at its default (`false`, compact/unpadded)
+  — an LLM reader gets no benefit from the padding, and it costs tokens on every tool response. The
+  underlying values and column set are identical either way; only the whitespace differs.
 
 List-style commands accept a `--json` flag for scripting/`obsidian.nvim` integration use cases where
 structured output is more convenient than parsing pipe-delimited columns. `write`/`edit`/`append`/
@@ -80,7 +88,7 @@ MCP tool never does.
 
 | Mode | stdout | stderr |
 |---|---|---|
-| default | Note body only, frontmatter stripped | Parsed `metadata` object, as JSON |
+| default | Note body only, frontmatter stripped | Parsed `metadata` object, as pretty-printed (indented) JSON |
 | `--raw` | The exact file bytes as stored (frontmatter included), unmodified | Nothing |
 | `--json` | Full MCP-identical structured JSON (`title`, `content_hash`, `metadata`, `content`, line info) | Nothing |
 
@@ -89,6 +97,12 @@ script that wants to chain a `write`/`edit` after a `read` needs the hash, and `
 that surfaces it on stdout without a second lookup. `--raw` is for getting the file exactly as it
 lives on disk (e.g. a manual diff or backup) — no metadata is separately reported in that mode since
 it's already present in the raw output.
+
+Default mode's stderr JSON is pretty-printed (`JSON.stringify(metadata, null, 2)`, trailing blank line)
+rather than the compact single-line JSON `--json`/`--explain --json` produce on stdout — stderr here is
+for a human skimming metadata at a glance, not a script parsing it, so indentation costs nothing and
+helps readability. `main()` also writes stderr before stdout for every command, so this metadata prints
+ahead of the note body when both streams land in the same terminal.
 
 **`<title>` resolves in all three modes** (S003/S010): an exact title match first, then a fallback to
 a unique-basename match (e.g. `mnotes read "Barbara Garn"` finds a note actually at
@@ -170,6 +184,12 @@ breakdown (`1/(k+fulltext_rank) + 1/(k+semantic_rank) = ...`). Plus pipeline-lev
 chunks/notes were over-fetched before collapsing/truncating to `limit`, and the actual FTS5 expression
 sent to `MATCH` (relevant now that `hybrid` mode passes DSL through unmodified, per S002) — this is
 the level of detail that makes "why didn't note X show up" actually answerable.
+
+Non-JSON output is a pipeline-summary line (`mode=... limit=... overfetch=... fts5_expression=...`)
+followed by the same aligned, column-headered table every other list-style command uses (see "Output
+format" above) — column set varies by mode (`bm25` for fulltext; `cosine`/`chunk` for semantic;
+`fulltext_rank`/`semantic_rank`/`rrf` for hybrid), but the header-row-then-separator-then-data shape is
+consistent with `search`/`grep`/`tags`/`links`.
 
 ### `mnotes daemon <start|stop|restart>`
 
