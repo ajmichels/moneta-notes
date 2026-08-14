@@ -18,7 +18,7 @@ import { runReindexCommand } from './reindex.js';
 import { runDaemonCommand } from './daemon.js';
 import {
     formatSearchTable, formatExplain, formatGrepTable, formatTagListTable, formatTagNotesTable,
-    formatLinksTable, formatBrokenLinksTable, formatStats, formatJson,
+    formatLinksTable, formatBrokenLinksTable, formatStats, formatJson, formatJsonPretty,
 } from '../format.js';
 
 export function resolveVaultRoot(config = loadConfig()) {
@@ -103,11 +103,13 @@ export async function dispatch(argv, deps) {
 
 export async function main(argv = process.argv.slice(2), deps = {}) {
     const result = await dispatch(argv, deps);
-    if (result.stdout) {
-        process.stdout.write(result.stdout);
-    }
+    // stderr before stdout: `read`'s parsed-metadata-on-stderr / body-on-stdout split relies on
+    // metadata printing first when both land on the same terminal.
     if (result.stderr) {
         process.stderr.write(result.stderr);
+    }
+    if (result.stdout) {
+        process.stdout.write(result.stdout);
     }
     return result.exitCode;
 }
@@ -146,7 +148,7 @@ export async function runSearch(args, deps) {
     }
 
     const results = await search(deps.db, searchOptions);
-    const stdout = values.json ? formatJson(results) : formatSearchTable(results, values.mode);
+    const stdout = values.json ? formatJson(results) : formatSearchTable(results, values.mode, { align: true });
     return { stdout, stderr: '', exitCode: 0 };
 }
 
@@ -184,7 +186,11 @@ export async function runGrep(args, deps) {
         return { stdout: formatJson(mapped), stderr: '', exitCode: 0 };
     }
 
-    return { stdout: formatGrepTable(results, { includeText: values.content }), stderr: '', exitCode: 0 };
+    return {
+        stdout: formatGrepTable(results, { includeText: values.content, align: true }),
+        stderr: '',
+        exitCode: 0,
+    };
 }
 
 registerCommand('grep', runGrep);
@@ -198,7 +204,7 @@ async function runTagsList(args, deps) {
         return { stdout: formatJson(mapped), stderr: '', exitCode: 0 };
     }
 
-    return { stdout: formatTagListTable(tags), stderr: '', exitCode: 0 };
+    return { stdout: formatTagListTable(tags, { align: true }), stderr: '', exitCode: 0 };
 }
 
 async function runTagsNotes(args, deps) {
@@ -213,7 +219,7 @@ async function runTagsNotes(args, deps) {
         return { stdout: formatJson(mapped), stderr: '', exitCode: 0 };
     }
 
-    return { stdout: formatTagNotesTable(notes), stderr: '', exitCode: 0 };
+    return { stdout: formatTagNotesTable(notes, { align: true }), stderr: '', exitCode: 0 };
 }
 
 export async function runTags(args, deps) {
@@ -239,7 +245,11 @@ async function runLinksTitle(args, deps) {
     if (values.json) {
         return { stdout: formatJson({ backlinks, links_out: linksOut }), stderr: '', exitCode: 0 };
     }
-    return { stdout: formatLinksTable({ backlinks, links_out: linksOut }), stderr: '', exitCode: 0 };
+    return {
+        stdout: formatLinksTable({ backlinks, links_out: linksOut }, { align: true }),
+        stderr: '',
+        exitCode: 0,
+    };
 }
 
 async function runLinksBroken(args, deps) {
@@ -250,7 +260,7 @@ async function runLinksBroken(args, deps) {
         const mapped = broken.map((b) => ({ note_title: b.sourceTitle, broken_target: b.targetTitle }));
         return { stdout: formatJson(mapped), stderr: '', exitCode: 0 };
     }
-    return { stdout: formatBrokenLinksTable(broken), stderr: '', exitCode: 0 };
+    return { stdout: formatBrokenLinksTable(broken, { align: true }), stderr: '', exitCode: 0 };
 }
 
 export async function runLinks(args, deps) {
@@ -314,7 +324,7 @@ export async function runRead(args, deps) {
 
     return {
         stdout: result.content.length > 0 ? `${result.content}\n` : '',
-        stderr: formatJson(result.metadata),
+        stderr: formatJsonPretty(result.metadata),
         exitCode: 0,
     };
 }

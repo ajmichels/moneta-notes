@@ -9,16 +9,21 @@ Run `mnotes --help` or `mnotes <command> --help` any time for the in-tool versio
 
 ## Output formats
 
-List-style commands (`search`, `grep`, `tags list`, `tags notes`) print pipe-delimited columnar text by
-default, with a `--json` flag for scripting or `obsidian.nvim` integration. Mutating commands
-(`write`/`edit`/`append`/`rename`) are always structured JSON (`{ title, hash, line_count }`) — `--json`
-is a no-op for those.
+List-style commands (`search`, `grep`, `tags list`, `tags notes`, `links`) print pipe-delimited
+columnar text by default, columns padded with whitespace so they stay visually aligned in a terminal,
+with a `--json` flag for scripting or `obsidian.nvim` integration (JSON output is always compact, not
+padded). Mutating commands (`write`/`edit`/`append`/`rename`) are always structured JSON
+(`{ title, hash, line_count }`) — `--json` is a no-op for those.
 
 `mnotes read` is the one exception: its default output is the raw note body (not JSON), so it pipes
 naturally into `$EDITOR`, `less`, etc. See the table under [`mnotes read`](#mnotes-read-title) below.
 
 Raw relevance scores (BM25, cosine distance, RRF) are never shown in normal output — only rank
 position. Use `--explain` on `search` if you need the underlying numbers for debugging.
+
+Any JSON that lands on stderr (currently just `read`'s metadata) is pretty-printed for readability,
+unlike the compact single-line JSON `--json` produces on stdout for scripting. When a command writes to
+both streams, stderr is flushed before stdout.
 
 ## Commands
 
@@ -32,10 +37,10 @@ mnotes search "index_queue retry" --explain
 
 Flags: `--mode=hybrid|fulltext|semantic` (default `hybrid`), `--limit=N`, `--explain`, `--json`.
 
-`--explain` is CLI-only debug output — shows raw BM25 score, raw cosine distance, which chunk won the
-best-chunk-wins collapse, the RRF score with its formula breakdown, and how many chunks/notes were
-over-fetched before truncating to `--limit`. Useful for "why didn't note X show up" debugging; never
-exposed through MCP.
+`--explain` is CLI-only debug output — a header line with the pipeline summary (mode, limit, overfetch),
+followed by a column-headered, whitespace-aligned table showing raw BM25 score, raw cosine distance,
+which chunk won the best-chunk-wins collapse, and the RRF score with its formula breakdown (columns vary
+by mode). Useful for "why didn't note X show up" debugging; never exposed through MCP.
 
 ### `mnotes grep <pattern>`
 
@@ -87,9 +92,12 @@ mnotes read "Weekly Notes/2026-W32" --json | jq -r .content_hash
 
 | Mode | stdout | stderr |
 |---|---|---|
-| default | Note body only, frontmatter stripped | Parsed `metadata` object, as JSON |
+| default | Note body only, frontmatter stripped | Parsed `metadata` object, as pretty-printed JSON |
 | `--raw` | Exact file bytes as stored (frontmatter included), unmodified | Nothing |
 | `--json` | Full structured JSON (`title`, `content_hash`, `metadata`, `content`, line info, `backlinks`, `links_out`) | Nothing |
+
+In default mode, the metadata on stderr is written before the body on stdout, so it appears first when
+both streams land in the same terminal.
 
 Use `--json` (or read `content_hash` from `mnotes write`/`edit`'s own output) any time you need the
 hash for a follow-up `write`/`edit`/`rename` call — see the next section.

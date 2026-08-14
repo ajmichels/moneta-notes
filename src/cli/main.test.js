@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os';
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync as readAuditLog } from 'node:fs';
 import { Readable } from 'node:stream';
 import {
-    dispatch, resolveVaultRoot, resolveDbPath, registerCommand, runSearch, runGrep, runTags, runLinks,
-    runRead, runWrite, runEdit, runAppend, runRename, runStats,
+    main, dispatch, resolveVaultRoot, resolveDbPath, registerCommand, runSearch, runGrep, runTags,
+    runLinks, runRead, runWrite, runEdit, runAppend, runRename, runStats,
 } from './main.js';
 import { openDb } from '../core/db.js';
 import { syncNoteTags } from '../core/tags.js';
@@ -86,6 +86,29 @@ describe('dispatch: centralized error handling', () => {
     });
 });
 
+describe('main: stdout/stderr write order', () => {
+    it('writes stderr before stdout, so read\'s metadata prints ahead of the note body', async () => {
+        registerCommand('__test_both_streams__', async () => (
+            { stdout: 'STDOUT\n', stderr: 'STDERR\n', exitCode: 0 }
+        ));
+        const writes = [];
+        const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+            writes.push([ 'stdout', chunk ]);
+            return true;
+        });
+        const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+            writes.push([ 'stderr', chunk ]);
+            return true;
+        });
+
+        await main([ '__test_both_streams__' ], {});
+
+        expect(writes).toEqual([ [ 'stderr', 'STDERR\n' ], [ 'stdout', 'STDOUT\n' ] ]);
+        stdoutSpy.mockRestore();
+        stderrSpy.mockRestore();
+    });
+});
+
 describe('resolveVaultRoot', () => {
     it('returns vault_path from the given config', () => {
         expect(resolveVaultRoot({ vault_path: '/tmp/vault' })).toBe('/tmp/vault');
@@ -118,7 +141,9 @@ describe('runSearch', () => {
         );
 
         expect(result.exitCode).toBe(0);
-        expect(result.stdout).toBe('note_title|file_line_count\nA|10\n');
+        expect(result.stdout).toBe(
+            'note_title | file_line_count\n---------- | ---------------\nA          | 10\n',
+        );
         db.close();
     });
 
@@ -146,8 +171,8 @@ describe('runSearch', () => {
             { db, embed: async () => new Float32Array(1024), embeddingModel: 'm', embeddingVersion: 'v1' },
         );
 
-        expect(result.stdout).toContain('note_title|file_line_count|fulltext_rank|semantic_rank');
-        expect(result.stdout).toContain('A|10|');
+        expect(result.stdout).toContain('note_title | file_line_count | fulltext_rank | semantic_rank');
+        expect(result.stdout).toMatch(/A\s+\| 10\s+\|/);
         db.close();
     });
 
@@ -166,7 +191,7 @@ describe('runSearch', () => {
             },
         });
 
-        expect(result.stdout.trim().split('\n')).toHaveLength(3); // header + 2 rows
+        expect(result.stdout.trim().split('\n')).toHaveLength(4); // header + separator + 2 rows
         db.close();
     });
 });
@@ -182,7 +207,8 @@ describe('runSearch: --explain', () => {
             { db, embed: async () => new Float32Array(1024), embeddingModel: 'm', embeddingVersion: 'v1' },
         );
 
-        expect(result.stdout).toContain('bm25=');
+        expect(result.stdout).toContain('rank | note_title | file_line_count | bm25');
+        expect(result.stdout).toMatch(/\| -\d+(\.\d+)?\s*$/m);
         db.close();
     });
 
@@ -211,8 +237,8 @@ describe('runGrep', () => {
         const result = await runGrep([ 'hello' ], { vaultRoot });
 
         expect(result.exitCode).toBe(0);
-        expect(result.stdout).toContain('note_title|file_line_count|line_matches');
-        expect(result.stdout).toContain('Recipe|2|L2');
+        expect(result.stdout).toContain('note_title | file_line_count | line_matches');
+        expect(result.stdout).toMatch(/Recipe\s+\| 2\s+\| L2/);
         expect(result.stdout).not.toContain('hello world text');
     });
 
@@ -222,7 +248,7 @@ describe('runGrep', () => {
 
         const result = await runGrep([ 'hello', '--content' ], { vaultRoot });
 
-        expect(result.stdout).toContain('Recipe|2|L2: some hello world text');
+        expect(result.stdout).toMatch(/Recipe\s+\| 2\s+\| L2: some hello world text/);
     });
 
     it('supports --json', async () => {
@@ -242,7 +268,7 @@ describe('runGrep', () => {
 
         const result = await runGrep([ 'hello' ], { vaultRoot, config: { grep: { line_match_cap: 2 } } });
 
-        expect(result.stdout).toContain('Recipe|4|L1, L2 (+2 more)');
+        expect(result.stdout).toMatch(/Recipe\s+\| 4\s+\| L1, L2 \(\+2 more\)/);
     });
 
     it('supports --json --content, including match text', async () => {
@@ -276,7 +302,7 @@ describe('runTags', () => {
 
         const result = await runTags([ 'list' ], { db });
 
-        expect(result.stdout).toBe('tag|notes_with_tag\nproject|1\n');
+        expect(result.stdout).toBe('tag     | notes_with_tag\n------- | --------------\nproject | 1\n');
         db.close();
     });
 
@@ -287,7 +313,9 @@ describe('runTags', () => {
 
         const result = await runTags([ 'notes', 'project' ], { db });
 
-        expect(result.stdout).toBe('note_title|file_line_count\nA|7\n');
+        expect(result.stdout).toBe(
+            'note_title | file_line_count\n---------- | ---------------\nA          | 7\n',
+        );
         db.close();
     });
 
@@ -316,7 +344,9 @@ describe('runLinks', () => {
 
         const result = await runLinks([ 'Target' ], { vaultRoot, db });
 
-        expect(result.stdout).toBe('direction|note_title\nbacklink|Linker\nlink_out|Other\n');
+        expect(result.stdout).toBe(
+            'direction | note_title\n--------- | ----------\nbacklink  | Linker\nlink_out  | Other\n',
+        );
         db.close();
     });
 
@@ -339,7 +369,9 @@ describe('runLinks', () => {
 
         const result = await runLinks([ 'broken' ], { db });
 
-        expect(result.stdout).toBe('note_title|broken_target\nLinker|Nonexistent\n');
+        expect(result.stdout).toBe(
+            'note_title | broken_target\n---------- | -------------\nLinker     | Nonexistent\n',
+        );
         db.close();
     });
 
@@ -371,6 +403,7 @@ describe('runRead', () => {
 
         expect(result.stdout).toBe('body text\n');
         expect(JSON.parse(result.stderr)).toEqual({ id: 'A', tags: [ 'x' ] });
+        expect(result.stderr).toBe('{\n  "id": "A",\n  "tags": [\n    "x"\n  ]\n}\n\n');
         expect(result.exitCode).toBe(0);
     });
 

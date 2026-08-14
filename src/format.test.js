@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-    formatJson, formatTable, formatSearchTable, formatExplain, formatGrepTable,
+    formatJson, formatJsonPretty, formatTable, formatSearchTable, formatExplain, formatGrepTable,
     formatTagListTable, formatTagNotesTable, formatLinksTable, formatBrokenLinksTable, formatStats,
 } from './format.js';
 
@@ -11,6 +11,12 @@ describe('formatJson', () => {
 
     it('serializes an array', () => {
         expect(formatJson([ 1, 2 ])).toBe('[1,2]\n');
+    });
+});
+
+describe('formatJsonPretty', () => {
+    it('serializes data as indented JSON with a trailing blank line', () => {
+        expect(formatJsonPretty({ a: 1, b: 2 })).toBe('{\n  "a": 1,\n  "b": 2\n}\n\n');
     });
 });
 
@@ -33,6 +39,32 @@ describe('formatTable', () => {
     it('renders just the header row for an empty result set', () => {
         expect(formatTable([ 'a', 'b' ], [])).toBe('a|b\n');
     });
+
+    describe('align: true', () => {
+        it('pads each column to its widest cell (header included) and separates with " | "', () => {
+            const text = formatTable(
+                [ 'note_title', 'file_line_count' ],
+                [ { note_title: 'Recipe', file_line_count: 5 }, { note_title: 'A', file_line_count: 120 } ],
+                { align: true },
+            );
+
+            expect(text).toBe(
+                'note_title | file_line_count\n'
+                + '---------- | ---------------\n'
+                + 'Recipe     | 5\n'
+                + 'A          | 120\n',
+            );
+        });
+
+        it('renders a hyphen-filled separator row under the header, sized to each column', () => {
+            const text = formatTable([ 'a', 'bbbb' ], [ { a: 1, b: null } ], { align: true });
+            expect(text).toBe('a | bbbb\n- | ----\n1 |\n');
+        });
+
+        it('renders the header and a separator row for an empty result set', () => {
+            expect(formatTable([ 'a', 'b' ], [], { align: true })).toBe('a | b\n- | -\n');
+        });
+    });
 });
 
 describe('formatSearchTable', () => {
@@ -53,19 +85,31 @@ describe('formatSearchTable', () => {
 
         expect(text).toBe('note_title|file_line_count|fulltext_rank|semantic_rank\nA|5|1|\n');
     });
+
+    it('aligns columns when align is true', () => {
+        const text = formatSearchTable(
+            [ { note_title: 'A', file_line_count: 5 } ],
+            'fulltext',
+            { align: true },
+        );
+
+        expect(text).toBe('note_title | file_line_count\n---------- | ---------------\nA          | 5\n');
+    });
 });
 
 describe('formatExplain', () => {
-    it('renders pipeline info and a bm25 line for fulltext mode', () => {
+    it('renders pipeline info, a column header row, and a bm25 row for fulltext mode', () => {
         const text = formatExplain({
             results: [ { note_title: 'A', file_line_count: 10, bm25_score: -1.2, rank: 1 } ],
             pipeline: { mode: 'fulltext', limit: 20, overfetchLimit: 100, fulltextExpression: 'graph' },
         });
         expect(text).toContain('mode=fulltext limit=20 overfetch=100 fts5_expression="graph"');
-        expect(text).toContain('1 | A | 10 | bm25=-1.2');
+        expect(text).toContain('rank | note_title | file_line_count | bm25');
+        expect(text).toContain('---- | ---------- | --------------- | ----');
+        expect(text).toContain('1    | A          | 10              | -1.2');
     });
 
-    it('renders a cosine + chunk-window line for semantic mode', () => {
+    it('renders a cosine + chunk-window row for semantic mode', () => {
         const text = formatExplain({
             results: [ {
                 note_title: 'A', file_line_count: 10, cosine_distance: 0.01,
@@ -73,7 +117,9 @@ describe('formatExplain', () => {
             } ],
             pipeline: { mode: 'semantic', limit: 20, overfetchLimit: 100, fulltextExpression: 'x' },
         });
-        expect(text).toContain('1 | A | 10 | cosine=0.01 | chunk[0:100]');
+        expect(text).toContain('rank | note_title | file_line_count | cosine | chunk');
+        expect(text).toContain('---- | ---------- | --------------- | ------ | -------');
+        expect(text).toContain('1    | A          | 10              | 0.01   | [0:100]');
     });
 
     it('renders the rrf formula for hybrid mode', () => {
@@ -84,7 +130,9 @@ describe('formatExplain', () => {
             } ],
             pipeline: { mode: 'hybrid', limit: 20, overfetchLimit: 100, fulltextExpression: 'x' },
         });
-        expect(text).toContain('1 | A | 10 | fulltext_rank=1 | semantic_rank=- | rrf=1/(60+1) = 0.0164');
+        expect(text).toContain('rank | note_title | file_line_count | fulltext_rank | semantic_rank | rrf');
+        expect(text).toContain('---- | ---------- | --------------- | ------------- | ------------- | -----------------');
+        expect(text).toContain('1    | A          | 10              | 1             | -             | 1/(60+1) = 0.0164');
     });
 });
 
@@ -126,6 +174,18 @@ describe('formatGrepTable', () => {
         ]);
 
         expect(text).toBe('note_title|file_line_count|line_matches\nBig|100|L1 (+11 more)\n');
+    });
+
+    it('aligns columns when align is true', () => {
+        const text = formatGrepTable([
+            { noteTitle: 'Recipe', fileLineCount: 10, lineMatches: [ { line: 2, text: 'x' } ], totalMatchCount: 1 },
+        ], { align: true });
+
+        expect(text).toBe(
+            'note_title | file_line_count | line_matches\n'
+            + '---------- | --------------- | ------------\n'
+            + 'Recipe     | 10              | L2\n',
+        );
     });
 });
 
