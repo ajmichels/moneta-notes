@@ -37,9 +37,9 @@ function findLogLine(logFile, level) {
     return lines.find((line) => line.includes(level));
 }
 
-afterEach(() => {
+afterEach(async () => {
     while (tempDirs.length > 0) {
-        cleanupTempDir(tempDirs.pop());
+        await cleanupTempDir(tempDirs.pop());
     }
 });
 

@@ -15,9 +15,9 @@ function makeTempDbPath() {
     return join(dir, 'index.db');
 }
 
-afterEach(() => {
+afterEach(async () => {
     while (tempDirs.length > 0) {
-        cleanupTempDir(tempDirs.pop());
+        await cleanupTempDir(tempDirs.pop());
     }
 });
 

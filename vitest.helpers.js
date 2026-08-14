@@ -16,9 +16,11 @@ export function flushAsync() {
 }
 
 // logAudit/getLogger's writes are deliberately fire-and-forget (S008) — a test's own fixture
-// directory can still have a write land in it after the test function returns, racing a plain
-// rmSync and throwing ENOTEMPTY. maxRetries/retryDelay let Node's own rm implementation absorb
-// that race instead of every test file needing its own retry loop.
-export function cleanupTempDir(dir) {
+// directory can still have a write land in it after the test function returns. flushAsync gives
+// any in-flight write a tick to settle before we remove the directory, so it lands normally
+// instead of hitting logger.js's ENOENT/EINVAL console.error fallback; maxRetries/retryDelay on
+// rmSync itself remain as a backstop for whatever still races past that.
+export async function cleanupTempDir(dir) {
+    await flushAsync();
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 }

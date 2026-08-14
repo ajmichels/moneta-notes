@@ -19,9 +19,9 @@ function makeTempDir(prefix) {
     return dir;
 }
 
-afterEach(() => {
+afterEach(async () => {
     while (tempDirs.length > 0) {
-        cleanupTempDir(tempDirs.pop());
+        await cleanupTempDir(tempDirs.pop());
     }
 });
 

@@ -20,9 +20,9 @@ function makeTempVault(files) {
     return dir;
 }
 
-afterEach(() => {
+afterEach(async () => {
     while (tempDirs.length > 0) {
-        cleanupTempDir(tempDirs.pop());
+        await cleanupTempDir(tempDirs.pop());
     }
 });
 
@@ -47,17 +47,17 @@ describe('assertRipgrepAvailable', () => {
             const line = readFileSync(join(logDir, 'mcp-server.log'), 'utf8').trim();
             expect(line).toContain('WARN  [mcp-server] ripgrep not found on PATH');
         });
-        cleanupTempDir(logDir);
+        await cleanupTempDir(logDir);
     });
 
-    it('does not log when rg is resolvable (no enclosing context either way)', () => {
+    it('does not log when rg is resolvable (no enclosing context either way)', async () => {
         const logDir = mkdtempSync(join(tmpdir(), 'mnotes-grep-test-log-'));
         const logger = getLogger('mcp-server', logDir);
 
         runWithLogger(logger, () => assertRipgrepAvailable());
 
         expect(existsSync(join(logDir, 'mcp-server.log'))).toBe(false);
-        cleanupTempDir(logDir);
+        await cleanupTempDir(logDir);
     });
 });
 

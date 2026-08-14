@@ -163,7 +163,7 @@ describe('createEmbedder: lazy load', () => {
             expect(line).toContain('INFO  [indexer] embedding pipeline loaded');
             expect(line).toContain('dtype="q8"');
         });
-        cleanupTempDir(logDir);
+        await cleanupTempDir(logDir);
     });
 });
 

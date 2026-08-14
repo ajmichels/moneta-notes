@@ -25,9 +25,9 @@ function makeTempVault() {
     return dir;
 }
 
-afterEach(() => {
+afterEach(async () => {
     while (tempDirs.length > 0) {
-        cleanupTempDir(tempDirs.pop());
+        await cleanupTempDir(tempDirs.pop());
     }
 });
 
@@ -233,7 +233,7 @@ describe('processPath: content changed', () => {
             expect(line).toContain('note_title="Logged"');
             expect(line).toContain('chunk_count=1');
         });
-        cleanupTempDir(logDir);
+        await cleanupTempDir(logDir);
     });
 });
 
@@ -433,7 +433,7 @@ describe('drainQueueOnce', () => {
             expect(errorLines[0]).toContain('attempts=4');
             expect(errorLines[0]).toContain('error_message="embedding failed"');
         });
-        cleanupTempDir(logDir);
+        await cleanupTempDir(logDir);
     });
 
     it('returns zero counts when the queue is empty', async () => {
@@ -813,7 +813,7 @@ describe('startDaemon', () => {
         });
 
         await daemon.stop();
-        cleanupTempDir(logDir);
+        await cleanupTempDir(logDir);
     });
 
     it('does not start an overlapping drain pass while one is still embedding', async () => {

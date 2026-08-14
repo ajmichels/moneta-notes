@@ -16,9 +16,9 @@ function makeTempConfigPath() {
     return join(dir, 'config.toml');
 }
 
-afterEach(() => {
+afterEach(async () => {
     while (tempDirs.length > 0) {
-        cleanupTempDir(tempDirs.pop());
+        await cleanupTempDir(tempDirs.pop());
     }
 });
 
@@ -117,7 +117,7 @@ describe('loadConfig: no file on disk', () => {
             const line = readFileSync(join(logDir, 'mcp-server.log'), 'utf8').trim();
             expect(line).toContain('DEBUG [mcp-server] no config.toml found, using built-in defaults');
         });
-        cleanupTempDir(logDir);
+        await cleanupTempDir(logDir);
     });
 });
 
@@ -147,7 +147,7 @@ describe('loadConfig: sparse top-level override', () => {
             expect(line).toContain('DEBUG [mcp-server] loaded config overrides');
             expect(line).toContain('overridden_keys=vault_path');
         });
-        cleanupTempDir(logDir);
+        await cleanupTempDir(logDir);
     });
 });
 
@@ -230,7 +230,7 @@ describe('loadConfig: unrecognized keys', () => {
                 line.includes('WARN  [mcp-server] unrecognized config key') && line.includes('key="search.limt_default"'),
             )).toBe(true);
         });
-        cleanupTempDir(logDir);
+        await cleanupTempDir(logDir);
     });
 
     it('does not warn when every key in the file matches the schema', async () => {
@@ -245,6 +245,6 @@ describe('loadConfig: unrecognized keys', () => {
             const lines = readFileSync(join(logDir, 'mcp-server.log'), 'utf8').trim().split('\n');
             expect(lines.some(line => line.includes('unrecognized config key'))).toBe(false);
         });
-        cleanupTempDir(logDir);
+        await cleanupTempDir(logDir);
     });
 });

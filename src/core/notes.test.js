@@ -27,9 +27,9 @@ function writeRawNote(vaultRoot, title, raw) {
     return filePath;
 }
 
-afterEach(() => {
+afterEach(async () => {
     while (tempDirs.length > 0) {
-        cleanupTempDir(tempDirs.pop());
+        await cleanupTempDir(tempDirs.pop());
     }
 });
 
@@ -313,7 +313,7 @@ describe('noteWrite (create)', () => {
             expect(line).toContain('supplied_id="bogus"');
             expect(line).toContain('computed_id="Logged Id"');
         });
-        cleanupTempDir(logDir);
+        await cleanupTempDir(logDir);
     });
 
     it('does not log when no metadata is given (nothing caller-supplied to overwrite)', async () => {
@@ -325,7 +325,7 @@ describe('noteWrite (create)', () => {
 
         await new Promise((resolve) => setTimeout(resolve, 20));
         expect(existsSync(join(logDir, 'mcp-server.log'))).toBe(false);
-        cleanupTempDir(logDir);
+        await cleanupTempDir(logDir);
     });
 
     it('creates parent folders for a folder-prefixed title', () => {
@@ -823,7 +823,7 @@ describe('noteRename: link cascade', () => {
             });
         } finally {
             chmodSync(titleToPath(vaultRoot, 'Linker'), 0o644);
-            cleanupTempDir(logDir);
+            await cleanupTempDir(logDir);
         }
     });
 

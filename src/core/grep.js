@@ -104,7 +104,12 @@ function fileLineCount(filePath) {
 
 function runRipgrep(args, cwd) {
     try {
-        return execFileSync('rg', args, { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+        return execFileSync('rg', args, {
+            cwd,
+            encoding: 'utf8',
+            maxBuffer: 64 * 1024 * 1024,
+            stdio: [ 'ignore', 'pipe', 'pipe' ],
+        });
     } catch (error) {
         if (error.status === 1) {
             return '';

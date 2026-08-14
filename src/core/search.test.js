@@ -491,6 +491,6 @@ describe('search: malformed FTS5 query', () => {
             expect(line).toContain('WARN  [mcp-server] malformed FTS5 query');
             expect(line).toContain('query="\\"unterminated phrase"');
         });
-        cleanupTempDir(logDir);
+        await cleanupTempDir(logDir);
     });
 });
