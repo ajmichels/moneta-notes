@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import matter from 'gray-matter';
 import { getContextLogger } from '../logger.js';
-import { titleToPath, pathToTitle, countLines } from './note-fs.js';
+import { titleToPath, pathToTitle, countLines, resolveTitle } from './note-fs.js';
 
 const DEFAULT_LINE_MATCH_CAP = 10;
 
@@ -19,8 +19,20 @@ export function assertRipgrepAvailable(env = process.env) {
     }
 }
 
+// Exact match first (S010); fall back to a unique-basename match only when db is available — same
+// read-oriented resolution note_read gets, additive and never a behavior change for a caller that
+// passes no db.
+function resolveNoteTitlePath(vaultRoot, noteTitle, db) {
+    const exactPath = titleToPath(vaultRoot, noteTitle);
+    if (existsSync(exactPath) || db === null) {
+        return exactPath;
+    }
+    const resolved = resolveTitle(db, noteTitle);
+    return resolved !== null ? titleToPath(vaultRoot, resolved) : exactPath;
+}
+
 export function grep(vaultRoot, pattern, options = {}) {
-    const { regex = false, noteTitle = null, lineMatchCap = DEFAULT_LINE_MATCH_CAP } = options;
+    const { regex = false, noteTitle = null, lineMatchCap = DEFAULT_LINE_MATCH_CAP, db = null } = options;
     assertRipgrepAvailable();
 
     const args = [ '--json', '--smart-case', '--glob', '*.md' ];
@@ -30,7 +42,7 @@ export function grep(vaultRoot, pattern, options = {}) {
 
     let targetPath = null;
     if (noteTitle !== null) {
-        targetPath = titleToPath(vaultRoot, noteTitle);
+        targetPath = resolveNoteTitlePath(vaultRoot, noteTitle, db);
         if (!existsSync(targetPath)) {
             throw new Error(`grep: note not found: "${noteTitle}"`);
         }

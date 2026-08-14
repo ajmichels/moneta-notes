@@ -2,8 +2,9 @@
 
 Status: **Approved**
 Owns: `src/indexer/daemon.js`, `src/indexer/embed.js`
-Depends on: `S001-data-model`, `S004-grep-tags` (tag extraction, invoked here during processing),
-`S010-shared-utilities`
+Depends on: `S001-data-model` (including `enqueuePath`, which this file re-exports), `S004-grep-tags`
+(tag extraction, invoked here during processing), `S010-shared-utilities`, `S011-links` (link
+extraction, invoked here during processing)
 Consumed by: `S006-cli` (reindex/stats talk to this daemon), `S009-config-and-install` (new config
 knobs introduced here)
 
@@ -31,9 +32,10 @@ was triggered.
    enqueue its path into `index_queue`. This catches anything changed while the daemon was down
    (crash, machine sleep, disabled), without a full unconditional walk-and-reprocess of every file.
 3. **Existence check**: for every path currently in `notes`, verify it still exists on disk (a cheap
-   `stat`, not a content read). Delete rows (cascading to `chunks`/`chunk_vectors`/`note_tags` per
-   S001's `ON DELETE CASCADE`) for any that don't — catches deletions that happened while the daemon
-   was down, which the watermark pass alone can't (a deleted file has no mtime to compare).
+   `stat`, not a content read). Delete rows (cascading to `chunks`/`chunk_vectors`/`note_tags`/
+   `note_links` per S001's `ON DELETE CASCADE`) for any that don't — catches deletions that happened
+   while the daemon was down, which the watermark pass alone can't (a deleted file has no mtime to
+   compare).
 4. Start the `fswatch` watcher on the vault directory.
 5. Start the queue drainer (processes `index_queue` continuously — see below).
 6. Start the Unix-socket IPC listener (see below).
@@ -96,6 +98,13 @@ the only mechanism for renames that don't go through `note_rename` with a `db` h
 rename, a bare `mv`, a `git` checkout that moves a file). Those still cost the full delete+create cycle
 described above, same as before this change.
 
+**`note_rename`'s link cascade (S003/S011) reuses `core/db.js`'s `enqueuePath`** (S001; this file
+re-exports it for its own call sites, but doesn't own the implementation — see S001 for why). After
+rewriting a linking note's `[[OldTitle]]` references, `note_rename` calls the same `enqueuePath(db,
+path)` rather than duplicating any part of the drain/re-embed pipeline — those notes simply enter
+`index_queue` like any other changed file and get picked up on the drainer's normal schedule. No new
+daemon behavior is needed for the cascade itself; only extraction (above) had to change.
+
 ### Queue drainer
 
 Processes `index_queue` rows one at a time (serial, not parallel — simpler, and avoids concurrent
@@ -111,8 +120,8 @@ For each dequeued path:
    identical bytes), update `notes.mtime` only and skip straight to done — no re-chunking or
    re-embedding for unchanged content.
 2. If the hash actually changed: re-chunk (see Chunking below), re-embed each chunk, extract tags
-   (S004), and upsert everything per S001's idempotent-reindex procedure (`notes` upsert, delete+
-   reinsert `chunks`/`chunk_vectors`/`notes_fts` row/`note_tags`).
+   (S004) and link targets (S011), and upsert everything per S001's idempotent-reindex procedure
+   (`notes` upsert, delete+reinsert `chunks`/`chunk_vectors`/`notes_fts` row/`note_tags`/`note_links`).
 3. On success: remove the row from `index_queue`.
 4. **On failure** (parse error, embedding error, etc.): increment `attempts`, compute
    `next_attempt_at = now + backoff(attempts)` using exponential backoff (default: 30s, 2min, 10min —
@@ -204,9 +213,9 @@ tunables like these live in config rather than code:
 `src/indexer/daemon.js` is a `runWithLogger` **root**: at process start, before anything else, it
 calls `runWithLogger(getLogger('indexer', defaultLogDir()), () => main())` (per `S008`) — every log
 call for the lifetime of the process, including `core/db.js`'s own `openDb` logging (`S001`: "schema
-created" at `info`, "schema version mismatch, rebuilding" at `warn`) and `core/tags.js`'s extraction
-calls during reindex, lands in `indexer.log` under this one context. Nothing else in this spec needs
-its own `runWithLogger` call — it's set up once, at the top.
+created" at `info`, "schema version mismatch, rebuilding" at `warn`) and `core/tags.js`'s/
+`core/links.js`'s extraction calls during reindex, lands in `indexer.log` under this one context.
+Nothing else in this spec needs its own `runWithLogger` call — it's set up once, at the top.
 
 Concrete events, replacing this spec's earlier vague "log an error-level entry (S008)" phrasing with
 the actual `getContextLogger()` call sites and levels:

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
     formatJson, formatTable, formatSearchTable, formatExplain, formatGrepTable,
-    formatTagListTable, formatTagNotesTable, formatStats,
+    formatTagListTable, formatTagNotesTable, formatLinksTable, formatBrokenLinksTable, formatStats,
 } from './format.js';
 
 describe('formatJson', () => {
@@ -140,6 +140,24 @@ describe('formatTagNotesTable', () => {
     it('maps noteTitle/fileLineCount to note_title/file_line_count', () => {
         const text = formatTagNotesTable([ { noteTitle: 'A', fileLineCount: 5 } ]);
         expect(text).toBe('note_title|file_line_count\nA|5\n');
+    });
+});
+
+describe('formatLinksTable', () => {
+    it('renders backlinks then links_out, one row per link', () => {
+        const text = formatLinksTable({ backlinks: [ 'A' ], links_out: [ 'B', 'C' ] });
+        expect(text).toBe('direction|note_title\nbacklink|A\nlink_out|B\nlink_out|C\n');
+    });
+
+    it('renders just the header row when there are no links either direction', () => {
+        expect(formatLinksTable({ backlinks: [], links_out: [] })).toBe('direction|note_title\n');
+    });
+});
+
+describe('formatBrokenLinksTable', () => {
+    it('maps sourceTitle/targetTitle to note_title/broken_target', () => {
+        const text = formatBrokenLinksTable([ { sourceTitle: 'A', targetTitle: 'Missing' } ]);
+        expect(text).toBe('note_title|broken_target\nA|Missing\n');
     });
 });
 

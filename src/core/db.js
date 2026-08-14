@@ -8,7 +8,7 @@ import { getContextLogger } from '../logger.js';
 // `meta.value` (TEXT affinity) would silently store a trailing '.0' unless explicitly
 // String()-ed — see getMeta/setMeta below, which apply that rule internally.
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 function createNotesTable(db) {
     db.exec(`
@@ -67,6 +67,17 @@ function createNoteTagsTable(db) {
     db.exec('CREATE INDEX note_tags_tag_id ON note_tags(tag_id)');
 }
 
+function createNoteLinksTable(db) {
+    db.exec(`
+        CREATE TABLE note_links (
+            source_note_id INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+            target_title TEXT NOT NULL,
+            PRIMARY KEY (source_note_id, target_title)
+        )
+    `);
+    db.exec('CREATE INDEX note_links_target_title ON note_links(target_title)');
+}
+
 function createNotesFtsTable(db) {
     db.exec(`
         CREATE VIRTUAL TABLE notes_fts USING fts5(
@@ -105,6 +116,7 @@ function createSchema(db) {
     createChunkVectorsTable(db);
     createTagsTable(db);
     createNoteTagsTable(db);
+    createNoteLinksTable(db);
     createNotesFtsTable(db);
     createIndexQueueTable(db);
     createMetaTable(db);
@@ -112,6 +124,7 @@ function createSchema(db) {
 
 const TABLES_IN_DROP_ORDER = [
     'note_tags',
+    'note_links',
     'index_queue',
     'chunk_vectors',
     'chunks',
@@ -147,6 +160,13 @@ export function setMeta(db, key, value) {
         INSERT INTO meta (key, value) VALUES (?, ?)
         ON CONFLICT(key) DO UPDATE SET value = excluded.value
     `).run(key, String(value));
+}
+
+export function enqueuePath(db, path, now = Date.now()) {
+    db.prepare(`
+        INSERT INTO index_queue (path, enqueued_at, next_attempt_at) VALUES (?, ?, ?)
+        ON CONFLICT(path) DO NOTHING
+    `).run(path, now, now);
 }
 
 function readSchemaVersion(db) {

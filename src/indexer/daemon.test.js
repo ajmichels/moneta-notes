@@ -126,10 +126,13 @@ describe('processPath: content changed', () => {
         expect(row.mtime).toBe(2000);
     });
 
-    it('reindexes a brand-new note: notes row, chunks, chunk_vectors, notes_fts, tags', async () => {
+    it('reindexes a brand-new note: notes row, chunks, chunk_vectors, notes_fts, tags, links', async () => {
         const vaultRoot = makeTempVault();
         const db = makeTestDb();
-        writeNote(vaultRoot, 'New Note.md', '---\ntags:\n  - project\n---\nhello world', 1000);
+        writeNote(
+            vaultRoot, 'New Note.md',
+            '---\ntags:\n  - project\n---\nhello world, see [[Other Note]]', 1000,
+        );
 
         const result = await processPath(vaultRoot, db, 'New Note.md', baseDeps());
 
@@ -151,15 +154,19 @@ describe('processPath: content changed', () => {
             SELECT t.name FROM tags t JOIN note_tags nt ON nt.tag_id = t.id WHERE nt.note_id = ?
         `).get(note.id);
         expect(tagRow.name).toBe('project');
+
+        const linkRow = db.prepare('SELECT target_title FROM note_links WHERE source_note_id = ?')
+            .get(note.id);
+        expect(linkRow.target_title).toBe('Other Note');
     });
 
-    it('replaces stale chunks/fts/tags rather than appending on a content change', async () => {
+    it('replaces stale chunks/fts/tags/links rather than appending on a content change', async () => {
         const vaultRoot = makeTempVault();
         const db = makeTestDb();
-        writeNote(vaultRoot, 'Changing.md', 'original body', 1000);
+        writeNote(vaultRoot, 'Changing.md', 'original body, links to [[Old Target]]', 1000);
         await processPath(vaultRoot, db, 'Changing.md', baseDeps());
 
-        writeNote(vaultRoot, 'Changing.md', 'replaced body entirely', 2000);
+        writeNote(vaultRoot, 'Changing.md', 'replaced body entirely, links to [[New Target]]', 2000);
         const result = await processPath(vaultRoot, db, 'Changing.md', baseDeps());
 
         expect(result).toEqual({ status: 'reindexed' });
@@ -171,6 +178,10 @@ describe('processPath: content changed', () => {
         expect(staleHit).toBeUndefined();
         const freshHit = db.prepare("SELECT rowid FROM notes_fts WHERE notes_fts MATCH 'replaced'").get();
         expect(freshHit.rowid).toBe(note.id);
+
+        const links = db.prepare('SELECT target_title FROM note_links WHERE source_note_id = ?')
+            .all(note.id).map(r => r.target_title);
+        expect(links).toEqual([ 'New Target' ]);
     });
 
     it('logs an info line via the context logger with the note title and chunk count', async () => {
@@ -264,10 +275,10 @@ describe('processPath: missing file', () => {
 });
 
 describe('deleteNoteByPath', () => {
-    it('removes chunks, chunk_vectors, notes_fts, and note_tags for the note', async () => {
+    it('removes chunks, chunk_vectors, notes_fts, note_tags, and note_links for the note', async () => {
         const vaultRoot = makeTempVault();
         const db = makeTestDb();
-        writeNote(vaultRoot, 'Full.md', '#project note body', 1000);
+        writeNote(vaultRoot, 'Full.md', '#project note body, see [[Other]]', 1000);
         await processPath(vaultRoot, db, 'Full.md', baseDeps());
         const note = db.prepare('SELECT id FROM notes WHERE path = ?').get('Full.md');
 
@@ -278,6 +289,7 @@ describe('deleteNoteByPath', () => {
         expect(db.prepare('SELECT * FROM chunk_vectors').all()).toHaveLength(0);
         expect(db.prepare("SELECT rowid FROM notes_fts WHERE notes_fts MATCH 'project'").get()).toBeUndefined();
         expect(db.prepare('SELECT * FROM note_tags WHERE note_id = ?').all(note.id)).toHaveLength(0);
+        expect(db.prepare('SELECT * FROM note_links WHERE source_note_id = ?').all(note.id)).toHaveLength(0);
     });
 
     it('is a safe no-op for a path with no matching notes row', () => {

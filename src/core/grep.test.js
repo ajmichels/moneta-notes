@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { assertRipgrepAvailable, grep } from './grep.js';
 import { getLogger, runWithLogger } from '../logger.js';
+import { openDb } from './db.js';
 import { cleanupTempDir } from '../../vitest.helpers.js';
 
 const tempDirs = [];
@@ -12,7 +13,9 @@ function makeTempVault(files) {
     const dir = mkdtempSync(join(tmpdir(), 'mnotes-grep-test-'));
     tempDirs.push(dir);
     for (const [ relPath, content ] of Object.entries(files)) {
-        writeFileSync(join(dir, relPath), content);
+        const fullPath = join(dir, relPath);
+        mkdirSync(dirname(fullPath), { recursive: true });
+        writeFileSync(fullPath, content);
     }
     return dir;
 }
@@ -167,6 +170,39 @@ describe('grep: note_title scoping', () => {
         const vaultRoot = makeTempVault({ 'A.md': 'apple pie recipe\n' });
 
         expect(() => grep(vaultRoot, 'apple', { noteTitle: 'Nonexistent' })).toThrow(/note not found/);
+    });
+
+    it('falls back to a unique-basename match when db is provided and the exact title misses', () => {
+        const vaultRoot = makeTempVault({
+            'LoonStateHockey/JMS Hockey/Barbara Garn.md': 'apple pie recipe\n',
+        });
+        const { db } = openDb(':memory:');
+        db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('LoonStateHockey/JMS Hockey/Barbara Garn.md', 'hash', 1, 1000, 1000);
+
+        const results = grep(vaultRoot, 'apple', { noteTitle: 'Barbara Garn', db });
+
+        expect(results).toHaveLength(1);
+        expect(results[0].noteTitle).toBe('LoonStateHockey/JMS Hockey/Barbara Garn');
+        db.close();
+    });
+
+    it('still throws for an unresolvable title even when db is provided', () => {
+        const vaultRoot = makeTempVault({ 'A.md': 'apple pie recipe\n' });
+        const { db } = openDb(':memory:');
+
+        expect(() => grep(vaultRoot, 'apple', { noteTitle: 'Nonexistent', db }))
+            .toThrow(/note not found/);
+        db.close();
+    });
+
+    it('does not fall back to basename resolution without db', () => {
+        const vaultRoot = makeTempVault({
+            'LoonStateHockey/JMS Hockey/Barbara Garn.md': 'apple pie recipe\n',
+        });
+
+        expect(() => grep(vaultRoot, 'apple', { noteTitle: 'Barbara Garn' })).toThrow(/note not found/);
     });
 });
 

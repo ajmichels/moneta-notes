@@ -1,10 +1,13 @@
 import { statSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { getMeta } from '../core/db.js';
+import { getBrokenLinks } from '../core/links.js';
 
 export function computeStats(db, dbPath, embeddingModel, embeddingVersion) {
     const noteCount = db.prepare('SELECT COUNT(*) AS count FROM notes').get().count;
     const tagCount = db.prepare('SELECT COUNT(*) AS count FROM tags').get().count;
+    const linkCount = db.prepare('SELECT COUNT(*) AS count FROM note_links').get().count;
+    const brokenLinkCount = getBrokenLinks(db).length;
     const lineStats = db.prepare(
         'SELECT COALESCE(SUM(line_count), 0) AS total, COALESCE(AVG(line_count), 0.0) AS average FROM notes',
     ).get();
@@ -18,6 +21,8 @@ export function computeStats(db, dbPath, embeddingModel, embeddingVersion) {
     return {
         note_count: noteCount,
         tag_count: tagCount,
+        link_count: linkCount,
+        broken_link_count: brokenLinkCount,
         total_line_count: lineStats.total,
         average_line_count: lineStats.average,
         embedding_model: embeddingModel,

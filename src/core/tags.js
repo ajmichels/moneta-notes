@@ -1,4 +1,4 @@
-import { stripMdExtension } from './note-fs.js';
+import { stripMdExtension, stripCodeRegions } from './note-fs.js';
 
 const INLINE_TAG_PATTERN = /(^|[^\p{L}\p{N}_])#([\p{L}\p{N}_/-]+)/gmu;
 
@@ -19,7 +19,7 @@ function frontmatterTags(metadata) {
 }
 
 function inlineTags(body) {
-    const stripped = stripCode(body);
+    const stripped = stripCodeRegions(body);
     const tags = [];
     for (const match of stripped.matchAll(INLINE_TAG_PATTERN)) {
         const tag = match[2];
@@ -29,16 +29,6 @@ function inlineTags(body) {
         tags.push(tag);
     }
     return tags;
-}
-
-function stripCode(body) {
-    return body
-        .replace(/```[\s\S]*?```/g, blank)
-        .replace(/`[^`\n]*`/g, blank);
-}
-
-function blank(match) {
-    return ' '.repeat(match.length);
 }
 
 function addTags(seen, tags) {

@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os';
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync as readAuditLog } from 'node:fs';
 import { Readable } from 'node:stream';
 import {
-    dispatch, resolveVaultRoot, resolveDbPath, registerCommand, runSearch, runGrep, runTags, runRead,
-    runWrite, runEdit, runAppend, runRename, runStats,
+    dispatch, resolveVaultRoot, resolveDbPath, registerCommand, runSearch, runGrep, runTags, runLinks,
+    runRead, runWrite, runEdit, runAppend, runRename, runStats,
 } from './main.js';
 import { openDb } from '../core/db.js';
 import { syncNoteTags } from '../core/tags.js';
@@ -254,6 +254,18 @@ describe('runGrep', () => {
         const parsed = JSON.parse(result.stdout)[0];
         expect(parsed.line_matches[0].text).toBe('hello world');
     });
+
+    it('--note resolves a short/basename title via deps.db', async () => {
+        const vaultRoot = makeTempVault();
+        writeRawNote(vaultRoot, 'LoonStateHockey/JMS Hockey/Barbara Garn.md', 'hello world\n');
+        const { db } = openDb(':memory:');
+        insertTestNote(db, 'LoonStateHockey/JMS Hockey/Barbara Garn.md');
+
+        const result = await runGrep([ 'hello', '--note=Barbara Garn' ], { vaultRoot, db });
+
+        expect(result.stdout).toContain('LoonStateHockey/JMS Hockey/Barbara Garn');
+        db.close();
+    });
 });
 
 describe('runTags', () => {
@@ -292,6 +304,64 @@ function writeRawNote(vaultRoot, relPath, raw) {
     writeFileSync(filePath, raw, 'utf8');
 }
 
+describe('runLinks', () => {
+    it('<title>: formats backlinks then links_out as a table', async () => {
+        const vaultRoot = makeTempVault();
+        writeRawNote(vaultRoot, 'Target.md', 'linking out to [[Other]]');
+        const { db } = openDb(':memory:');
+        insertTestNote(db, 'Target.md');
+        const linkerId = insertTestNote(db, 'Linker.md');
+        db.prepare('INSERT INTO note_links (source_note_id, target_title) VALUES (?, ?)')
+            .run(linkerId, 'Target');
+
+        const result = await runLinks([ 'Target' ], { vaultRoot, db });
+
+        expect(result.stdout).toBe('direction|note_title\nbacklink|Linker\nlink_out|Other\n');
+        db.close();
+    });
+
+    it('<title> --json: returns { backlinks, links_out }', async () => {
+        const vaultRoot = makeTempVault();
+        writeRawNote(vaultRoot, 'Target.md', 'linking out to [[Other]]');
+        const { db } = openDb(':memory:');
+
+        const result = await runLinks([ 'Target', '--json' ], { vaultRoot, db });
+
+        expect(JSON.parse(result.stdout)).toEqual({ backlinks: [], links_out: [ 'Other' ] });
+        db.close();
+    });
+
+    it('broken: formats dangling links as a table', async () => {
+        const { db } = openDb(':memory:');
+        const linkerId = insertTestNote(db, 'Linker.md');
+        db.prepare('INSERT INTO note_links (source_note_id, target_title) VALUES (?, ?)')
+            .run(linkerId, 'Nonexistent');
+
+        const result = await runLinks([ 'broken' ], { db });
+
+        expect(result.stdout).toBe('note_title|broken_target\nLinker|Nonexistent\n');
+        db.close();
+    });
+
+    it('broken --json: returns note_title/broken_target rows', async () => {
+        const { db } = openDb(':memory:');
+        const linkerId = insertTestNote(db, 'Linker.md');
+        db.prepare('INSERT INTO note_links (source_note_id, target_title) VALUES (?, ?)')
+            .run(linkerId, 'Nonexistent');
+
+        const result = await runLinks([ 'broken', '--json' ], { db });
+
+        expect(JSON.parse(result.stdout)).toEqual([ { note_title: 'Linker', broken_target: 'Nonexistent' } ]);
+        db.close();
+    });
+
+    it('returns an error when no title or subcommand is given', async () => {
+        const result = await runLinks([], {});
+        expect(result.exitCode).toBe(1);
+        expect(result.stderr).toMatch(/links requires a note title or "broken"/);
+    });
+});
+
 describe('runRead', () => {
     it('default mode: body on stdout, parsed metadata JSON on stderr', async () => {
         const vaultRoot = makeTempVault();
@@ -315,6 +385,19 @@ describe('runRead', () => {
         expect(result.stderr).toBe('');
     });
 
+    it('--raw resolves a short/basename title via deps.db, same as the default/--json modes', async () => {
+        const vaultRoot = makeTempVault();
+        const raw = 'body text\n';
+        writeRawNote(vaultRoot, 'LoonStateHockey/JMS Hockey/Barbara Garn.md', raw);
+        const { db } = openDb(':memory:');
+        insertTestNote(db, 'LoonStateHockey/JMS Hockey/Barbara Garn.md');
+
+        const result = await runRead([ 'Barbara Garn', '--raw' ], { vaultRoot, db });
+
+        expect(result.stdout).toBe(raw);
+        db.close();
+    });
+
     it('--json: full structured result including content_hash', async () => {
         const vaultRoot = makeTempVault();
         writeRawNote(vaultRoot, 'A.md', 'body text');
@@ -325,6 +408,23 @@ describe('runRead', () => {
         expect(parsed.title).toBe('A');
         expect(typeof parsed.content_hash).toBe('string');
         expect(result.stderr).toBe('');
+    });
+
+    it('--json includes backlinks (from deps.db) and links_out (parsed from content)', async () => {
+        const vaultRoot = makeTempVault();
+        writeRawNote(vaultRoot, 'Target.md', 'the target note, linking out to [[Other]]');
+        const { db } = openDb(':memory:');
+        insertTestNote(db, 'Target.md');
+        const linkerId = insertTestNote(db, 'Linker.md');
+        db.prepare('INSERT INTO note_links (source_note_id, target_title) VALUES (?, ?)')
+            .run(linkerId, 'Target');
+
+        const result = await runRead([ 'Target', '--json' ], { vaultRoot, db });
+
+        const parsed = JSON.parse(result.stdout);
+        expect(parsed.backlinks).toEqual([ 'Linker' ]);
+        expect(parsed.links_out).toEqual([ 'Other' ]);
+        db.close();
     });
 
     it('--start/--end window the body', async () => {

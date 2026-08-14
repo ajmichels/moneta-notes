@@ -65,15 +65,17 @@ Licensed under [Apache-2.0](LICENSE). Contributions are welcome — see
 
 | Spec | Covers |
 |---|---|
-| [S001 — Data Model](docs/specs/S001-data-model.md) | SQLite schema: notes, FTS5, chunks/vectors, tags, index queue, migrations |
+| [S001 — Data Model](docs/specs/S001-data-model.md) | SQLite schema: notes, FTS5, chunks/vectors, tags, links, index queue, migrations |
 | [S002 — Search](docs/specs/S002-search.md) | Fulltext/semantic/hybrid ranking, RRF merge, chunk collapse |
-| [S003 — Notes](docs/specs/S003-notes.md) | Note CRUD, hashing, frontmatter/metadata, the `id` field, rename |
+| [S003 — Notes](docs/specs/S003-notes.md) | Note CRUD, hashing, frontmatter/metadata, the `id` field, rename (incl. link cascade), backlinks |
 | [S004 — Grep & Tags](docs/specs/S004-grep-tags.md) | Ripgrep wrapper, tag extraction and listing |
 | [S005 — Indexing Daemon](docs/specs/S005-indexing-daemon.md) | fswatch loop, embedding pipeline, queue/retry, daemon↔CLI IPC |
 | [S006 — CLI](docs/specs/S006-cli.md) | `mnotes` command surface and output formats |
 | [S007 — MCP Server](docs/specs/S007-mcp-server.md) | Tool schemas, transport, error mapping |
 | [S008 — Logging](docs/specs/S008-logging.md) | Logger, rotation, audit trail |
 | [S009 — Config & Install](docs/specs/S009-config-and-install.md) | `config.toml` schema, install/uninstall, launchd |
+| [S010 — Shared Utilities](docs/specs/S010-shared-utilities.md) | Title↔path conversion, line counting, code-region stripping |
+| [S011 — Links](docs/specs/S011-links.md) | Wikilink extraction, backlinks, rename link-cascade, broken-link detection |
 
 Specs are numbered (`S001`, `S002`, ...) and named with a short kebab-case topic. A spec may amend an
 earlier one (noted at the top of the file) as later design work surfaces a gap — e.g. S004 amends

@@ -286,6 +286,23 @@ describe('grepTool', () => {
         expect(result.content[0].text).not.toContain('hello world text');
     });
 
+    it('resolves note_title via dbPath when it does not match exactly', async () => {
+        const vaultRoot = makeTempVault({});
+        writeRawNote(vaultRoot, 'LoonStateHockey/JMS Hockey/Barbara Garn', 'apple pie recipe\n');
+        const dbPath = makeTempDbPath();
+        const { db } = openDb(dbPath);
+        insertNote(db, { path: 'LoonStateHockey/JMS Hockey/Barbara Garn.md' });
+        db.close();
+
+        const result = await grepTool(
+            makeDeps({ vaultRoot, dbPath }),
+            { pattern: 'apple', note_title: 'Barbara Garn', reason: 'testing resolution' },
+        );
+
+        expect(result.isError).toBeUndefined();
+        expect(result.content[0].text).toContain('LoonStateHockey/JMS Hockey/Barbara Garn');
+    });
+
     it('maps a thrown grep() error (unknown note_title) to isError: true', async () => {
         const vaultRoot = makeTempVault({ 'A.md': 'apple pie\n' });
 
@@ -380,6 +397,40 @@ describe('noteReadTool', () => {
 
         const parsed = JSON.parse(result.content[0].text);
         expect(parsed.content).toBe('line2\nline3');
+    });
+
+    it('returns backlinks (from dbPath) and links_out (parsed from content)', async () => {
+        const vaultRoot = makeTempVault({});
+        writeRawNote(vaultRoot, 'Target', 'the target note, linking out to [[Other]]');
+        const dbPath = makeTempDbPath();
+        const { db } = openDb(dbPath);
+        insertNote(db, { path: 'Target.md' });
+        const linkerId = insertNote(db, { path: 'Linker.md' });
+        db.prepare('INSERT INTO note_links (source_note_id, target_title) VALUES (?, ?)')
+            .run(linkerId, 'Target');
+        db.close();
+
+        const result = await noteReadTool(
+            makeDeps({ vaultRoot, dbPath }),
+            { note_title: 'Target', reason: 'testing backlinks' },
+        );
+
+        const parsed = JSON.parse(result.content[0].text);
+        expect(parsed.backlinks).toEqual([ 'Linker' ]);
+        expect(parsed.links_out).toEqual([ 'Other' ]);
+    });
+
+    it('returns an empty backlinks array when no dbPath is configured', async () => {
+        const vaultRoot = makeTempVault({});
+        writeRawNote(vaultRoot, 'NoDb', 'body text');
+
+        const result = await noteReadTool(
+            makeDeps({ vaultRoot }),
+            { note_title: 'NoDb', reason: 'testing no dbPath' },
+        );
+
+        const parsed = JSON.parse(result.content[0].text);
+        expect(parsed.backlinks).toEqual([]);
     });
 });
 

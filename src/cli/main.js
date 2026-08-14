@@ -1,12 +1,13 @@
 #!/usr/bin/env -S node --disable-warning=ExperimentalWarning
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { readFileSync, realpathSync } from 'node:fs';
+import { readFileSync, realpathSync, existsSync } from 'node:fs';
 import { search, explainSearch } from '../core/search.js';
 import { grep } from '../core/grep.js';
 import { tagList, tagNotes } from '../core/tags.js';
+import { getBrokenLinks } from '../core/links.js';
 import { noteRead, noteWrite, noteEdit, noteAppend, noteRename } from '../core/notes.js';
-import { titleToPath } from '../core/note-fs.js';
+import { titleToPath, resolveTitle } from '../core/note-fs.js';
 import { logAudit, getAuditLogger, defaultLogDir } from '../logger.js';
 import { openDb } from '../core/db.js';
 import { defaultSocketPath, DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_VERSION } from '../indexer/daemon.js';
@@ -17,7 +18,7 @@ import { runReindexCommand } from './reindex.js';
 import { runDaemonCommand } from './daemon.js';
 import {
     formatSearchTable, formatExplain, formatGrepTable, formatTagListTable, formatTagNotesTable,
-    formatStats, formatJson,
+    formatLinksTable, formatBrokenLinksTable, formatStats, formatJson,
 } from '../format.js';
 
 export function resolveVaultRoot(config = loadConfig()) {
@@ -40,6 +41,7 @@ Commands:
   search    Full-text, semantic, or hybrid search over the vault
   grep      Ripgrep-backed literal/regex search over note files
   tags      list | notes <tag>
+  links     <title> | broken
   read      Read a note by title
   write     Create a note or fully replace an existing one
   edit      Surgically replace text in an existing note
@@ -54,15 +56,22 @@ Run 'mnotes <command> --help' for command-specific flags.
 
 const COMMAND_USAGE = {
     search: 'mnotes search <query> [--mode=hybrid|fulltext|semantic] [--limit=N] [--explain] [--json]',
-    grep: 'mnotes grep <pattern> [--regex] [--note=<title>] [--content] [--json]',
+    grep: 'mnotes grep <pattern> [--regex] [--note=<title>] [--content] [--json]\n'
+        + '       (--note resolves like read\'s <title> does — exact match, or a unique basename match)',
     tags: "mnotes tags list [--json]\n       mnotes tags notes <tag> [--json]",
-    read: 'mnotes read <title> [--start=N] [--end=N] [--raw] [--json]',
+    links: "mnotes links <title> [--json]\n       mnotes links broken [--json]",
+    read: 'mnotes read <title> [--start=N] [--end=N] [--raw] [--json]\n'
+        + '       (<title> resolves: exact match, or a unique basename match, e.g. text from a [[wikilink]])',
     write: "mnotes write <title> [--hash=H] [--metadata='{...}'] [--content=\"...\"]\n"
-        + '       (content is read from stdin if --content is omitted)',
-    edit: 'mnotes edit <title> --hash=H --old="..." --new="..." [--metadata=\'{...}\']',
+        + '       (content is read from stdin if --content is omitted)\n'
+        + '       (<title> must be the exact absolute title — as returned by read/search — no resolution)',
+    edit: 'mnotes edit <title> --hash=H --old="..." --new="..." [--metadata=\'{...}\']\n'
+        + '       (<title> must be the exact absolute title — as returned by read/search — no resolution)',
     append: 'mnotes append <title> [--hash=H] [--content="..."]\n'
-        + '       (content is read from stdin if --content is omitted)',
-    rename: 'mnotes rename <old-title> <new-title> [--hash=H]',
+        + '       (content is read from stdin if --content is omitted)\n'
+        + '       (<title> must be the exact absolute title — as returned by read/search — no resolution)',
+    rename: 'mnotes rename <old-title> <new-title> [--hash=H]\n'
+        + '       (both titles must be exact absolute titles — as returned by read/search — no resolution)',
     reindex: 'mnotes reindex [title]',
     daemon: 'mnotes daemon <start|stop|restart>',
     stats: 'mnotes stats [--json]',
@@ -160,6 +169,7 @@ export async function runGrep(args, deps) {
         regex: values.regex,
         noteTitle: values.note ?? null,
         lineMatchCap: grepConfig.line_match_cap,
+        db: deps.db ?? null,
     });
 
     if (values.json) {
@@ -219,8 +229,54 @@ export async function runTags(args, deps) {
 
 registerCommand('tags', runTags);
 
-function readRawNoteBytes(vaultRoot, title) {
-    const filePath = titleToPath(vaultRoot, title);
+async function runLinksTitle(args, deps) {
+    const { values, positionals } = parseArgs({
+        args, allowPositionals: true, options: { json: { type: 'boolean', default: false } },
+    });
+    const title = positionals[0];
+    const { backlinks, links_out: linksOut } = noteRead(deps.vaultRoot, title, { db: deps.db ?? null });
+
+    if (values.json) {
+        return { stdout: formatJson({ backlinks, links_out: linksOut }), stderr: '', exitCode: 0 };
+    }
+    return { stdout: formatLinksTable({ backlinks, links_out: linksOut }), stderr: '', exitCode: 0 };
+}
+
+async function runLinksBroken(args, deps) {
+    const { values } = parseArgs({ args, options: { json: { type: 'boolean', default: false } } });
+    const broken = getBrokenLinks(deps.db);
+
+    if (values.json) {
+        const mapped = broken.map((b) => ({ note_title: b.sourceTitle, broken_target: b.targetTitle }));
+        return { stdout: formatJson(mapped), stderr: '', exitCode: 0 };
+    }
+    return { stdout: formatBrokenLinksTable(broken), stderr: '', exitCode: 0 };
+}
+
+export async function runLinks(args, deps) {
+    const [ sub, ...rest ] = args;
+    if (sub === 'broken') {
+        return runLinksBroken(rest, deps);
+    }
+    if (sub === undefined) {
+        return { stdout: '', stderr: 'mnotes: links requires a note title or "broken"\n', exitCode: 1 };
+    }
+    return runLinksTitle(args, deps);
+}
+
+registerCommand('links', runLinks);
+
+function readRawNoteBytes(vaultRoot, title, db) {
+    let filePath = titleToPath(vaultRoot, title);
+    // --raw reads the file directly rather than going through noteRead, but title resolution
+    // (exact match, then unique-basename fallback per S010) applies here too — a caller shouldn't
+    // get worse behavior from --raw than from the default/--json modes for the same title.
+    if (!existsSync(filePath) && db) {
+        const resolved = resolveTitle(db, title);
+        if (resolved !== null) {
+            filePath = titleToPath(vaultRoot, resolved);
+        }
+    }
     try {
         return readFileSync(filePath, 'utf8');
     } catch (err) {
@@ -245,12 +301,12 @@ export async function runRead(args, deps) {
     const title = positionals[0];
 
     if (values.raw) {
-        return { stdout: readRawNoteBytes(deps.vaultRoot, title), stderr: '', exitCode: 0 };
+        return { stdout: readRawNoteBytes(deps.vaultRoot, title, deps.db ?? null), stderr: '', exitCode: 0 };
     }
 
     const startLine = values.start !== undefined ? Number(values.start) : undefined;
     const endLine = values.end !== undefined ? Number(values.end) : undefined;
-    const result = noteRead(deps.vaultRoot, title, { startLine, endLine });
+    const result = noteRead(deps.vaultRoot, title, { startLine, endLine, db: deps.db ?? null });
 
     if (values.json) {
         return { stdout: formatJson(result), stderr: '', exitCode: 0 };

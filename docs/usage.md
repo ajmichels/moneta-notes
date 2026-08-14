@@ -45,8 +45,9 @@ mnotes grep '^\s*- \[ \]' --regex
 mnotes grep "deadline" --note="Weekly Notes/2026-W32" --content
 ```
 
-Flags: `--regex`, `--note=<title>` (restrict to one note), `--content` (show matched line text inline —
-CLI-only; the MCP tool always omits it for context-budget reasons), `--json`.
+Flags: `--regex`, `--note=<title>` (restrict to one note — resolves the same way `read`'s `<title>`
+does, see below), `--content` (show matched line text inline — CLI-only; the MCP tool always omits it
+for context-budget reasons), `--json`.
 
 ### `mnotes tags list` / `mnotes tags notes <tag>`
 
@@ -54,6 +55,24 @@ CLI-only; the MCP tool always omits it for context-budget reasons), `--json`.
 mnotes tags list
 mnotes tags notes "project/moneta-notes"
 ```
+
+Flag: `--json`.
+
+### `mnotes links <title>` / `mnotes links broken`
+
+```sh
+mnotes links "Weekly Notes/2026-W32"
+mnotes links broken
+```
+
+`mnotes links <title>` shows the same `backlinks`/`links_out` data `mnotes read --json` returns for
+that note, without pulling the rest of the note's content — `<title>` resolves the same way `read`'s
+does (exact match, then unique-basename fallback; see below). `mnotes links broken` lists every
+dangling `[[wikilink]]` in the vault — a link whose target doesn't resolve to any current note.
+"Doesn't resolve" covers both "no note matches at all" and "the basename is ambiguous, shared by more
+than one note" — treated the same, since neither has an obvious single note to point at. Both are
+index-backed (current as of each note's last reindex), and `broken` is a reserved subcommand keyword
+(a note literally titled "broken" isn't reachable via this command).
 
 Flag: `--json`.
 
@@ -70,10 +89,26 @@ mnotes read "Weekly Notes/2026-W32" --json | jq -r .content_hash
 |---|---|---|
 | default | Note body only, frontmatter stripped | Parsed `metadata` object, as JSON |
 | `--raw` | Exact file bytes as stored (frontmatter included), unmodified | Nothing |
-| `--json` | Full structured JSON (`title`, `content_hash`, `metadata`, `content`, line info) | Nothing |
+| `--json` | Full structured JSON (`title`, `content_hash`, `metadata`, `content`, line info, `backlinks`, `links_out`) | Nothing |
 
 Use `--json` (or read `content_hash` from `mnotes write`/`edit`'s own output) any time you need the
 hash for a follow-up `write`/`edit`/`rename` call — see the next section.
+
+`backlinks` (notes that link to this one) and `links_out` (notes this one links to) are both plain
+arrays of note titles, parsed from Obsidian-style `[[wikilinks]]`. `links_out` always reflects the
+note's full body, even when `--start`/`--end` narrow what's actually printed. `backlinks` is
+index-backed — current as of the last reindex of whichever note contains the link, same freshness as
+`search` results.
+
+**`<title>` doesn't have to be the exact full title.** It resolves the same way Obsidian itself
+resolves a bare `[[wikilink]]`: an exact match first, and if that misses, a fallback to whichever note
+has that as its unique basename (the last path segment — e.g. `mnotes read "Barbara Garn"` finds a
+note actually at `LoonStateHockey/JMS Hockey/Barbara Garn`, as long as no other note in the vault
+shares that basename). This applies in all three output modes, including `--raw`. If the basename is
+shared by more than one note, it's treated as unresolved (same as no match at all) — Obsidian itself
+has no documented, guaranteed rule for that case, so this doesn't try to guess one. **The `title` field
+in `--json` output is always the resolved, real title** — not necessarily whatever string you typed —
+so it's the one to use for a follow-up `write`/`edit`/`append`/`rename` call (see next section).
 
 ### `mnotes write <title>`, `mnotes edit <title>`, `mnotes append <title>`, `mnotes rename <old> <new>`
 
@@ -83,6 +118,11 @@ hash against an existing title is a hard error, not a silent overwrite — this 
 CLAUDE.md's architecture rules): notes can change outside of any given session, so the hash check
 protects against clobbering someone else's concurrent edit. Creating a **new** note (no existing title)
 doesn't need a hash.
+
+**`<title>`/`<old-title>`/`<new-title>` on these four commands must be the exact absolute title** —
+unlike `read`/`grep --note=`/`links <title>`, there's no short-form/basename resolution here. If you
+only have a short reference (say, text copied out of a `[[wikilink]]`), `mnotes read` it first — the
+`title` field in its `--json` output is the real, absolute title to use here.
 
 ```sh
 # create a new note (no hash needed — it doesn't exist yet)
@@ -98,6 +138,10 @@ mnotes append "Daily Notes/2026-08-13" --hash="$hash" --content="Shipped the doc
 # rename
 mnotes rename "Weekly Notes/2026-W32" "Weekly Notes/2026-W32-archived" --hash="$hash"
 ```
+
+`rename` also rewrites `[[Weekly Notes/2026-W32]]`-style references in every other note that links to
+the one being renamed, so nothing in the vault is left pointing at a stale title. This happens
+automatically as part of the rename call — no separate step needed.
 
 `write` and `append` read content from **stdin** if `--content` is omitted — works naturally with
 `$EDITOR`-produced files, heredocs, or piped command output:
@@ -138,8 +182,9 @@ mnotes stats
 mnotes stats --json
 ```
 
-Note/tag counts, total/average note length, embedding model + version, count of notes pending
-re-embedding, index file size, last full reindex time, daemon status, and current queue depth. Pure DB
+Note/tag/link counts (including `broken_link_count` — see `mnotes links broken` above for the full
+listing), total/average note length, embedding model + version, count of notes pending re-embedding,
+index file size, last full reindex time, daemon status, and current queue depth. Pure DB
 reads plus a best-effort socket probe — never itself requires the daemon to be running.
 
 ## MCP server (Claude Code / Claude Desktop)
@@ -152,8 +197,11 @@ Claude in any session:
 `note_rename`
 
 These map directly onto the CLI commands above (`note_read` ↔ `mnotes read`, etc.) and share the same
-`core/` logic — same hashing rules, same size-drop guard, same "no raw scores" output. Two differences
-from the CLI:
+`core/` logic — same hashing rules, same size-drop guard, same "no raw scores" output, and the same
+title-resolution split: `note_read`/`grep` accept a short or ambiguous title (resolved the same way
+`mnotes read`'s does) and `note_read` always returns the real absolute title in its response;
+`note_write`/`note_edit`/`note_append`/`note_rename` require the exact absolute title with no
+resolution — each tool's own description states this. Two differences from the CLI:
 
 - Every tool requires a **`reason<string>`** argument, logged for audit purposes (mirroring
   `description` on Claude Code's native file tools) — the CLI has no equivalent since a human typing

@@ -36,6 +36,8 @@ describe('computeStats', () => {
 
         expect(stats.note_count).toBe(1);
         expect(stats.tag_count).toBe(1);
+        expect(stats.link_count).toBe(0);
+        expect(stats.broken_link_count).toBe(0);
         expect(stats.total_line_count).toBe(10);
         expect(stats.average_line_count).toBe(10);
         expect(stats.embedding_model).toBe('test-model');
@@ -61,6 +63,26 @@ describe('computeStats', () => {
         const stats = computeStats(db, dbPath, 'test-model', 'v1');
 
         expect(stats.pending_reembedding_count).toBe(1);
+        db.close();
+    });
+
+    it('reports link_count and broken_link_count from note_links', () => {
+        const dbPath = makeTempDbPath();
+        const { db } = openDb(dbPath);
+        db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('A.md', 'hash', 1, 1000, 1000);
+        db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('B.md', 'hash', 1, 1000, 1000);
+        const noteA = db.prepare('SELECT id FROM notes WHERE path = ?').get('A.md').id;
+        db.prepare('INSERT INTO note_links (source_note_id, target_title) VALUES (?, ?)').run(noteA, 'B');
+        db.prepare('INSERT INTO note_links (source_note_id, target_title) VALUES (?, ?)').run(noteA, 'Missing');
+
+        const stats = computeStats(db, dbPath, 'm', 'v1');
+
+        expect(stats.link_count).toBe(2);
+        expect(stats.broken_link_count).toBe(1);
         db.close();
     });
 

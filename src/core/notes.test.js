@@ -1,5 +1,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync } from 'node:fs';
+import {
+    mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync, chmodSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import {
@@ -104,6 +106,155 @@ describe('noteRead', () => {
         writeRawNote(vaultRoot, 'Broken', '---\nfoo: [unterminated\n---\nbody');
 
         expect(() => noteRead(vaultRoot, 'Broken')).toThrow();
+    });
+
+    it('returns links_out parsed from the body, with no db passed', () => {
+        const vaultRoot = makeTempVault();
+        writeRawNote(vaultRoot, 'Linker', 'see [[Target One]] and [[Target Two|alias]]');
+
+        const result = noteRead(vaultRoot, 'Linker');
+        expect(result.links_out).toEqual([ 'Target One', 'Target Two' ]);
+        expect(result.backlinks).toEqual([]);
+    });
+
+    it('links_out reflects the full body even when start_line/end_line narrow the window', () => {
+        const vaultRoot = makeTempVault();
+        writeRawNote(vaultRoot, 'Windowed', 'line1 [[Early Target]]\nline2\nline3 [[Late Target]]\n');
+
+        const result = noteRead(vaultRoot, 'Windowed', { startLine: 2, endLine: 2 });
+        expect(result.content).toBe('line2');
+        expect(result.links_out).toEqual([ 'Early Target', 'Late Target' ]);
+    });
+
+    it('returns backlinks from the index when a db is passed', () => {
+        const vaultRoot = makeTempVault();
+        writeRawNote(vaultRoot, 'Target', 'the target note');
+        const { db } = openDb(':memory:');
+        db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('Target.md', 'xyz789', 1, 1000, 1000);
+        db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('Linker.md', 'abc123', 1, 1000, 1000);
+        const linkerId = db.prepare('SELECT id FROM notes WHERE path = ?').get('Linker.md').id;
+        db.prepare('INSERT INTO note_links (source_note_id, target_title) VALUES (?, ?)')
+            .run(linkerId, 'Target');
+
+        const result = noteRead(vaultRoot, 'Target', { db });
+        expect(result.backlinks).toEqual([ 'Linker' ]);
+        db.close();
+    });
+
+    it('returns an empty backlinks array (not omitted) when nothing links to the note', () => {
+        const vaultRoot = makeTempVault();
+        writeRawNote(vaultRoot, 'Lonely', 'no one links here');
+        const { db } = openDb(':memory:');
+
+        const result = noteRead(vaultRoot, 'Lonely', { db });
+        expect(result.backlinks).toEqual([]);
+        db.close();
+    });
+
+    it('returns empty backlinks/links_out for an empty note, with no db passed', () => {
+        const vaultRoot = makeTempVault();
+        writeRawNote(vaultRoot, 'Empty', '');
+
+        const result = noteRead(vaultRoot, 'Empty');
+        expect(result.total_lines).toBe(0);
+        expect(result.backlinks).toEqual([]);
+        expect(result.links_out).toEqual([]);
+    });
+
+    it('resolves a short/basename title to the nested note it uniquely matches', () => {
+        const vaultRoot = makeTempVault();
+        writeRawNote(vaultRoot, 'LoonStateHockey/JMS Hockey/Barbara Garn', 'body text');
+        const { db } = openDb(':memory:');
+        db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('LoonStateHockey/JMS Hockey/Barbara Garn.md', 'hash', 1, 1000, 1000);
+
+        const result = noteRead(vaultRoot, 'Barbara Garn', { db });
+
+        expect(result.title).toBe('LoonStateHockey/JMS Hockey/Barbara Garn');
+        expect(result.content).toBe('body text');
+        db.close();
+    });
+
+    it('does not resolve a short title without a db (still errors)', () => {
+        const vaultRoot = makeTempVault();
+        writeRawNote(vaultRoot, 'LoonStateHockey/JMS Hockey/Barbara Garn', 'body text');
+
+        expect(() => noteRead(vaultRoot, 'Barbara Garn')).toThrow(/not found/i);
+    });
+
+    it('does not resolve an ambiguous basename shared by two notes', () => {
+        const vaultRoot = makeTempVault();
+        writeRawNote(vaultRoot, 'A/Notes', 'a notes');
+        writeRawNote(vaultRoot, 'B/Notes', 'b notes');
+        const { db } = openDb(':memory:');
+        db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('A/Notes.md', 'hash', 1, 1000, 1000);
+        db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('B/Notes.md', 'hash', 1, 1000, 1000);
+
+        expect(() => noteRead(vaultRoot, 'Notes', { db })).toThrow(/not found/i);
+        db.close();
+    });
+
+    it('prefers an exact title match over resolving as if it were a basename', () => {
+        const vaultRoot = makeTempVault();
+        writeRawNote(vaultRoot, 'Notes', 'root-level notes');
+        writeRawNote(vaultRoot, 'A/Notes', 'nested notes');
+        const { db } = openDb(':memory:');
+        db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('Notes.md', 'hash', 1, 1000, 1000);
+        db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('A/Notes.md', 'hash', 1, 1000, 1000);
+
+        const result = noteRead(vaultRoot, 'Notes', { db });
+
+        expect(result.title).toBe('Notes');
+        expect(result.content).toBe('root-level notes');
+        db.close();
+    });
+
+    it('resolves links_out to absolute titles when db is provided', () => {
+        const vaultRoot = makeTempVault();
+        writeRawNote(vaultRoot, 'Linker', 'see [[Barbara Garn]]');
+        writeRawNote(vaultRoot, 'LoonStateHockey/JMS Hockey/Barbara Garn', 'target body');
+        const { db } = openDb(':memory:');
+        db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('LoonStateHockey/JMS Hockey/Barbara Garn.md', 'hash', 1, 1000, 1000);
+
+        const result = noteRead(vaultRoot, 'Linker', { db });
+
+        expect(result.links_out).toEqual([ 'LoonStateHockey/JMS Hockey/Barbara Garn' ]);
+        db.close();
+    });
+
+    it('leaves links_out as raw literal text when it does not resolve, even with db', () => {
+        const vaultRoot = makeTempVault();
+        writeRawNote(vaultRoot, 'Linker', 'see [[Nowhere To Be Found]]');
+        const { db } = openDb(':memory:');
+
+        const result = noteRead(vaultRoot, 'Linker', { db });
+
+        expect(result.links_out).toEqual([ 'Nowhere To Be Found' ]);
+        db.close();
+    });
+
+    it('leaves links_out unresolved (raw literal text) without a db', () => {
+        const vaultRoot = makeTempVault();
+        writeRawNote(vaultRoot, 'Linker', 'see [[Barbara Garn]]');
+
+        const result = noteRead(vaultRoot, 'Linker');
+
+        expect(result.links_out).toEqual([ 'Barbara Garn' ]);
     });
 });
 
@@ -548,6 +699,216 @@ describe('noteRename', () => {
     it('throws Note not found when old_title does not exist', () => {
         const vaultRoot = makeTempVault();
         expect(() => noteRename(vaultRoot, 'Ghost', 'Renamed', 'abc123')).toThrow(/not found/i);
+    });
+});
+
+describe('noteRename: link cascade', () => {
+    it('rewrites a plain wikilink in another note', () => {
+        const vaultRoot = makeTempVault();
+        const target = noteWrite(vaultRoot, 'Old Target', { content: 'target body' });
+        noteWrite(vaultRoot, 'Linker', { content: 'see [[Old Target]] for more' });
+
+        noteRename(vaultRoot, 'Old Target', 'New Target', target.hash);
+
+        expect(noteRead(vaultRoot, 'Linker').content).toBe('see [[New Target]] for more');
+    });
+
+    it('preserves an alias and a heading anchor while rewriting the target', () => {
+        const vaultRoot = makeTempVault();
+        const target = noteWrite(vaultRoot, 'Old Target', { content: 'target body' });
+        noteWrite(vaultRoot, 'Linker', { content: '[[Old Target#Section|shown text]]' });
+
+        noteRename(vaultRoot, 'Old Target', 'New Target', target.hash);
+
+        expect(noteRead(vaultRoot, 'Linker').content).toBe('[[New Target#Section|shown text]]');
+    });
+
+    it('rewrites multiple linking notes in one rename', () => {
+        const vaultRoot = makeTempVault();
+        const target = noteWrite(vaultRoot, 'Old Target', { content: 'target body' });
+        noteWrite(vaultRoot, 'Linker A', { content: '[[Old Target]]' });
+        noteWrite(vaultRoot, 'Linker B', { content: '[[Old Target]]' });
+
+        noteRename(vaultRoot, 'Old Target', 'New Target', target.hash);
+
+        expect(noteRead(vaultRoot, 'Linker A').content).toBe('[[New Target]]');
+        expect(noteRead(vaultRoot, 'Linker B').content).toBe('[[New Target]]');
+    });
+
+    it('does not touch a note linking to a different title that shares a prefix', () => {
+        const vaultRoot = makeTempVault();
+        const target = noteWrite(vaultRoot, 'Old', { content: 'target body' });
+        noteWrite(vaultRoot, 'Linker', { content: '[[Old Extended]]' });
+
+        noteRename(vaultRoot, 'Old', 'New', target.hash);
+
+        expect(noteRead(vaultRoot, 'Linker').content).toBe('[[Old Extended]]');
+    });
+
+    it('leaves a link inside a code span untouched', () => {
+        const vaultRoot = makeTempVault();
+        const target = noteWrite(vaultRoot, 'Old Target', { content: 'target body' });
+        noteWrite(vaultRoot, 'Linker', { content: 'the syntax is `[[Old Target]]` written like that' });
+
+        noteRename(vaultRoot, 'Old Target', 'New Target', target.hash);
+
+        expect(noteRead(vaultRoot, 'Linker').content).toBe('the syntax is `[[Old Target]]` written like that');
+    });
+
+    it('rewrites a self-referential link and reflects it in the returned hash/line_count', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Old Target', { content: 'see also [[Old Target]] itself' });
+
+        const result = noteRename(vaultRoot, 'Old Target', 'New Target', created.hash);
+
+        const onDisk = noteRead(vaultRoot, 'New Target');
+        expect(onDisk.content).toBe('see also [[New Target]] itself');
+        expect(result.hash).toBe(onDisk.content_hash);
+        expect(result.line_count).toBe(onDisk.total_lines);
+    });
+
+    it('works without a db handle (file-level rewrite only)', () => {
+        const vaultRoot = makeTempVault();
+        const target = noteWrite(vaultRoot, 'Old Target', { content: 'target body' });
+        noteWrite(vaultRoot, 'Linker', { content: '[[Old Target]]' });
+
+        expect(() => noteRename(vaultRoot, 'Old Target', 'New Target', target.hash, null)).not.toThrow();
+        expect(noteRead(vaultRoot, 'Linker').content).toBe('[[New Target]]');
+    });
+
+    it('enqueues each rewritten candidate for reindex when a db is provided', () => {
+        const vaultRoot = makeTempVault();
+        const target = noteWrite(vaultRoot, 'Old Target', { content: 'target body' });
+        noteWrite(vaultRoot, 'Linker', { content: '[[Old Target]]' });
+        const { db } = openDb(':memory:');
+
+        noteRename(vaultRoot, 'Old Target', 'New Target', target.hash, db);
+
+        const queued = db.prepare('SELECT path FROM index_queue WHERE path = ?').get('Linker.md');
+        expect(queued).toBeDefined();
+        db.close();
+    });
+
+    it('does not enqueue a candidate that had nothing to rewrite', () => {
+        const vaultRoot = makeTempVault();
+        const target = noteWrite(vaultRoot, 'Old', { content: 'target body' });
+        noteWrite(vaultRoot, 'Linker', { content: '[[Old Extended]]' });
+        const { db } = openDb(':memory:');
+
+        noteRename(vaultRoot, 'Old', 'New', target.hash, db);
+
+        const queued = db.prepare('SELECT path FROM index_queue WHERE path = ?').get('Linker.md');
+        expect(queued).toBeUndefined();
+        db.close();
+    });
+
+    it('skips an unwritable candidate and logs a warning, without failing the rename', async () => {
+        const vaultRoot = makeTempVault();
+        const target = noteWrite(vaultRoot, 'Old Target', { content: 'target body' });
+        noteWrite(vaultRoot, 'Linker', { content: '[[Old Target]]' });
+        chmodSync(titleToPath(vaultRoot, 'Linker'), 0o444);
+
+        const logDir = mkdtempSync(join(tmpdir(), 'mnotes-notes-test-log-'));
+        const logger = getLogger('mcp-server', logDir);
+
+        try {
+            const result = await runWithLogger(
+                logger, () => noteRename(vaultRoot, 'Old Target', 'New Target', target.hash),
+            );
+            expect(result.title).toBe('New Target');
+            await vi.waitFor(() => {
+                const line = readFileSync(join(logDir, 'mcp-server.log'), 'utf8').trim();
+                expect(line).toContain('WARN  [mcp-server] link cascade: failed to update candidate');
+                expect(line).toContain('candidate_title="Linker"');
+            });
+        } finally {
+            chmodSync(titleToPath(vaultRoot, 'Linker'), 0o644);
+            cleanupTempDir(logDir);
+        }
+    });
+
+    it('does not touch a candidate found by an unrelated pre-existing partial match with no real link', () => {
+        const vaultRoot = makeTempVault();
+        const target = noteWrite(vaultRoot, 'Old Target', { content: 'target body' });
+        noteWrite(vaultRoot, 'Mentioner', { content: 'just talking about [[Old Target Two]] here' });
+
+        noteRename(vaultRoot, 'Old Target', 'New Target', target.hash);
+
+        expect(noteRead(vaultRoot, 'Mentioner').content).toBe('just talking about [[Old Target Two]] here');
+    });
+
+    it('rewrites a short/basename-form reference to a nested note when db is provided', () => {
+        const vaultRoot = makeTempVault();
+        const target = noteWrite(
+            vaultRoot, 'LoonStateHockey/JMS Hockey/Barbara Garn', { content: 'target body' },
+        );
+        noteWrite(vaultRoot, 'Linker', { content: 'see [[Barbara Garn]]' });
+        const { db } = openDb(':memory:');
+        db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('LoonStateHockey/JMS Hockey/Barbara Garn.md', target.hash, 1, 1000, 1000);
+
+        noteRename(
+            vaultRoot, 'LoonStateHockey/JMS Hockey/Barbara Garn', 'LoonStateHockey/JMS Hockey/Barb G',
+            target.hash, db,
+        );
+
+        expect(noteRead(vaultRoot, 'Linker').content).toBe('see [[LoonStateHockey/JMS Hockey/Barb G]]');
+        db.close();
+    });
+
+    it('does not rewrite a short/basename-form reference without a db', () => {
+        const vaultRoot = makeTempVault();
+        const target = noteWrite(
+            vaultRoot, 'LoonStateHockey/JMS Hockey/Barbara Garn', { content: 'target body' },
+        );
+        noteWrite(vaultRoot, 'Linker', { content: 'see [[Barbara Garn]]' });
+
+        noteRename(
+            vaultRoot, 'LoonStateHockey/JMS Hockey/Barbara Garn', 'LoonStateHockey/JMS Hockey/Barb G',
+            target.hash, null,
+        );
+
+        expect(noteRead(vaultRoot, 'Linker').content).toBe('see [[Barbara Garn]]');
+    });
+
+    it('does not rewrite a basename-form reference that is ambiguous with another note', () => {
+        const vaultRoot = makeTempVault();
+        const target = noteWrite(vaultRoot, 'A/Notes', { content: 'a notes body' });
+        noteWrite(vaultRoot, 'B/Notes', { content: 'b notes body' });
+        noteWrite(vaultRoot, 'Linker', { content: '[[Notes]]' });
+        const { db } = openDb(':memory:');
+        db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('A/Notes.md', target.hash, 1, 1000, 1000);
+        db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('B/Notes.md', 'other-hash', 1, 1000, 1000);
+
+        noteRename(vaultRoot, 'A/Notes', 'A/New Notes', target.hash, db);
+
+        expect(noteRead(vaultRoot, 'Linker').content).toBe('[[Notes]]');
+        db.close();
+    });
+
+    it('still rewrites an exact full-title reference to a nested note when db is provided', () => {
+        const vaultRoot = makeTempVault();
+        const target = noteWrite(
+            vaultRoot, 'LoonStateHockey/JMS Hockey/Barbara Garn', { content: 'target body' },
+        );
+        noteWrite(vaultRoot, 'Linker', { content: '[[LoonStateHockey/JMS Hockey/Barbara Garn]]' });
+        const { db } = openDb(':memory:');
+        db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('LoonStateHockey/JMS Hockey/Barbara Garn.md', target.hash, 1, 1000, 1000);
+
+        noteRename(
+            vaultRoot, 'LoonStateHockey/JMS Hockey/Barbara Garn', 'LoonStateHockey/JMS Hockey/Barb G',
+            target.hash, db,
+        );
+
+        expect(noteRead(vaultRoot, 'Linker').content).toBe('[[LoonStateHockey/JMS Hockey/Barb G]]');
+        db.close();
     });
 });
 

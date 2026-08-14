@@ -9,7 +9,8 @@ import { fileURLToPath } from 'node:url';
 import { noteRead } from '../core/notes.js';
 import { stripMdExtension } from '../core/note-fs.js';
 import { extractTags, syncNoteTags } from '../core/tags.js';
-import { openDb, setMeta } from '../core/db.js';
+import { extractLinkTargets, syncNoteLinks } from '../core/links.js';
+import { openDb, setMeta, enqueuePath } from '../core/db.js';
 import { getLogger, defaultLogDir, runWithLogger, getContextLogger } from '../logger.js';
 import { loadConfig } from '../config.js';
 import {
@@ -17,12 +18,12 @@ import {
     embed as realEmbed, configureEmbedder,
 } from './embed.js';
 
-export function enqueuePath(db, path, now = Date.now()) {
-    db.prepare(`
-        INSERT INTO index_queue (path, enqueued_at, next_attempt_at) VALUES (?, ?, ?)
-        ON CONFLICT(path) DO NOTHING
-    `).run(path, now, now);
-}
+// Re-exported for existing callers (this file's own tests, IPC/queue-drain code below) — the
+// implementation lives in core/db.js (S001, alongside the rest of the index_queue table's plain
+// data-layer functions) so core/notes.js's note_rename link cascade (S003/S011) can call it too
+// without core/ reaching back into indexer/, which would create a circular import (daemon.js
+// already imports core/notes.js).
+export { enqueuePath };
 
 export function dequeueNextPath(db, now = Date.now()) {
     const row = db.prepare(`
@@ -156,7 +157,8 @@ export function deleteNoteByPath(db, path) {
         DELETE FROM chunk_vectors WHERE rowid IN (SELECT id FROM chunks WHERE note_id = ?)
     `).run(note.id);
     db.prepare('DELETE FROM notes_fts WHERE rowid = ?').run(note.id);
-    db.prepare('DELETE FROM notes WHERE id = ?').run(note.id); // cascades chunks, note_tags (S001 FKs)
+    // cascades chunks, note_tags, note_links (S001 FKs)
+    db.prepare('DELETE FROM notes WHERE id = ?').run(note.id);
 }
 
 function statOrNull(absPath) {
@@ -230,6 +232,7 @@ export async function processPath(vaultRoot, db, path, deps) {
     replaceChunks(db, noteId, embeddedChunks, embeddingModel, embeddingVersion);
     replaceFtsRow(db, noteId, title, read.content);
     syncNoteTags(db, noteId, extractTags(read.content, read.metadata));
+    syncNoteLinks(db, noteId, extractLinkTargets(read.content));
 
     getContextLogger().info('reindexed note', { note_title: title, chunk_count: embeddedChunks.length });
     return { status: 'reindexed' };

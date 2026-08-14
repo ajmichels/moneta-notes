@@ -63,7 +63,9 @@ const TOOL_DEFS = [
     {
         name: 'grep',
         description: 'Ripgrep-backed literal or regex search over vault note files. Returns matching '
-            + 'line numbers only, not line content — use note_read to view the matched lines.',
+            + 'line numbers only, not line content — use note_read to view the matched lines. '
+            + 'note_title (if given) resolves like note_read\'s does: exact title match, or a unique '
+            + 'basename match (e.g. text copied from inside a [[wikilink]]).',
         inputSchema: {
             pattern: z.string(),
             regex: z.boolean().optional(),
@@ -86,7 +88,11 @@ const TOOL_DEFS = [
     },
     {
         name: 'note_read',
-        description: 'Read a note by title, optionally windowed to a line range.',
+        description: 'Read a note by title, optionally windowed to a line range. note_title may be a '
+            + 'short or ambiguous reference (e.g. text from inside a [[wikilink]]) — this tool '
+            + 'resolves it (exact title match, or a unique basename match) and returns the note\'s '
+            + 'true absolute title in its response. Every mutating tool below requires that absolute '
+            + 'title exactly; read a note first if you only have a short reference to it.',
         inputSchema: {
             note_title: z.string(),
             start_line: z.number().int().optional(),
@@ -99,7 +105,9 @@ const TOOL_DEFS = [
         name: 'note_write',
         description: 'Create a note (hash: null) or fully replace an existing one (hash matches its '
             + 'current content_hash). No hash against an existing title is an error, not a silent '
-            + 'overwrite.',
+            + 'overwrite. note_title must be the note\'s exact absolute title (full path from vault '
+            + 'root) — as returned by search or note_read, never a short or ambiguous wikilink '
+            + 'reference.',
         inputSchema: {
             note_title: z.string(),
             hash: z.string().nullable(),
@@ -113,7 +121,8 @@ const TOOL_DEFS = [
     {
         name: 'note_edit',
         description: 'Surgically replace old_txt with new_txt in an existing note. old_txt must '
-            + 'match exactly once.',
+            + 'match exactly once. note_title must be the note\'s exact absolute title, as returned '
+            + 'by search or note_read — no resolution fallback.',
         inputSchema: {
             note_title: z.string(),
             hash: z.string(),
@@ -126,7 +135,8 @@ const TOOL_DEFS = [
     },
     {
         name: 'note_append',
-        description: 'Append content to the end of an existing note.',
+        description: 'Append content to the end of an existing note. note_title must be the note\'s '
+            + 'exact absolute title, as returned by search or note_read — no resolution fallback.',
         inputSchema: {
             note_title: z.string(),
             hash: z.string(),
@@ -137,7 +147,10 @@ const TOOL_DEFS = [
     },
     {
         name: 'note_rename',
-        description: 'Rename a note. Hard error if new_title already exists — no force override.',
+        description: 'Rename a note. Hard error if new_title already exists — no force override. '
+            + 'Also rewrites [[wikilink]] references to old_title in every other note that links to '
+            + 'it. old_title and new_title must both be exact absolute titles, as returned by search '
+            + 'or note_read — no resolution fallback.',
         inputSchema: {
             old_title: z.string(),
             new_title: z.string(),

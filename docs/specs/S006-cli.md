@@ -3,7 +3,7 @@
 Status: **Approved**
 Owns: `src/cli/main.js`, `src/cli/reindex.js`, `src/cli/daemon.js`, `src/cli/stats.js`
 Depends on: `S001-data-model`, `S002-search`, `S003-notes`, `S004-grep-tags`, `S005-indexing-daemon`,
-`S010-shared-utilities`
+`S010-shared-utilities`, `S011-links`
 Consumed by: (terminal use, `obsidian.nvim` integration)
 
 ## Purpose
@@ -17,7 +17,7 @@ surface.
 ## Argument parsing
 
 Node's built-in `util.parseArgs` — no CLI framework dependency. Subcommand routing is a small
-dispatch table keyed on `argv[2]` (`search`, `grep`, `tags`, `read`, `write`, `edit`, `append`,
+dispatch table keyed on `argv[2]` (`search`, `grep`, `tags`, `links`, `read`, `write`, `edit`, `append`,
 `rename`, `reindex`, `daemon`, `stats`), each parsing its own remaining flags via `parseArgs`. This matches the
 project's minimal-dependency, no-build-step bias — a dozen flat subcommands doesn't need a framework's
 nested-command/auto-help machinery.
@@ -90,14 +90,25 @@ that surfaces it on stdout without a second lookup. `--raw` is for getting the f
 lives on disk (e.g. a manual diff or backup) — no metadata is separately reported in that mode since
 it's already present in the raw output.
 
+**`<title>` resolves in all three modes** (S003/S010): an exact title match first, then a fallback to
+a unique-basename match (e.g. `mnotes read "Barbara Garn"` finds a note actually at
+`LoonStateHockey/JMS Hockey/Barbara Garn`, provided that's the only note with that basename) — this
+applies to `--raw` too, not just the default/`--json` modes, even though `--raw` reads the file
+directly rather than going through `noteRead`. `--json`'s `title` field reflects the *resolved*
+absolute title, not an echo of whatever was typed — the mechanism that lets a script chain a
+`write`/`edit`/`rename` after a `read` that started from a short reference (those commands require the
+exact absolute title — see "Absolute titles for mutating commands" below).
+
 ## Commands
 
 | Command | Flags | Notes |
 |---|---|---|
 | `mnotes search <query>` | `--mode=hybrid\|fulltext\|semantic`, `--limit=N`, `--explain`, `--json` | See `--explain` below. |
-| `mnotes grep <pattern>` | `--regex`, `--note=<title>`, `--content`, `--json` | `--content` shows each match's line text; omitted by default (line numbers only), matching the MCP tool's output shape unless explicitly opted into. |
+| `mnotes grep <pattern>` | `--regex`, `--note=<title>`, `--content`, `--json` | `--content` shows each match's line text; omitted by default (line numbers only), matching the MCP tool's output shape unless explicitly opted into. `--note` resolves the same way `read`'s `<title>` does (S010). |
 | `mnotes tags list` | `--json` | |
 | `mnotes tags notes <tag>` | `--json` | |
+| `mnotes links <title>` | `--json` | Backlinks and forward links for one note — see `mnotes links` below. |
+| `mnotes links broken` | `--json` | Every dangling `[[wikilink]]` in the vault — see `mnotes links` below. |
 | `mnotes read <title>` | `--start=N`, `--end=N`, `--raw`, `--json` | See output modes above; default is neither raw nor JSON. |
 | `mnotes write <title>` | `--hash=H`, `--metadata='{...}'`, `--content="..."` | Content from stdin if `--content` omitted. |
 | `mnotes edit <title>` | `--hash=H`, `--old="..."`, `--new="..."`, `--metadata='{...}'` | |
@@ -109,10 +120,46 @@ it's already present in the raw output.
 
 Every command other than `reindex`/`stats` is a thin wrapper: parse flags, call the corresponding
 `core/` function directly in-process (`core/search.js`, `core/grep.js`, `core/tags.js`,
-`core/notes.js`), format the result. Mutations (`write`/`edit`/`append`/`rename`) touch the vault file
-directly and rely on the daemon's `fswatch` loop (S005) to pick up the resulting change asynchronously
-— the CLI doesn't wait for reindexing to complete on a plain write, only `reindex` does (since that's
-its whole point).
+`core/notes.js`, `core/links.js`), format the result. Mutations (`write`/`edit`/`append`/`rename`)
+touch the vault file directly and rely on the daemon's `fswatch` loop (S005) to pick up the resulting
+change asynchronously — the CLI doesn't wait for reindexing to complete on a plain write, only
+`reindex` does (since that's its whole point).
+
+### Absolute titles for mutating commands
+
+`mnotes write`/`edit`/`append`/`rename` (`<old-title>` *and* `<new-title>`) always require the note's
+exact absolute title — full path from vault root, folder prefix included — with **no** unique-basename
+fallback (S003/S010). `mnotes read`/`grep --note=`/`mnotes links <title>` do get that fallback; the
+mutating commands deliberately don't, for the same reason S003/S010 give: `write`'s create-vs-update
+branch depends on "does this exact title already exist" meaning something unambiguous, and a wrong
+resolution on a mutating command is a far worse failure than one on a read. `--help` output for each
+of these four commands states the exact-title requirement explicitly, not just this spec.
+
+If you only have a short or ambiguous reference to a note (e.g. text copied out of a `[[wikilink]]`),
+`mnotes read`/`mnotes links` resolve it and report the real absolute title back to you — use that for
+any follow-up mutating command, rather than passing the short reference straight through.
+
+### `mnotes links`
+
+CLI-only — there's no MCP equivalent (S011 deliberately keeps the link graph off the MCP tool surface;
+`note_read` already carries `backlinks`/`links_out` for Claude). Two forms:
+
+- **`mnotes links <title>`** — the same `backlinks`/`links_out` data `note_read` returns, without
+  reading the rest of the note. Implemented as `noteRead(vaultRoot, title, { db })` (S003) with only
+  those two fields projected out — not a second, parallel code path for deriving them, so this can
+  never drift from what `note_read` itself reports for the same note, and `<title>` gets the same
+  exact-then-basename resolution `read` does (S010). Default output is the pipe-
+  delimited table convention (`direction|note_title`, one row per link, `direction` either `backlink`
+  or `link_out`), matching every other list-style command; `--json` returns `{ backlinks, links_out }`
+  in the same shape `note_read` uses.
+- **`mnotes links broken`** — every dangling `[[wikilink]]` in the vault (a `target_title` with no
+  matching note), via `core/links.js`'s `getBrokenLinks` (S011). Table columns `note_title` (the note
+  containing the link) and `broken_target` (the unresolved title it points at).
+
+**`broken` is a reserved subcommand keyword**, the same tradeoff `tags list`/`tags notes` already makes
+— a note literally titled "broken" can't be looked up via `mnotes links broken` (it'll run the broken-
+links listing instead). Accepted as a known, minor limitation rather than adding lookup ambiguity to
+resolve it; not expected to collide with real vault content.
 
 ### `--explain` (search only)
 
@@ -152,6 +199,14 @@ count of notes pending re-embedding, index file size, last reindex time. All of 
 read against the tables in S001 (no daemon dependency for these — pure DB queries) — `pending
 re-embedding` is a `chunks`/`notes` join comparing stored `embedding_model`/`embedding_version` to the
 currently configured model, `last reindex time` is `meta.last_full_reindex_at`.
+
+Also reports two link counts (S011), grouped alongside `tag_count` as the same kind of vault-inventory
+number: `link_count` (`SELECT COUNT(*) FROM note_links`, total wikilinks vault-wide) and
+`broken_link_count` (`core/links.js`'s `getBrokenLinks(db).length` — not a second hand-rolled `COUNT`
+query, so this can never disagree with `mnotes links broken`'s own listing about what counts as
+broken). `broken_link_count` is the actionable one: it plays the same role `pending_reembedding_count`
+already plays in this dashboard — a single number that tells you whether it's worth running the
+detailed command (`mnotes links broken`), without having to run it speculatively every time.
 
 Additionally reports **daemon status** (running / not running) and **current queue depth**
 (`SELECT COUNT(*) FROM index_queue`) — the queue depth is a genuinely useful signal now that indexing

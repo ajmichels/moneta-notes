@@ -72,12 +72,15 @@ export async function searchTool(deps, input) {
 }
 
 export async function grepTool(deps, input) {
-    const { vaultRoot } = deps;
+    const { vaultRoot, dbPath } = deps;
     const { grep: grepConfig } = resolveConfig(deps);
     const { pattern, regex = false, note_title: noteTitle = null } = input;
 
     return callTool(deps.auditLogger, deps.mcpLogger, 'grep', input, async () => {
-        const results = grep(vaultRoot, pattern, { regex, noteTitle, lineMatchCap: grepConfig.line_match_cap });
+        const runGrep = (db) => grep(vaultRoot, pattern, {
+            regex, noteTitle, lineMatchCap: grepConfig.line_match_cap, db,
+        });
+        const results = dbPath ? await withDb(dbPath, runGrep) : runGrep(null);
         return formatGrepTable(results);
     });
 }
@@ -96,11 +99,13 @@ export async function tagNotesTool(deps, input) {
 }
 
 export async function noteReadTool(deps, input) {
-    const { vaultRoot } = deps;
+    const { vaultRoot, dbPath } = deps;
     const { note_title: noteTitle, start_line: startLine, end_line: endLine } = input;
 
     return callTool(deps.auditLogger, deps.mcpLogger, 'note_read', input, async () => {
-        const result = noteRead(vaultRoot, noteTitle, { startLine, endLine });
+        const result = dbPath
+            ? await withDb(dbPath, (db) => noteRead(vaultRoot, noteTitle, { startLine, endLine, db }))
+            : noteRead(vaultRoot, noteTitle, { startLine, endLine });
         return formatJson(result);
     });
 }

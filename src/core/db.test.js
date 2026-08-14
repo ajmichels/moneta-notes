@@ -13,6 +13,7 @@ const EXPECTED_TABLES = [
     'chunk_vectors',
     'tags',
     'note_tags',
+    'note_links',
     'index_queue',
     'meta',
 ];
@@ -218,6 +219,60 @@ describe('schema: note_tags table', () => {
     });
 });
 
+describe('schema: note_links table', () => {
+    it('cascades when the source note is deleted', () => {
+        const { db } = openDb(':memory:');
+        db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('Test.md', 'abc123', 10, 1000, 1000);
+        const noteId = db.prepare('SELECT id FROM notes WHERE path = ?').get('Test.md').id;
+
+        db.prepare('INSERT INTO note_links (source_note_id, target_title) VALUES (?, ?)')
+            .run(noteId, 'Other Note');
+
+        db.prepare('DELETE FROM notes WHERE id = ?').run(noteId);
+        const afterNoteDelete = db.prepare('SELECT COUNT(*) AS count FROM note_links').get();
+        expect(afterNoteDelete.count).toBe(0);
+
+        db.close();
+    });
+
+    it('rejects a duplicate (source_note_id, target_title) pair', () => {
+        const { db } = openDb(':memory:');
+        db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('Test.md', 'abc123', 10, 1000, 1000);
+        const noteId = db.prepare('SELECT id FROM notes WHERE path = ?').get('Test.md').id;
+
+        db.prepare('INSERT INTO note_links (source_note_id, target_title) VALUES (?, ?)')
+            .run(noteId, 'Other Note');
+
+        expect(() => {
+            db.prepare('INSERT INTO note_links (source_note_id, target_title) VALUES (?, ?)')
+                .run(noteId, 'Other Note');
+        }).toThrow();
+
+        db.close();
+    });
+
+    it('allows target_title with no matching note (unresolved link)', () => {
+        const { db } = openDb(':memory:');
+        db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('Test.md', 'abc123', 10, 1000, 1000);
+        const noteId = db.prepare('SELECT id FROM notes WHERE path = ?').get('Test.md').id;
+
+        db.prepare('INSERT INTO note_links (source_note_id, target_title) VALUES (?, ?)')
+            .run(noteId, 'Nonexistent Note');
+
+        const row = db.prepare('SELECT target_title FROM note_links WHERE source_note_id = ?')
+            .get(noteId);
+        expect(row.target_title).toBe('Nonexistent Note');
+
+        db.close();
+    });
+});
+
 describe('schema: notes_fts table', () => {
     it('supports a contentless MATCH query', () => {
         const { db } = openDb(':memory:');
@@ -332,7 +387,7 @@ describe('schema versioning', () => {
         expect(reindexRequired).toBe(true);
 
         const row = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();
-        expect(row.value).toBe('1');
+        expect(row.value).toBe(String(SCHEMA_VERSION));
         db.close();
     });
 
@@ -442,7 +497,7 @@ describe('schema rebuild on version mismatch', () => {
         expect(noteCount).toBe(0);
 
         const version = second.db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();
-        expect(version.value).toBe('1');
+        expect(version.value).toBe(String(SCHEMA_VERSION));
 
         const rows = second.db
             .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")

@@ -61,6 +61,19 @@ export function formatTagNotesTable(results) {
     return formatTable([ 'note_title', 'file_line_count' ], rows);
 }
 
+export function formatLinksTable({ backlinks, links_out: linksOut }) {
+    const rows = [
+        ...backlinks.map((noteTitle) => ({ direction: 'backlink', note_title: noteTitle })),
+        ...linksOut.map((noteTitle) => ({ direction: 'link_out', note_title: noteTitle })),
+    ];
+    return formatTable([ 'direction', 'note_title' ], rows);
+}
+
+export function formatBrokenLinksTable(results) {
+    const rows = results.map((r) => ({ note_title: r.sourceTitle, broken_target: r.targetTitle }));
+    return formatTable([ 'note_title', 'broken_target' ], rows);
+}
+
 export function formatStats(stats, { json = false, daemonRunning } = {}) {
     const withDaemon = { ...stats, daemon_running: daemonRunning };
     if (json) {

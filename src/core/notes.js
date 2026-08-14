@@ -3,7 +3,10 @@ import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, statSync } from 'node:fs';
 import matter from 'gray-matter';
 import { getContextLogger } from '../logger.js';
-import { titleToPath, countLines } from './note-fs.js';
+import { titleToPath, countLines, buildTitleIndex, resolveTitle } from './note-fs.js';
+import { extractLinkTargets, getBacklinks, replaceLinkTarget, resolveLinkTargets } from './links.js';
+import { grep } from './grep.js';
+import { enqueuePath } from './db.js';
 
 export function hashContent(content) {
     return createHash('sha1').update(content, 'utf8').digest('hex');
@@ -20,23 +23,47 @@ function readRawNote(filePath, title) {
     }
 }
 
-export function noteRead(vaultRoot, title, { startLine, endLine } = {}) {
-    const filePath = titleToPath(vaultRoot, title);
+// Exact title match first (no db needed); falls back to a unique-basename match (S010) only when
+// the exact path doesn't exist and a db was provided — additive, never a behavior change for a
+// caller that passes no db. Returns both the resolved title and the path so the caller never needs
+// to re-derive either.
+function resolveReadTarget(vaultRoot, title, db) {
+    const exactPath = titleToPath(vaultRoot, title);
+    if (existsSync(exactPath) || db === null) {
+        return { resolvedTitle: title, filePath: exactPath };
+    }
+
+    const resolved = resolveTitle(db, title);
+    if (resolved === null) {
+        return { resolvedTitle: title, filePath: exactPath };
+    }
+    return { resolvedTitle: resolved, filePath: titleToPath(vaultRoot, resolved) };
+}
+
+export function noteRead(vaultRoot, title, { startLine, endLine, db = null } = {}) {
+    const { resolvedTitle, filePath } = resolveReadTarget(vaultRoot, title, db);
     const raw = readRawNote(filePath, title);
 
     const { data: metadata, content: body } = matter(raw);
     const totalLines = countLines(body);
     const contentHash = hashContent(raw);
+    // Always parsed from the full body, regardless of any start_line/end_line window below — a
+    // windowed read of a large note should still surface everything it links to (S003).
+    const rawLinksOut = extractLinkTargets(body);
+    const linksOut = db !== null ? resolveLinkTargets(db, rawLinksOut) : rawLinksOut;
+    const backlinks = db !== null ? getBacklinks(db, resolvedTitle) : [];
 
     if (totalLines === 0) {
         return {
-            title,
+            title: resolvedTitle,
             start_line: 0,
             end_line: 0,
             total_lines: 0,
             content_hash: contentHash,
             metadata,
             content: '',
+            backlinks,
+            links_out: linksOut,
         };
     }
 
@@ -45,20 +72,22 @@ export function noteRead(vaultRoot, title, { startLine, endLine } = {}) {
 
     if (start < 1 || end < start || end > totalLines) {
         throw new Error(
-            `Invalid line range ${start}-${end} for "${title}" (note has ${totalLines} lines)`,
+            `Invalid line range ${start}-${end} for "${resolvedTitle}" (note has ${totalLines} lines)`,
         );
     }
 
     const content = body.split('\n').slice(start - 1, end).join('\n');
 
     return {
-        title,
+        title: resolvedTitle,
         start_line: start,
         end_line: end,
         total_lines: totalLines,
         content_hash: contentHash,
         metadata,
         content,
+        backlinks,
+        links_out: linksOut,
     };
 }
 
@@ -287,6 +316,78 @@ function applyRenameToIndex(db, oldRelPath, newRelPath, newPath, note) {
     db.prepare('INSERT INTO notes_fts (rowid, title, body) VALUES (?, ?, ?)').run(existing.id, title, body);
 }
 
+// Rewrites one candidate's [[oldTitle]] (or basename-form) wikilink references to [[newTitle]] in
+// place. Throws on any failure (read, write, or an unwritable file) — the caller below treats that
+// as best-effort and skips this one candidate rather than propagating it.
+function rewriteLinkCandidate(vaultRoot, candidateTitle, { oldTitle, newTitle, db, titleIndex }) {
+    const candidatePath = titleToPath(vaultRoot, candidateTitle);
+    const candidateRaw = readFileSync(candidatePath, 'utf8');
+    const { data: candidateMetadata, content: candidateBody } = matter(candidateRaw);
+    const { body: newBody, count } = replaceLinkTarget(
+        candidateBody, oldTitle, newTitle, { titleIndex },
+    );
+
+    if (count === 0) {
+        return;
+    }
+
+    writeFileSync(candidatePath, matter.stringify(newBody, candidateMetadata), 'utf8');
+
+    if (db !== null) {
+        enqueuePath(db, `${candidateTitle}.md`);
+    }
+}
+
+function discoverLinkCascadeCandidates(vaultRoot, oldTitle) {
+    const oldBasename = oldTitle.split('/').pop();
+    const patterns = oldBasename === oldTitle ? [ oldTitle ] : [ oldTitle, oldBasename ];
+
+    const byTitle = new Map();
+    for (const pattern of patterns) {
+        for (const candidate of grep(vaultRoot, `[[${pattern}`)) {
+            byTitle.set(candidate.noteTitle, candidate);
+        }
+    }
+    return [ ...byTitle.values() ];
+}
+
+// Rewrites [[oldTitle]] wikilink references (including short/basename-form ones, e.g. [[Barbara
+// Garn]] for a note at LoonStateHockey/JMS Hockey/Barbara Garn) to [[newTitle]] in every other note
+// that links to the note being renamed (S003/S011). Best-effort throughout — a discovery or
+// per-candidate failure is logged and skipped, never thrown, since the primary rename has already
+// fully succeeded by the time this runs. Reused (unmodified) for the renamed note's own new file
+// too, if it happens to contain a self-referential link — grep finds it like any other candidate.
+//
+// `titleIndex` must be built from vault state *before* the file-level rename below (S010's
+// buildTitleIndex) — by the time this runs, oldTitle no longer exists on disk, so an index built
+// afterward could never confirm a basename resolves uniquely to it. Without a db (titleIndex null),
+// only exact full-title matches get rewritten — see replaceLinkTarget (S011).
+function cascadeLinkRename(vaultRoot, oldTitle, newTitle, db, titleIndex) {
+    let candidates;
+    try {
+        candidates = discoverLinkCascadeCandidates(vaultRoot, oldTitle);
+    } catch (err) {
+        getContextLogger().warn('link cascade: candidate discovery failed', {
+            note_title: newTitle,
+            error_message: err.message,
+        });
+        return;
+    }
+
+    for (const candidate of candidates) {
+        const candidateTitle = candidate.noteTitle;
+        try {
+            rewriteLinkCandidate(vaultRoot, candidateTitle, { oldTitle, newTitle, db, titleIndex });
+        } catch (err) {
+            getContextLogger().warn('link cascade: failed to update candidate', {
+                note_title: newTitle,
+                candidate_title: candidateTitle,
+                error_message: err.message,
+            });
+        }
+    }
+}
+
 export function noteRename(vaultRoot, oldTitle, newTitle, hash, db = null) {
     if (!hash) {
         throw new Error(`note_rename: hash is required for "${oldTitle}"`);
@@ -311,6 +412,11 @@ export function noteRename(vaultRoot, oldTitle, newTitle, hash, db = null) {
         );
     }
 
+    // Captured before the file move / index write-through below — the link cascade needs to know
+    // whether oldTitle's basename was unique *before* the rename, since oldTitle won't exist in the
+    // vault (or in a post-rename index) by the time the cascade runs (S003).
+    const titleIndex = db !== null ? buildTitleIndex(db) : null;
+
     const { data: existingMetadata, content: body } = matter(currentRaw);
     const data = withComputedId(existingMetadata, null, newTitle);
     const raw = matter.stringify(body, data);
@@ -328,5 +434,14 @@ export function noteRename(vaultRoot, oldTitle, newTitle, hash, db = null) {
         });
     }
 
-    return { title: newTitle, hash: newHash, line_count: lineCount };
+    cascadeLinkRename(vaultRoot, oldTitle, newTitle, db, titleIndex);
+
+    // Re-read the final on-disk state rather than trusting newHash/lineCount above — the cascade
+    // just run may have rewritten this exact file a second time if it contained a self-referential
+    // [[oldTitle]] link, and a caller chaining a follow-up mutation off this response needs a hash
+    // that matches reality, not the intermediate post-rename-only value (S003).
+    const finalRaw = readFileSync(newPath, 'utf8');
+    const { content: finalBody } = matter(finalRaw);
+
+    return { title: newTitle, hash: hashContent(finalRaw), line_count: countLines(finalBody) };
 }

@@ -26,3 +26,43 @@ export function countLines(content) {
     const lines = content.split('\n');
     return content.endsWith('\n') ? lines.length - 1 : lines.length;
 }
+
+function blank(match) {
+    return ' '.repeat(match.length);
+}
+
+export function stripCodeRegions(body) {
+    return body
+        .replace(/```[\s\S]*?```/g, blank)
+        .replace(/`[^`\n]*`/g, blank);
+}
+
+export function buildTitleIndex(db) {
+    const byTitle = new Set();
+    const byBasename = new Map();
+
+    for (const { path } of db.prepare('SELECT path FROM notes').all()) {
+        const title = stripMdExtension(path);
+        byTitle.add(title);
+
+        const basename = title.split('/').pop();
+        if (!byBasename.has(basename)) {
+            byBasename.set(basename, []);
+        }
+        byBasename.get(basename).push(title);
+    }
+
+    return { byTitle, byBasename };
+}
+
+export function resolveAgainstIndex(index, rawTitle) {
+    if (index.byTitle.has(rawTitle)) {
+        return rawTitle;
+    }
+    const candidates = index.byBasename.get(rawTitle);
+    return candidates && candidates.length === 1 ? candidates[0] : null;
+}
+
+export function resolveTitle(db, rawTitle) {
+    return resolveAgainstIndex(buildTitleIndex(db), rawTitle);
+}

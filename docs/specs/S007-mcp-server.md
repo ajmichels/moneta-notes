@@ -82,6 +82,10 @@ inline would burn context on content Claude hasn't decided it needs yet, especia
 pattern with many hits across many notes; the intended flow is `grep` to find candidates, then
 `note_read` (scoped to the relevant `start_line`/`end_line`) to actually see them.
 
+`note_title` resolves the same way `note_read`'s does (S004/S010): exact match, then unique-basename
+fallback — the tool description should say so, since a caller scoping `grep` to a note it only knows
+via a `[[wikilink]]` reference needs to know that's supported.
+
 ### `tag_list`
 
 **Input**: `reason<string>`. **Output**: `tag`, `notes_with_tag` (exact-match count, per S004).
@@ -94,9 +98,26 @@ pattern with many hits across many notes; the intended flow is `grep` to find ca
 ### `note_read`
 
 **Input**: `note_title<string>`, `?start_line<int>`, `?end_line<int>`, `reason<string>`.
-**Output**: `{ title, start_line, end_line, total_lines, content_hash, metadata, content }` — always
-structured JSON (unlike the CLI's `read`, which defaults to plain text; MCP has no equivalent of the
-CLI's `--raw` mode since Claude always wants the structured shape, never a reason to strip it).
+**Output**: `{ title, start_line, end_line, total_lines, content_hash, metadata, content, backlinks,
+links_out }` — always structured JSON (unlike the CLI's `read`, which defaults to plain text; MCP has
+no equivalent of the CLI's `--raw` mode since Claude always wants the structured shape, never a reason
+to strip it).
+
+`backlinks`/`links_out` (S003/S011) are the two wikilink traversal directions — titles of notes
+linking *to* this one, and titles this note links *to* — each a plain array of note titles, `[]` when
+there are none. Both the MCP server and the CLI always hold an open `db` handle (per "No daemon
+interaction" above, and per S006's `buildRealDeps`), so `backlinks` is always populated on both
+surfaces, not conditionally available on one and not the other.
+
+**`note_title` resolves rather than requiring an exact match** (S003/S010): exact title match first,
+then a fallback to a unique-basename match if that misses. **The returned `title` reflects whichever
+one actually resolved** — it is not necessarily an echo of the input `note_title`. This is the one
+tool in this whole surface allowed to do this; the tool description must say so explicitly, along
+with: *"note_title may be a short/ambiguous reference (e.g. text from inside a `[[wikilink]]`) — this
+tool resolves it and returns the note's true absolute title in its response. Every mutating tool below
+requires that absolute title exactly; read a note first if you only have a short reference to it."*
+This is the sentence that makes the read/write split (S003/S010) legible to Claude at call time, not
+just to a spec reader.
 
 ### `note_write`
 
@@ -107,6 +128,13 @@ CLI's `--raw` mode since Claude always wants the structured shape, never a reaso
 No hash + new title = create. No hash + existing title = error. Hash matching = full content replace
 + metadata merge (`null` value deletes a key). `force: true` bypasses the size-drop guard (S003).
 
+**`note_title` requires the exact absolute title — no resolution fallback** (S003/S010), unlike
+`note_read`/`grep`. This matters more here than on the other mutating tools: whether `note_title`
+"already exists" is exactly what decides create vs. error, so any fuzziness here would make that
+decision ambiguous. The tool description states this plainly: *"note_title must be the note's exact
+absolute title (full path from vault root) — as returned by search or note_read, never a short or
+ambiguous wikilink reference."*
+
 ### `note_edit`
 
 **Input**: `note_title<string>`, `hash<string>` (required, non-nullable per S003), `old_txt<string>`,
@@ -116,6 +144,9 @@ No hash + new title = create. No hash + existing title = error. Hash matching = 
 Errors unless `old_txt` matches exactly once. `metadata` uses the same merge semantics as
 `note_write` — this is new relative to the README's current documentation (S003 closed this gap).
 
+Same as `note_write`: `note_title` requires the exact absolute title, no resolution fallback (S003/
+S010) — tool description states this the same way.
+
 ### `note_append`
 
 **Input**: `note_title<string>`, `hash<string>` (required per S003), `content<string>`,
@@ -124,13 +155,23 @@ Errors unless `old_txt` matches exactly once. `metadata` uses the same merge sem
 
 No `metadata` param (append stays content-only, per S003).
 
+Same as `note_write`/`note_edit`: `note_title` requires the exact absolute title, no resolution
+fallback (S003/S010).
+
 ### `note_rename` (new — not in the README's current tool table)
 
 **Input**: `old_title<string>`, `new_title<string>`, `hash<string>`, `reason<string>`.
-**Output**: `{ title, hash, line_count }` (`title` is `new_title`; `hash` reflects the rewritten `id`
-frontmatter field, per S003).
+**Output**: `{ title, hash, line_count }` (`title` is `new_title`; `hash`/`line_count` reflect the
+rewritten `id` frontmatter field **and** the outcome of the link cascade below, per S003).
 
 Hard error if `new_title` already exists — no `force` override.
+
+Also rewrites `[[old_title]]` references in every other note that links to it, so search/read results
+never point Claude at a stale link after a rename (S003/S011's link cascade) — this happens
+synchronously inside the call, no separate tool or follow-up action needed. That cascade's own
+internal matching against *other* notes' link text is basename-aware (S003/S011); `old_title`/
+`new_title` themselves are not — both require the exact absolute title, same as every other mutating
+tool, no resolution fallback (S003/S010).
 
 ## Prompts — explicitly out of scope here
 

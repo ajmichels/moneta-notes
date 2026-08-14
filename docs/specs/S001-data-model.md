@@ -2,7 +2,8 @@
 
 Status: **Approved**
 Owns: `src/core/db.js`
-Consumed by: `S002-search`, `S003-notes`, `S004-grep-tags`, `S005-indexing-daemon`, `S006-cli`
+Consumed by: `S002-search`, `S003-notes`, `S004-grep-tags`, `S005-indexing-daemon`, `S006-cli`,
+`S011-links`
 
 ## Purpose
 
@@ -210,6 +211,42 @@ scans.
   both frontmatter and an inline mention in the same note collapses to one row, which is the correct
   behavior (a note either carries a tag or it doesn't).
 
+### `note_links`
+
+```sql
+CREATE TABLE note_links (
+  source_note_id INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+  target_title   TEXT NOT NULL,
+  PRIMARY KEY (source_note_id, target_title)
+);
+
+CREATE INDEX note_links_target_title ON note_links(target_title);
+```
+
+One row per distinct wikilink target a note contains, extracted from `[[Target]]` /
+`[[Target|Alias]]` / `[[Target#Heading]]` syntax during reindex (extraction rules are
+[S011](S011-links.md)'s concern, not this schema's). Backs both `note_read`'s `backlinks` output and
+`note_rename`'s link-cascade rewrite (S003, as amended by S011).
+
+- `target_title` is stored as **raw parsed text, not resolved to a `notes.id`** — unlike `note_tags`,
+  where every row necessarily points at a real `tags` row. A wikilink can target a note that doesn't
+  exist yet (or no longer does), and that's a meaningful case to preserve (a future "orphan/broken
+  link" query), not an error to reject at extraction time. This is also why there's no separate
+  `links`-vocabulary table analogous to `tags`: there's nothing to deduplicate/case-fold across notes
+  the way tag names are — `target_title` is compared by exact string equality wherever it's queried
+  (matching every other title comparison in this codebase — `titleToPath`/`pathToTitle` are
+  case-sensitive, so this stays consistent rather than inventing a new case-insensitive-title
+  convention for just this one table).
+- The composite primary key `(source_note_id, target_title)` gives the same free
+  source-note-id-first index `note_tags` gets from its own composite PK (needed for
+  `DELETE FROM note_links WHERE source_note_id = ?` on every reindex, and for the `ON DELETE CASCADE`
+  from `notes`), plus collapses multiple mentions of the same target within one note (e.g. `[[Foo]]`
+  referenced three times in one note's body) into a single row — a note either links to a target or it
+  doesn't; backlink output cares about that, not mention count.
+- `note_links_target_title` covers the actual primary read path — "which notes link to this
+  title" (`note_read`'s `backlinks`, `note_rename`'s cascade candidate lookup) — which is a
+  `target_title`-first query the composite PK alone doesn't index.
+
 ### `index_queue`
 
 ```sql
@@ -224,7 +261,18 @@ CREATE TABLE index_queue (
 Durable work queue for the indexing daemon (full behavior in S005). `path` as the primary key gives
 free dedup: re-enqueueing a path already pending is `INSERT ... ON CONFLICT(path) DO NOTHING` (the
 existing row's position is preserved, not bumped). `attempts`/`next_attempt_at` back the
-retry-with-backoff behavior for processing failures. Being a real table (not an in-memory queue)
+retry-with-backoff behavior for processing failures.
+
+`core/db.js` exports `enqueuePath(db, path, now)` — the one-line `INSERT ... ON CONFLICT DO NOTHING`
+above — for the same reason it exports `getMeta`/`setMeta` below: it's a plain data-layer operation on
+a table this spec owns, not daemon-process logic, so it lives here rather than in `indexer/daemon.js`
+even though the daemon's drain loop (S005) is its main caller. This matters concretely for S011:
+`note_rename`'s link cascade (S003) also calls it directly, from `core/notes.js` — if it lived in
+`indexer/daemon.js` instead, `core/notes.js` importing it would create a circular import, since
+`indexer/daemon.js` already imports `core/notes.js`. `indexer/daemon.js` re-exports it for its own
+existing call sites, but the implementation is here.
+
+Being a real table (not an in-memory queue)
 means a daemon crash mid-queue loses nothing — whatever's still in the table drains again on restart.
 
 ### `meta`
@@ -258,8 +306,8 @@ Instead:
 
 1. On connection open, `core/db.js` reads `meta.schema_version`.
 2. If it's missing or doesn't match the `SCHEMA_VERSION` constant in code, **every** table —
-   `notes`, `notes_fts`, `chunks`, `chunk_vectors`, `tags`, `note_tags`, `index_queue`, `meta`, all
-   eight, not just the six that hold reconstructable index data — is dropped and recreated from the
+   `notes`, `notes_fts`, `chunks`, `chunk_vectors`, `tags`, `note_tags`, `note_links`, `index_queue`,
+   `meta`, all nine, not just the seven that hold reconstructable index data — is dropped and recreated from the
    current `CREATE TABLE`/`CREATE VIRTUAL TABLE` statements, then `meta.schema_version` is set to the
    new value. `index_queue` and `meta` are included deliberately: a schema rebuild implies a full
    reindex is about to happen, so any pending queue entries are moot, and `last_full_reindex_at`
@@ -276,7 +324,7 @@ table to one and not the other, an upgrade against a populated database throws m
 of completing (exactly the moment the migration is supposed to be saving you). Rather than deriving
 the drop list dynamically from `sqlite_master` (which would need care to preserve FK-safe drop
 ordering), this is guarded by a test: after both a fresh open and a rebuild-from-stale-version open,
-assert `sqlite_master` contains all eight expected tables (not an exact-set equality check — FTS5
+assert `sqlite_master` contains all nine expected tables (not an exact-set equality check — FTS5
 and `vec0` each create their own internal shadow tables alongside `notes_fts`/`chunk_vectors`, which
 are a normal, expected side effect of those virtual table modules, not schema drift to filter out or
 guard against). That turns a future list-drift bug into a failing test instead of a silent
@@ -311,7 +359,8 @@ Reindexing a single note (`mnotes reindex <title>` or a daemon-triggered re-inde
    `vec0` doesn't support `ON DELETE CASCADE` from a regular foreign key).
 3. Delete and re-insert `notes_fts` row for that rowid.
 4. Delete and re-insert `note_tags` rows for that note.
-5. Re-chunk, re-embed, and insert fresh `chunks`/`chunk_vectors` rows.
+5. Delete and re-insert `note_links` rows for that note (S011).
+6. Re-chunk, re-embed, and insert fresh `chunks`/`chunk_vectors` rows.
 
 Running this twice in a row with no intervening file change produces byte-identical `content_hash`,
 so step 1's `ON CONFLICT` update is a no-op write of the same values, and steps 2–5 replace rows with
@@ -328,6 +377,8 @@ disk.
   best-chunk-wins vs. an aggregate) — S002 (search).
 - **Tag extraction rules** (frontmatter parsing, inline `#tag` scanning, false-positive avoidance) —
   S004 (grep-tags).
+- **Wikilink extraction rules and backlink/rename-cascade queries** (`[[Target]]`/`[[Target|Alias]]`
+  syntax, code-region exclusion, `getBacklinks`, the rewrite helper `note_rename` uses) — S011 (links).
 - **Chunking algorithm specifics** (token counting method, ~512 token target / ~15% overlap window
   boundaries) — S005 (indexing-daemon), since chunking happens in `indexer/embed.js`, not `core/db.js`.
 - **Rename detection** — this schema supports either "daemon detects rename and does an UPDATE" or

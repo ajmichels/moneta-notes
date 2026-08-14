@@ -18,6 +18,14 @@ S002/S003, not because they're related to each other.
 **Input**: `pattern<string>`, `?regex<bool>=false`, `?note_title<string>`, `reason<string>`.
 **Output**: `note_title`, `file_line_count`, `line_matches` (per README).
 
+`grep(vaultRoot, pattern, { regex, noteTitle, lineMatchCap, db })` now also accepts an optional `db`
+(S010): when `noteTitle` is provided and doesn't exactly match a file, and `db` was passed, it falls
+back to `core/note-fs.js`'s `resolveTitle(db, noteTitle)` (exact-then-unique-basename, same as
+`note_read`'s title resolution, S003) before erroring "note not found." Without `db`, behavior is
+unchanged — exact match only. This is a **read-oriented lookup**, per S010/S003's read/write split:
+`grep`'s `note_title` only scopes a search, it never decides what gets written, so it gets the same
+fallback `note_read` does, unlike every mutating tool in S003.
+
 `core/grep.js`'s return value always includes each match's line text (`{ line, text }`) — that's
 cheap, already parsed out of ripgrep's own JSON output, and `core/` has no opinion on what a caller
 does with it. Whether match text actually reaches an output surface is a formatting decision made
@@ -34,7 +42,7 @@ never does.
 - Scope: `--glob '*.md'` (or `-t markdown`), restricting matches to note files — attachments/images
   that may exist in the vault aren't notes, and grepping their binary content is meaningless. If
   `note_title` is provided, the search is scoped to that single file's resolved path instead of the
-  whole vault.
+  whole vault — "resolved" per the title-resolution paragraph above, not just a literal join.
 - `regex:false` (default) → fixed-string mode (`rg -F`), so a literal search term with regex
   metacharacters (`.`, `(`, `[`, etc.) matches literally rather than throwing a regex-syntax surprise.
 - `regex:true` → ripgrep's default regex engine, unmodified.

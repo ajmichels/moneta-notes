@@ -2,7 +2,8 @@
 
 Status: **Approved**
 Owns: `src/core/notes.js`
-Depends on: `S001-data-model`, `S010-shared-utilities`
+Depends on: `S001-data-model`, `S004-grep-tags` (`note_rename`'s cascade reuses `core/grep.js` for
+candidate discovery), `S010-shared-utilities`, `S011-links` (extraction/backlink/rewrite primitives)
 Consumed by: `S006-cli`, `S007-mcp-server`
 
 ## Purpose
@@ -36,14 +37,83 @@ through it), `id` here is the **bare filename without extension** — no folder 
 
 ### `note_read`
 
-Unchanged from the README: `note_title<string>`, `?start_line<int>`, `?end_line<int>`,
-`reason<string>`. Returns `title`, `start_line`, `end_line`, `total_lines`, `content_hash`,
-`metadata` (parsed frontmatter, including the system-managed `id`), `content`.
+`note_title<string>`, `?start_line<int>`, `?end_line<int>`, `reason<string>`. Returns `title`,
+`start_line`, `end_line`, `total_lines`, `content_hash`, `metadata` (parsed frontmatter, including the
+system-managed `id`), `content`, `backlinks`, `links_out`.
 
 Frontmatter is parsed via a YAML frontmatter library (e.g. `gray-matter`). A note with no frontmatter
 block at all reads back as `metadata: {}` — but in practice this should be rare, since every note
 gets an `id` written at creation time. Malformed YAML in the frontmatter block is a hard parse error
 (fail loudly — not silently treated as empty metadata).
+
+**`note_title` resolves, it isn't just matched literally** (S010): `noteRead(vaultRoot, title,
+{ startLine, endLine, db })` now accepts an optional `db`. Resolution order: exact title match first
+(the fast, common path — `titleToPath` + `existsSync`, no `db` needed); if that misses and `db` was
+provided, fall back to `core/note-fs.js`'s `resolveTitle(db, title)` (S010) — a unique-basename match.
+If `db` wasn't passed, or resolution still misses, this is the existing "Note not found" error,
+unchanged. This is what makes `mnotes read "Barbara Garn"` return the note at
+`LoonStateHockey/JMS Hockey/Barbara Garn` instead of erroring, when that's the only note with that
+basename.
+
+**The returned `title` is always the resolved absolute title, never an echo of the input.** If
+resolution kicked in, `title` in the response is the *real* title (`LoonStateHockey/JMS Hockey/Barbara
+Garn`), not the string `note_title` was called with (`Barbara Garn`). This is the mechanism the rest
+of this spec's "read/write split" (below) depends on: a caller that only had an ambiguous reference
+now has the unambiguous one, from the one tool that's allowed to guess.
+
+**`backlinks<string[]>`** and **`links_out<string[]>`** (S011's link-graph work) give Claude both
+traversal directions from a single `noteRead` call: which notes point *at* the one just read, and
+which notes it points *at* itself.
+
+- `backlinks` comes from `core/links.js`'s `getBacklinks(db, title)` (S011), using the *resolved*
+  title above — `[]` (not omitted, not an error) whenever `db` isn't passed, same optional-`db`
+  pattern as the title resolution itself. Index-backed, so it reflects the vault as of each linking
+  note's last reindex — same freshness contract `search` already has.
+- `links_out` is `core/links.js`'s `extractLinkTargets` (S011) run against the note's own **full
+  body** (regardless of `start_line`/`end_line` — a windowed read still wants the complete outbound
+  link picture), then — when `db` is provided — passed through `core/links.js`'s
+  `resolveLinkTargets(db, rawTargets)` (S011) so each entry becomes the resolved absolute title where
+  one resolves, falling back to the raw literal text otherwise (a genuinely broken or ambiguous link
+  has no better answer to give). Without `db`, `links_out` is the raw, unresolved literal text — same
+  reduced-capability-without-`db` shape as `backlinks`.
+- Both are deduplicated arrays of note titles, not objects — no rank, no score, nothing else to carry
+  per CLAUDE.md's "no raw scores" spirit extended to "no extra fields beyond what's needed to
+  navigate."
+
+## Title resolution and the read/write split
+
+Verified against Obsidian's own docs and community/developer analysis of its `MetadataCache` resolver
+(`getFirstLinkpathDest`): a bare `[[Name]]` wikilink resolves by basename match when that basename is
+unique vault-wide, deterministically. When ambiguous (two or more notes share a basename), Obsidian
+itself has no published, guaranteed tie-break — so this project doesn't attempt to replicate one
+(S010's `resolveAgainstIndex` returns `null` for both "no match" and "ambiguous match", deliberately
+not distinguishing them).
+
+The motivating flow this exists for: Claude finds a note via `search` (which always returns full,
+unambiguous titles — no ambiguity possible there), reads it via `note_read`, and finds a
+`[[wikilink]]` in the body worth following. That link text might be a short, ambiguous-looking
+reference rather than the note's full title — exactly the "Barbara Garn" case. Two rules make this
+work without Claude ever having to reason about the ambiguity itself:
+
+1. **Read-oriented lookups resolve; every mutating tool doesn't.** `note_read`'s `note_title` and
+   `grep`'s `note_title` scope (S004) both get the exact-then-basename fallback (S010), opt-in via an
+   optional `db`. `note_write`, `note_edit`, `note_append`, and `note_rename` (`old_title` **and**
+   `new_title`) get none — every one of them requires the caller-supplied title to match a real path
+   exactly, full stop, same as before this change. This is deliberate, not an oversight:
+   `note_write`'s create-vs-update branch depends on "does this exact title already exist" meaning
+   something unambiguous (a resolved-to-something-else "create" call could silently edit the wrong
+   note instead of creating a new one), and a wrong resolution on any mutating call is a far worse
+   failure mode than a wrong resolution on a read.
+2. **`note_read` always hands back the resolved absolute title** (above). A caller that only has an
+   ambiguous reference reads the note first — getting the real title in the response — then mutates
+   using *that*. No mutating tool ever needs to resolve anything on its own behalf; `note_read` is the
+   sole place resolution happens, and its output is the bridge back to the exact-match world every
+   mutation lives in.
+
+Tool-facing documentation (MCP tool `description` strings, CLI `--help` text) states this explicitly
+for the mutating tools — "requires the note's absolute title, as returned by `search`/`note_read`" —
+per S007/S006, since this is exactly the kind of behavior a caller (Claude) needs to know about to use
+the tool surface correctly, not an implementation detail to leave undocumented.
 
 ### `note_write`
 
@@ -139,8 +209,80 @@ content_hash), `reason<string>`.
   path is already a safe no-op when the write-through has already run (old path no longer matches
   any row; new path's mtime/hash already matches what the write-through recorded).
 - No size-drop guard (body content is unchanged).
-- Returns `{ title, hash, line_count }` — `title` is `new_title`, `hash` is the post-rename hash
-  (reflecting the rewritten `id`).
+- **Link cascade** (new — S011): after the file-level rename above succeeds, `noteRename` finds every
+  other note that references `old_title` via a wikilink and rewrites those references to `new_title`,
+  so a rename never silently leaves stale `[[OldTitle]]` links scattered across the vault. This runs
+  synchronously, inside the same `noteRename` call — there's no separate agent-driven step and no
+  daemon-side queue involved; the caller that invoked `note_rename` isn't responsible for orchestrating
+  it, it just happens as part of the rename.
+  1. **Candidate discovery**: a literal-string vault-wide search via `core/grep.js`'s existing
+     `grep(vaultRoot, pattern)` (S004) — reused as-is, not reimplemented — for `[[old_title`, **and**,
+     if `old_title` has a folder prefix, a second search for `[[<basename of old_title>` (the last
+     `/`-separated segment). The second pattern is what catches `[[Barbara Garn]]`-style short-form
+     references to a note actually at `LoonStateHockey/JMS Hockey/Barbara Garn` — without it, the
+     cascade silently misses every short-form link to a nested note, which was a real bug in this
+     cascade's first version. Both searches are deliberately over-inclusive (a title that's a prefix of
+     another title, or a basename shared by an unrelated note, both surface as candidates — the
+     precise check happens in the next step) and deliberately a **live scan of the vault, not a query
+     against `note_links`**: the cascade is mutating files, so it needs the correctness of "what's
+     actually on disk right now," not the "as of last reindex" staleness that's an accepted tradeoff
+     for the read-only `backlinks` query above. Candidate lists from both searches are merged and
+     deduped by title before the next step. This also means the cascade works even when `db` is `null`
+     (grep doesn't need one) — see the basename-matching caveat in the next step for what's lost in
+     that case.
+  2. **Per-candidate rewrite**: for each candidate path (this naturally includes the just-renamed
+     note's own new path, if it contains a self-referential link — see below), read the file fresh and
+     run `core/links.js`'s `replaceLinkTarget(body, old_title, new_title, { titleIndex })` (S011),
+     which rewrites a wikilink occurrence only if its target is (a) an exact match on `old_title`, or
+     (b) an exact match on `old_title`'s basename **and** that basename resolves uniquely to
+     `old_title` in `titleIndex` (S010's `resolveAgainstIndex`) — filtering out both `grep` searches'
+     over-inclusive hits, including a candidate that happens to link to a *different* note sharing that
+     basename. `titleIndex` (S010's `buildTitleIndex(db)`) is built **once, before the file-level
+     rename runs** — not after — because by the time the cascade runs, `old_title` no longer exists in
+     the vault (it's been renamed already); resolving against a post-rename index would never find
+     `old_title` to match against, defeating the basename check entirely. Without `db`, there's no
+     index to check basename uniqueness against, so `replaceLinkTarget` only performs the safe,
+     unconditional exact-title rewrite (a) — case (b) is skipped, meaning short-form links only get
+     fixed when `db` is available. `replaceLinkTarget` preserves any `#Heading`/`|Alias` segment
+     untouched. If `count > 0`, write the file back. No caller-supplied hash here — this is internal
+     machinery inside the single `noteRename` call, not a separate caller-initiated mutation, so
+     CLAUDE.md's hash-guard requirement doesn't apply the way it does to
+     `note_write`/`note_edit`/`note_append` (those exist to protect against an *agent* clobbering a
+     concurrent *external* edit across a read/decide/write round trip it controls; there's no such round
+     trip here). The read-immediately-before-write sequence still keeps the race window as small as the
+     primary rename's own file swap.
+  3. **Re-indexing the rewritten notes**: if `db` was passed, each rewritten note's vault-relative path
+     is enqueued via `core/db.js`'s `enqueuePath(db, path)` (S001; also re-exported by
+     `indexer/daemon.js` for its own call sites) — the
+     daemon's normal drain loop picks it up on its own schedule and re-chunks/re-embeds/re-tags/re-links
+     it like any other content change (a link-target rewrite *is* a real body content change, unlike the
+     primary rename's frontmatter-only `id` rewrite, so it does need the full reindex treatment, not a
+     direct write-through). If `db` wasn't passed, the file is still corrected on disk and the daemon's
+     ordinary `fswatch` path picks it up later, same fallback story the primary rename already has
+     without a `db`.
+  4. **Failure handling is best-effort, for the whole cascade, not just per candidate**: if reading or
+     writing one candidate file fails (permissions, concurrent deletion, etc.), that candidate is
+     skipped and the rest of the candidate list is still processed. If candidate *discovery* itself
+     fails (most plausibly `ripgrep` not being installed — S004's `grep` already hard-errors on this
+     for its own tool, but `note_rename` didn't previously depend on `ripgrep` at all, and a missing
+     optional prerequisite shouldn't turn into a hard failure for an operation that otherwise has
+     nothing to do with it), the entire cascade step is skipped the same way. Either case is worth a
+     log line (see "Logging" below) but never a thrown error from `noteRename` as a whole — the primary
+     rename has already fully succeeded by this point and isn't rolled back or blocked by the cascade
+     failing to run.
+  5. **Scope**: only renames performed through `note_rename` itself trigger this cascade. A rename
+     performed outside this API (Obsidian's own rename, a bare `mv`, a `git` checkout that moves a
+     file) is not detected as a rename at all by S005's `fswatch`-driven handling (it surfaces as an
+     ordinary delete+create pair) and therefore can't reliably be cascaded from — inferring an old/new
+     title pairing from two independent file-change events is heuristic and error-prone. Links left
+     stale by an out-of-band rename are a known, accepted gap (same category as any other change made
+     outside the tool surface), not a bug to design around.
+- Returns `{ title, hash, line_count }` — `title` is `new_title`, `hash`/`line_count` reflect the
+  **final** on-disk state of `new_title`'s file after the link cascade above, not just the immediate
+  post-rename-only value. This matters in the self-referential case: if the renamed note linked to
+  itself under its old title, step 2 rewrites that same file a second time, and a caller chaining a
+  follow-up mutation off this response needs a hash that matches what's actually on disk, not an
+  intermediate value that's already stale by the time the response is returned.
 
 ## Concurrency model
 
@@ -149,6 +291,15 @@ current hash → compare → write). This is an accepted small race window, just
 single-user, sequential-tool-call system (one Claude session driving one MCP server against one
 vault at a time), not a high-concurrency service — the hash guard exists to catch *staleness* (edits
 that happened between reads, e.g. a NeoVim save mid-conversation), not to serialize concurrent writers.
+
+**`note_rename`'s link cascade is a deliberate, scoped exception to "every mutating operation on an
+existing note requires a matching content hash"** (CLAUDE.md). The rule's purpose is protecting a
+*caller* (an agent, across its own read → decide → write round trip) from clobbering a concurrent
+external edit it can't see. The cascade's per-candidate rewrites have no such caller-controlled round
+trip — they're internal steps of the single `noteRename` call, reading each file immediately before
+writing it, with the same accepted race window this section already grants the rest of this concurrency
+model. This isn't a precedent for relaxing the guard elsewhere; it applies narrowly to this one
+system-internal, read-immediately-adjacent-to-write sequence.
 
 ## Logging
 
@@ -169,6 +320,16 @@ wouldn't otherwise carry (it records the mutation's outcome, not what happened t
 input field), and unlike a hash-mismatch or guard trip it isn't an error — there's genuinely nothing
 else to log it as.
 
+A second exception, new here: when `note_rename`'s link cascade skips a candidate because reading or
+writing it failed, `core/notes.js` calls `getContextLogger().warn('link cascade: failed to update
+candidate', { note_title: new_title, candidate_title, error_message })`. If candidate discovery itself
+fails (see "Failure handling is best-effort" above), it logs `getContextLogger().warn('link cascade:
+candidate discovery failed', { note_title: new_title, error_message })` once instead, and skips the
+rest of the cascade. Both are `warn`, not `debug`, unlike the `id`-overwrite case above — either case
+means a note is left with a stale link the caller has no other way of finding out about (the overall
+`note_rename` call still succeeds and returns normally), which is worth a durable trail even though it
+isn't itself a thrown error.
+
 ## Explicitly out of scope here
 
 - **Path/title validation against the "flat vault structure" convention** — deliberately not
@@ -179,4 +340,6 @@ else to log it as.
   routes through it.
 - **Tag extraction from frontmatter or inline `#hashtags`** — S004.
 - **How a rename's delete+create file events get picked up and reindexed** — S005 (indexing-daemon).
+- **Wikilink syntax/extraction rules, `note_links` storage, `getBacklinks`, and `replaceLinkTarget`** —
+  S011 (links); this spec only calls those primitives.
 - **`note_rename`'s MCP tool schema and its addition to the README's tool table** — S007.

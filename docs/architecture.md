@@ -18,7 +18,7 @@ moneta-notes/
 │   ├── config.js        # loads ~/.config/mnotes/config.toml — S009
 │   ├── logger.js         # shared logger — S008
 │   ├── log-rotator.js    # log rotation, run by its own LaunchAgent — S008
-│   ├── core/              # shared library: db, search, notes, grep, tags
+│   ├── core/              # shared library: db, search, notes, grep, tags, links
 │   ├── indexer/           # daemon.js (fswatch loop, IPC socket), embed.js
 │   ├── cli/                # mnotes command surface — S006
 │   └── mcp/                 # MCP server, tool defs, prompts — S007
