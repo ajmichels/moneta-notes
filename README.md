@@ -57,7 +57,9 @@ it's missing.
 ## License & Contributing
 
 Licensed under [Apache-2.0](LICENSE). Contributions are welcome — see
-[CONTRIBUTING.md](CONTRIBUTING.md) for signed-commit and DCO sign-off requirements.
+[CONTRIBUTING.md](CONTRIBUTING.md) for signed-commit and DCO sign-off requirements, and
+[Architecture § Development](docs/architecture.md#development) for running tests/lint and what the
+Husky hooks enforce.
 
 ---
 

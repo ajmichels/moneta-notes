@@ -43,8 +43,25 @@ in a separate `test/` tree.
 | CLI↔daemon IPC     | Unix domain socket |
 | Process management | launchd (indexing daemon + log-rotation agent) |
 | Grep               | ripgrep (system-installed) |
-| Logging            | pino (structured JSON), rotation via a dedicated LaunchAgent |
+| Logging            | Hand-rolled plain-text logger (`src/logger.js`), rotation via a dedicated LaunchAgent — see [S008](specs/S008-logging.md) |
 | Versioning         | gitwatch — vault only, not this repo; see [Note Versioning](note-versioning.md) |
 | CLI parsing        | Node's built-in `util.parseArgs` |
+| Package manager    | pnpm |
 | Testing            | Vitest, colocated `*.test.js` files |
 | Linting            | ESLint |
+| Git hooks          | Husky — lint on commit, tests on push, commitlint + DCO sign-off on commit message |
+
+## Development
+
+- **Install deps**: `pnpm install`
+- **Run tests**: `pnpm test` (Vitest, run mode; omit `run` for watch mode: `pnpm test -- --watch`)
+- **Lint**: `pnpm lint` (ESLint — bug/consistency rules, not a formatter; see CLAUDE.md)
+
+Husky hooks (`.husky/`) enforce these automatically:
+
+| Hook | Runs |
+|---|---|
+| `pre-commit` | `pnpm lint` |
+| `commit-msg` | `pnpm commitlint --edit` — Conventional Commits, per `commitlint.config.js` |
+| `pre-push` | `pnpm test run` — the full Vitest suite |
+| `post-checkout` / `post-merge` | `nvm use` — keeps the Node version pinned per `.nvmrc` |
