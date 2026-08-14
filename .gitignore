@@ -2,3 +2,4 @@ node_modules
 *.local.md
 *.local.json
 .claude/worktrees
+.husky/prepare-commit-msg
