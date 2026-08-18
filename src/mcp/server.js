@@ -7,8 +7,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { SCHEMA_VERSION } from '../core/db.js';
 import { getAuditLogger, getLogger, defaultLogDir } from '../logger.js';
-import { embedQuery, configureEmbedder } from '../indexer/embed.js';
-import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_VERSION } from '../indexer/daemon.js';
+import { embedQueryOverSocket } from '../indexer/embed.js';
+import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_VERSION, defaultSocketPath } from '../indexer/daemon.js';
 import { loadConfig } from '../config.js';
 import { registerPrompts } from './prompts.js';
 import {
@@ -233,17 +233,15 @@ export async function main() {
 
     assertSchemaCurrent(dbPath);
     const auditLogger = getAuditLogger(defaultLogDir());
-
-    configureEmbedder({
-        dtype: config.index.embedding_dtype,
-        idleTimeoutMs: config.index.model_idle_unload_minutes * 60 * 1000,
-    });
+    const socketPath = defaultSocketPath();
 
     const server = createServer({
         dbPath,
         vaultRoot,
         config,
-        embed: embedQuery,
+        // The daemon is the only process that ever loads the embedding model (S005) — this asks it
+        // over IPC rather than loading a second copy in this MCP server process.
+        embed: (text) => embedQueryOverSocket(socketPath, text),
         embeddingModel: DEFAULT_EMBEDDING_MODEL,
         embeddingVersion: DEFAULT_EMBEDDING_VERSION,
         auditLogger,

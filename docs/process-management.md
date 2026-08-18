@@ -7,7 +7,7 @@ for full design detail:
 
 | LaunchAgent label | Runs | Purpose |
 |---|---|---|
-| `com.ajmichels.mnotes` | `src/indexer/daemon.js` | Watches the vault (`fswatch`), keeps the SQLite FTS5 + vector index in sync, serves the reindex IPC socket. |
+| `com.ajmichels.mnotes` | `src/indexer/daemon.js` | Watches the vault (`fswatch`), keeps the SQLite FTS5 + vector index in sync, serves the IPC socket (reindex requests, and query embedding for `search --mode=semantic\|hybrid` from both the CLI and the MCP server). |
 | `com.ajmichels.mnotes.logrotate` | `src/log-rotator.js` | Rotates the three log files on a schedule (`RunAtLoad` + four times daily). |
 
 Both are `KeepAlive: true` — if the daemon process dies, `launchd` relaunches it automatically. This
@@ -80,8 +80,9 @@ Rotation policy is config-backed — see `[logging]` in [Configuration](configur
 - **Daemon crash-looping / not running after install** — almost always a missing `fswatch`
   (`brew install fswatch`, then `mnotes daemon restart`). Check `indexer.log` for the actual startup
   error.
-- **`mnotes reindex` fails with "could not connect to the daemon"** — the daemon process isn't running.
-  `mnotes daemon start`, then retry.
+- **`mnotes reindex`, or `search --mode=semantic|hybrid` (CLI or MCP), fails with "could not connect
+  to the daemon"** — the daemon process isn't running. `mnotes daemon start`, then retry. Semantic/
+  hybrid search has no local-model fallback (S005) — it always needs the daemon up.
 - **Daemon not picking up a config change** — `mnotes daemon restart` (config is read once at
   startup).
 - **Background Task Management shows "Node.js Foundation" instead of "Moneta Notes"** — the native

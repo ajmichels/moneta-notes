@@ -2,10 +2,11 @@ import { describe, it, expect, vi } from 'vitest';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createServer } from 'node:net';
 import { getLogger, runWithLogger } from '../logger.js';
 import {
     chunkText, loadTokenizer, tokenizeWithOffsets, createEmbedder, embed, embedQuery,
-    buildQueryPrompt, defaultPipelineFactory,
+    buildQueryPrompt, defaultPipelineFactory, embedQueryOverSocket,
 } from './embed.js';
 import { cleanupTempDir } from '../../vitest.helpers.js';
 
@@ -329,4 +330,58 @@ describe('embedQuery: real pipeline (slow, network on first run)', () => {
         expect(queryVector.length).toBe(1024);
         expect(queryVector).not.toEqual(docVector);
     }, 120000);
+});
+
+describe('embedQueryOverSocket', () => {
+    function makeSocketPath() {
+        return join(mkdtempSync(join(tmpdir(), 'mnotes-embed-socket-test-')), 'daemon.sock');
+    }
+
+    function fakeDaemon(socketPath, respond) {
+        const server = createServer((socket) => {
+            let buffer = '';
+            socket.on('data', (chunk) => {
+                buffer += chunk.toString('utf8');
+                const newlineIndex = buffer.indexOf('\n');
+                if (newlineIndex === -1) {
+                    return;
+                }
+                const request = JSON.parse(buffer.slice(0, newlineIndex));
+                socket.end(`${JSON.stringify(respond(request))}\n`);
+            });
+        });
+        return new Promise((resolve) => server.listen(socketPath, () => resolve(server)));
+    }
+
+    it('resolves a Float32Array from the daemon\'s { vector } response', async () => {
+        const socketPath = makeSocketPath();
+        const server = await fakeDaemon(socketPath, (request) => {
+            expect(request).toEqual({ action: 'embed', text: 'hello world' });
+            return { vector: [ 0.1, 0.2, 0.3 ] };
+        });
+
+        const vector = await embedQueryOverSocket(socketPath, 'hello world');
+
+        expect(vector).toBeInstanceOf(Float32Array);
+        expect(Array.from(vector)).toEqual([
+            Math.fround(0.1), Math.fround(0.2), Math.fround(0.3),
+        ]);
+        server.close();
+    });
+
+    it('rejects with an actionable error when nothing is listening on the socket', async () => {
+        const socketPath = join(mkdtempSync(join(tmpdir(), 'mnotes-embed-socket-test-')), 'nobody.sock');
+
+        await expect(embedQueryOverSocket(socketPath, 'hello')).rejects.toThrow(
+            /could not connect to the daemon/,
+        );
+    });
+
+    it('rejects with the daemon\'s error message on a { error } response', async () => {
+        const socketPath = makeSocketPath();
+        const server = await fakeDaemon(socketPath, () => ({ error: 'model failed to load' }));
+
+        await expect(embedQueryOverSocket(socketPath, 'hello')).rejects.toThrow(/model failed to load/);
+        server.close();
+    });
 });

@@ -13,7 +13,7 @@ import { titleToPath, resolveTitle } from '../core/note-fs.js';
 import { logAudit, getAuditLogger, defaultLogDir } from '../logger.js';
 import { openDb } from '../core/db.js';
 import { defaultSocketPath, DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_VERSION } from '../indexer/daemon.js';
-import { embedQuery as realEmbedQuery, configureEmbedder } from '../indexer/embed.js';
+import { embedQueryOverSocket } from '../indexer/embed.js';
 import { loadConfig, resolveConfig } from '../config.js';
 import { computeStats, checkDaemonRunning } from './stats.js';
 import { runReindexCommand } from './reindex.js';
@@ -560,20 +560,19 @@ function buildRealDeps() {
     const vaultRoot = resolveVaultRoot(config);
     const dbPath = resolveDbPath(config);
     const { db } = openDb(dbPath);
-    configureEmbedder({
-        dtype: config.index.embedding_dtype,
-        idleTimeoutMs: config.index.model_idle_unload_minutes * 60 * 1000,
-    });
+    const socketPath = defaultSocketPath();
     return {
         vaultRoot,
         dbPath,
         db,
         config,
-        embed: realEmbedQuery,
+        // The daemon is the only process that ever loads the embedding model (S005) — this asks it
+        // over IPC rather than loading a second copy in this CLI process.
+        embed: (text) => embedQueryOverSocket(socketPath, text),
         embeddingModel: DEFAULT_EMBEDDING_MODEL,
         embeddingVersion: DEFAULT_EMBEDDING_VERSION,
         auditLogger: getAuditLogger(defaultLogDir()),
-        socketPath: defaultSocketPath(),
+        socketPath,
     };
 }
 

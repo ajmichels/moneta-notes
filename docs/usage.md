@@ -37,6 +37,11 @@ mnotes search "index_queue retry" --explain
 
 Flags: `--mode=hybrid|fulltext|semantic` (default `hybrid`), `--limit=N`, `--explain`, `--json`.
 
+`semantic`/`hybrid` mode embeds the query by asking the indexing daemon over its IPC socket (S005) —
+neither the CLI nor the MCP server ever loads the embedding model itself, so this is a **hard error**
+("could not connect to the daemon") if the daemon isn't running. `fulltext` mode has no such
+dependency. Same behavior on the MCP `search` tool.
+
 `--explain` is CLI-only debug output — a header line with the pipeline summary (mode, limit, overfetch),
 followed by a column-headered, whitespace-aligned table showing raw BM25 score, raw cosine distance,
 which chunk won the best-chunk-wins collapse, and the RRF score with its formula breakdown (columns vary

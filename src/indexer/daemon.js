@@ -15,7 +15,7 @@ import { getLogger, defaultLogDir, runWithLogger, getContextLogger } from '../lo
 import { loadConfig } from '../config.js';
 import {
     chunkText as realChunkText, loadTokenizer, tokenizeWithOffsets as realTokenizeWithOffsets,
-    embed as realEmbed, configureEmbedder,
+    embed as realEmbed, embedQuery as realEmbedQuery, configureEmbedder,
 } from './embed.js';
 
 // Re-exported for existing callers (this file's own tests, IPC/queue-drain code below) — the
@@ -415,6 +415,17 @@ export function defaultSocketPath() {
 function handleIpcRequest(line, socket, ctx) {
     const { vaultRoot, db, deps, gate } = ctx;
     const request = JSON.parse(line);
+
+    if (request.action === 'embed') {
+        // Not run under `gate` — embedding a query touches no shared queue/DB state, so there's no
+        // correctness reason to make an interactive search wait behind an in-flight reindex/drain
+        // pass (unlike `reindex` below, which mutates the same rows processPath does).
+        deps.embedQuery(request.text)
+            .then((vector) => socket.end(`${JSON.stringify({ vector: Array.from(vector) })}\n`))
+            .catch((err) => socket.end(`${JSON.stringify({ error: err.message })}\n`));
+        return;
+    }
+
     if (request.action !== 'reindex') {
         socket.end(`${JSON.stringify({ error: `unknown action "${request.action}"` })}\n`);
         return;
@@ -546,6 +557,7 @@ export async function startDaemon(options = {}) {
         embeddingModel = DEFAULT_EMBEDDING_MODEL,
         embeddingVersion = DEFAULT_EMBEDDING_VERSION,
         embed = realEmbed,
+        embedQuery = realEmbedQuery,
         createWatcher = defaultCreateWatcher,
         drainIntervalMs = DEFAULT_DRAIN_INTERVAL_MS,
         debounceMs = DEFAULT_DEBOUNCE_MS,
@@ -560,7 +572,7 @@ export async function startDaemon(options = {}) {
     const { db, reindexRequired } = openDb(dbPath);
 
     const chunkText = await resolveChunkText(options.chunkText);
-    const deps = { chunkText, embed, embeddingModel, embeddingVersion, backoffSchedule };
+    const deps = { chunkText, embed, embedQuery, embeddingModel, embeddingVersion, backoffSchedule };
 
     watermarkCatchup(db, vaultRoot);
     if (!reindexRequired) {

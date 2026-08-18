@@ -1,3 +1,4 @@
+import { createConnection } from 'node:net';
 import { AutoTokenizer, pipeline } from '@huggingface/transformers';
 import { getContextLogger } from '../logger.js';
 
@@ -227,4 +228,37 @@ export function buildQueryPrompt(text) {
 
 export async function embedQuery(text) {
     return getSharedEmbedder().embed(buildQueryPrompt(text));
+}
+
+// CLI/MCP-side counterpart to embedQuery — instead of loading the pipeline in this process, asks
+// the daemon (the only process that ever loads it, S005) to embed the query over its IPC socket.
+// Request/response, not a stream: one `{ action: "embed", text }` line out, one `{ vector }` or
+// `{ error }` line back, then the daemon closes the connection.
+export function embedQueryOverSocket(socketPath, text) {
+    return new Promise((resolve, reject) => {
+        const client = createConnection(socketPath);
+        let buffer = '';
+
+        client.on('connect', () => {
+            client.write(`${JSON.stringify({ action: 'embed', text })}\n`);
+        });
+        client.on('data', (chunk) => {
+            buffer += chunk.toString('utf8');
+        });
+        client.on('end', () => {
+            const response = JSON.parse(buffer);
+            if (response.error) {
+                reject(new Error(`mnotes: embedding request failed: ${response.error}`));
+                return;
+            }
+            resolve(Float32Array.from(response.vector));
+        });
+        client.on('error', (err) => {
+            reject(new Error(
+                `mnotes: could not connect to the daemon at "${socketPath}" to embed a query — is it `
+                + `running? (${err.message})`,
+                { cause: err },
+            ));
+        });
+    });
 }

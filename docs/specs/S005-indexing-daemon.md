@@ -5,14 +5,14 @@ Owns: `src/indexer/daemon.js`, `src/indexer/embed.js`
 Depends on: `S001-data-model` (including `enqueuePath`, which this file re-exports), `S004-grep-tags`
 (tag extraction, invoked here during processing), `S010-shared-utilities`, `S011-links` (link
 extraction, invoked here during processing)
-Consumed by: `S006-cli` (reindex/stats talk to this daemon), `S009-config-and-install` (new config
-knobs introduced here)
+Consumed by: `S006-cli` (reindex/stats/search talk to this daemon), `S007-mcp-server` (search talks to
+this daemon), `S009-config-and-install` (new config knobs introduced here)
 
 ## Purpose
 
 Defines the long-running `launchd`-managed daemon: startup catch-up, live `fswatch`-driven indexing,
-the embedding pipeline's lifecycle (load/idle-unload), and the Unix-socket IPC that lets the CLI
-drive the same warm daemon rather than loading its own model copy per invocation.
+the embedding pipeline's lifecycle (load/idle-unload), and the Unix-socket IPC that lets the CLI and
+MCP server drive the same warm daemon rather than loading their own model copy per invocation/process.
 
 `index_queue` (S001) is the **single path for all indexing work**, not just explicit `mnotes reindex`
 calls — every live `fswatch`-triggered change funnels through the same debounce → enqueue → drain
@@ -198,16 +198,27 @@ excluded — matches S001's `chunks.char_start`/`char_end` being offsets into th
   pipeline (allowing GC to reclaim the memory) rather than holding it indefinitely. The next embedding
   request after an unload pays the load cost again (a few seconds) for that one request. Both the idle
   timeout and the precision are config values (see below), not hardcoded.
-- Only the daemon ever loads this pipeline — the CLI never does (see IPC below), so there's exactly
-  one embedding pipeline instance on the machine at a time.
+- Only the daemon ever loads this pipeline — neither the CLI nor the MCP server does (see IPC below),
+  so there's exactly one embedding pipeline instance on the machine at a time, no matter how many
+  `mnotes` invocations or `mnotes-mcp` processes (e.g. from multiple concurrent Claude Code sessions)
+  are running.
 
-## IPC: CLI ↔ daemon
+## IPC: CLI/MCP ↔ daemon
 
-A Unix domain socket at `~/Library/Application Support/mnotes/daemon.sock`, so `mnotes reindex` (and
-any other CLI command needing daemon-backed work) reuses the daemon's warm model instead of loading
-its own.
+A Unix domain socket at `~/Library/Application Support/mnotes/daemon.sock`, so `mnotes reindex`, query
+embedding for `search --mode semantic|hybrid` (CLI and MCP alike), and any other command needing
+daemon-backed work reuse the daemon's warm model instead of loading their own.
 
 - **Protocol**: newline-delimited JSON messages over the socket connection.
+- **`{ action: "embed", text }`**: used by `core/search.js`'s semantic/hybrid path (via `embed.js`'s
+  `embedQueryOverSocket`, injected as `deps.embed` in both `cli/main.js`'s `buildRealDeps()` and
+  `mcp/server.js`'s `main()`) to embed query text without loading a local model copy. Daemon calls its
+  own `embedQuery()` (the same shared pipeline instance document embedding uses) and responds with a
+  single `{ vector: [...] }` message, or `{ error: message }` on failure, then closes the connection —
+  request/response, not a stream, unlike `reindex` below. Deliberately **not** run under
+  `createSerialGate()`: that gate exists to keep `processPath` from running on the same path twice
+  concurrently (a DB-mutation correctness concern), and embedding a query touches no shared queue/DB
+  state — so an interactive search isn't forced to wait behind an in-flight bulk reindex.
 - **`mnotes reindex` (no title)**: CLI connects, sends `{ action: "reindex" }`. Daemon walks the vault
   and enqueues every `.md` file's path (not just changed ones — this is the ad hoc "safe to run
   anytime" full-vault command from the README; unchanged-and-current files are still cheap since the
@@ -223,10 +234,11 @@ its own.
   it happens, up through final success or final failure. This is a deliberate choice: watching retries
   happen in real time is more useful for an interactively-run debug command than either hiding them
   (fire-and-forget) or returning after just the first attempt.
-- **Daemon not running**: `mnotes reindex` is a **hard error** ("daemon not running — check
-  `launchctl print gui/$(id -u)/com.ajmichels.mnotes`") — no fallback to a CLI-local model load. Keeps
-  exactly one code path for embedding work (the daemon's), rather than maintaining a second
-  standalone-embedding path used only when the daemon happens to be down.
+- **Daemon not running**: both `mnotes reindex` and an `embed` request (so `search
+  --mode=semantic|hybrid` from either the CLI or the MCP `search` tool) are a **hard error** — no
+  fallback to a locally-loaded model. Keeps exactly one code path for embedding work (the daemon's),
+  rather than maintaining a second standalone-embedding path used only when the daemon happens to be
+  down.
 
 ## Config knobs introduced here (flagged for S009)
 

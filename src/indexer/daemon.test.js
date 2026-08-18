@@ -764,6 +764,58 @@ describe('createIpcServer', () => {
         expect(messages.some((m) => m.path === 'Socketed.md')).toBe(true);
         expect(messages.find((m) => m.summary).summary).toEqual({ reindexed: 1, skipped: 0, failed: 0 });
     });
+
+    it('answers an embed request with a { vector } message, then closes the connection', async () => {
+        const vaultRoot = makeTempVault();
+        const db = makeTestDb();
+        const socketDir = makeTempVault();
+        const socketPath = join(socketDir, 'daemon.sock');
+        const deps = {
+            ...baseDeps(),
+            embedQuery: async (text) => Float32Array.from([ text.length, 0.5 ]),
+        };
+
+        const server = createIpcServer(socketPath, vaultRoot, db, deps, createSerialGate());
+
+        const message = await new Promise((resolve, reject) => {
+            let buffer = '';
+            const client = createConnection(socketPath, () => {
+                client.write(`${JSON.stringify({ action: 'embed', text: 'hello' })}\n`);
+            });
+            client.on('data', (chunk) => { buffer += chunk.toString('utf8'); });
+            client.on('end', () => resolve(JSON.parse(buffer)));
+            client.on('error', reject);
+        });
+
+        server.close();
+        expect(message).toEqual({ vector: [ 5, 0.5 ] });
+    });
+
+    it('answers an embed request with { error } when deps.embedQuery rejects', async () => {
+        const vaultRoot = makeTempVault();
+        const db = makeTestDb();
+        const socketDir = makeTempVault();
+        const socketPath = join(socketDir, 'daemon.sock');
+        const deps = {
+            ...baseDeps(),
+            embedQuery: async () => { throw new Error('pipeline unavailable'); },
+        };
+
+        const server = createIpcServer(socketPath, vaultRoot, db, deps, createSerialGate());
+
+        const message = await new Promise((resolve, reject) => {
+            let buffer = '';
+            const client = createConnection(socketPath, () => {
+                client.write(`${JSON.stringify({ action: 'embed', text: 'hello' })}\n`);
+            });
+            client.on('data', (chunk) => { buffer += chunk.toString('utf8'); });
+            client.on('end', () => resolve(JSON.parse(buffer)));
+            client.on('error', reject);
+        });
+
+        server.close();
+        expect(message).toEqual({ error: 'pipeline unavailable' });
+    });
 });
 
 describe('startDaemon', () => {
@@ -945,6 +997,55 @@ describe('startDaemon', () => {
         expect(embedCalls).toBe(1);
         expect(received.find((m) => m.summary)).toBeDefined();
 
+        await daemon.stop();
+    });
+
+    it('answers an embed IPC request while a reindex is still mid-embed, unlike reindex-vs-reindex '
+        + 'above — embed does not go through the same serial gate', async () => {
+        const vaultRoot = makeTempVault();
+        writeNote(vaultRoot, 'Slow.md', 'content', 1000);
+        const socketDir = makeTempVault();
+        const socketPath = join(socketDir, 'daemon.sock');
+
+        let embedCalls = 0;
+        let releaseEmbed;
+        const embedGate = new Promise((resolve) => { releaseEmbed = resolve; });
+        const slowEmbed = async (text) => {
+            embedCalls += 1;
+            await embedGate;
+            return fakeEmbed(text);
+        };
+
+        const daemon = await startDaemon({
+            vaultRoot,
+            dbPath: ':memory:',
+            socketPath,
+            createWatcher: () => ({ stop() {} }),
+            chunkText: fakeChunkText,
+            embed: slowEmbed,
+            embedQuery: async (text) => Float32Array.from([ text.length, 0.5 ]),
+            embeddingModel: 'test-model',
+            embeddingVersion: 'v1',
+            drainIntervalMs: 5,
+        });
+
+        // Background drain is now blocked mid-embed on the pre-existing note (slowEmbed never
+        // resolves until releaseEmbed() below).
+        await vi.waitFor(() => expect(embedCalls).toBe(1));
+
+        const embedResponse = await new Promise((resolve, reject) => {
+            let buffer = '';
+            const client = createConnection(socketPath, () => {
+                client.write(`${JSON.stringify({ action: 'embed', text: 'query text' })}\n`);
+            });
+            client.on('data', (chunk) => { buffer += chunk.toString('utf8'); });
+            client.on('end', () => resolve(JSON.parse(buffer)));
+            client.on('error', reject);
+        });
+
+        expect(embedResponse.vector).toBeDefined();
+
+        releaseEmbed();
         await daemon.stop();
     });
 
