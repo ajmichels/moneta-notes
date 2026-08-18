@@ -151,6 +151,9 @@ mnotes rename "Weekly Notes/2026-W32" "Weekly Notes/2026-W32-archived" --hash="$
 the one being renamed, so nothing in the vault is left pointing at a stale title. This happens
 automatically as part of the rename call — no separate step needed.
 
+**Attachment writes work differently** (see [`mnotes attachment`](#mnotes-attachment-readwrite)
+below): no hash guard, since there's no diffable text content to protect against clobbering.
+
 `write` and `append` read content from **stdin** if `--content` is omitted — works naturally with
 `$EDITOR`-produced files, heredocs, or piped command output:
 
@@ -166,6 +169,32 @@ These commands are logged to `audit.log` (`source: cli`, no `reason` — see
 [Process Management](process-management.md#logs)) but don't wait for reindexing to complete; the
 daemon's `fswatch` loop picks up the change asynchronously. Use `mnotes reindex <title>` if you need to
 block until a specific note is reindexed.
+
+### `mnotes attachment read|write`
+
+```sh
+mnotes attachment read "Attachments/receipt.pdf"                    # opens via the OS default app
+mnotes attachment read "Attachments/receipt.pdf" --raw > backup.pdf # raw bytes to stdout
+mnotes attachment read "Attachments/receipt.pdf" --metadata         # {path, size_bytes, mime_type}
+mnotes attachment write "Attachments/receipt.pdf" ~/Downloads/receipt.pdf
+curl -s https://example.com/report.pdf | mnotes attachment write "Attachments/report.pdf"
+```
+
+Read/write access to binary vault files that aren't notes — images, PDFs, anything a note references
+via `![[...]]` or a markdown link. Unlike every other command here, **there's no index behind
+attachments**, so `<path>` must be the exact vault-relative path (as it appears in the note's
+reference) — no short-form/basename resolution, not even on the read side.
+
+`mnotes attachment read`'s default action opens the resolved file with the OS default app (`open`) —
+nothing is printed to stdout, since attachment bytes aren't meant to be dumped to a terminal. `--raw`
+streams the exact bytes to stdout instead (useful for backing up a copy or piping elsewhere), subject
+to the `[attachments].max_read_bytes` cap (see [Configuration](configuration.md#attachments));
+`--metadata`/`--json` (aliases) print `{ path, size_bytes, mime_type }` with no bytes and no cap.
+
+`mnotes attachment write <path> [local-file]` reads `<local-file>` off your local disk — or, if
+omitted, raw bytes from stdin (the same fallback `write`/`append` already have for note content, see
+above) — and writes it to `<path>` in the vault — always create-or-overwrite, no hash required (S012's
+rationale: there's no diffable text content for a hash guard to protect).
 
 ### `mnotes reindex [title]`
 
@@ -202,14 +231,23 @@ Once registered (`claude mcp add mnotes ...` — done automatically by
 Claude in any session:
 
 `search`, `grep`, `tag_list`, `tag_notes`, `note_read`, `note_write`, `note_edit`, `note_append`,
-`note_rename`
+`note_rename`, `attachment_read`, `attachment_write`
 
 These map directly onto the CLI commands above (`note_read` ↔ `mnotes read`, etc.) and share the same
 `core/` logic — same hashing rules, same size-drop guard, same "no raw scores" output, and the same
 title-resolution split: `note_read`/`grep` accept a short or ambiguous title (resolved the same way
 `mnotes read`'s does) and `note_read` always returns the real absolute title in its response;
 `note_write`/`note_edit`/`note_append`/`note_rename` require the exact absolute title with no
-resolution — each tool's own description states this. Two differences from the CLI:
+resolution — each tool's own description states this.
+
+`attachment_read`/`attachment_write` ([S012](specs/S012-attachments.md)) are unindexed, so
+`attachment_path` always requires the exact vault-relative path, on both tools — no short-form
+resolution even on the read side, unlike every note tool above. `attachment_read` returns file bytes as
+base64 (`content_base64`, gated by `[attachments].max_read_bytes`) plus `size_bytes`/`mime_type`;
+`attachment_write` is always create-or-overwrite with no hash guard, since binary attachments have no
+diffable text content for that guard to protect.
+
+Two differences from the CLI:
 
 - Every tool requires a **`reason<string>`** argument, logged for audit purposes (mirroring
   `description` on Claude Code's native file tools) — the CLI has no equivalent since a human typing

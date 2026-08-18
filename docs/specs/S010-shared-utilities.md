@@ -4,7 +4,8 @@ Status: **Approved**
 Owns: `src/core/note-fs.js`
 Depends on: none
 Consumed by: `S002-search`, `S003-notes`, `S004-grep-tags`, `S005-indexing-daemon`, `S006-cli`,
-`S007-mcp-server`, `S011-links`
+`S007-mcp-server`, `S011-links`, `S012-attachments` (extracts `resolveVaultPath`, the containment-check
+primitive `titleToPath` is now built on)
 
 ## Purpose
 
@@ -41,16 +42,22 @@ This spec was split out after implementing S006 surfaced two real problems with 
 
 ## Contract
 
-- **`titleToPath(vaultRoot, title) -> string`** — `join(vaultRoot, `${title}.md`)`. The one place a
-  title becomes a real filesystem path. **Throws if the resulting path resolves outside
-  `vaultRoot`** (a title containing `../` segments that walk past the vault root, e.g.
-  `../../../../tmp/pwned`) — checked via `relative(vaultRoot, candidate)` starting with `..`. Every
-  title-taking tool (`note_read`, `note_write`, `note_edit`, `note_append`, `note_rename`, `grep`'s
-  `note_title` scope) routes through this function on both the CLI and MCP surfaces, so this is the
-  single choke point for vault containment — nothing else needs its own check. This is a
-  containment guarantee, not a style rule: it's distinct from the "flat vault structure" convention
-  ([S003](S003-notes.md)), which stays intentionally unenforced — a title can still nest into
-  arbitrary subfolders, it just can't resolve outside `vaultRoot` entirely.
+- **`resolveVaultPath(vaultRoot, relativePath) -> string`** — `join(vaultRoot, relativePath)`, throwing
+  if the result resolves outside `vaultRoot` (checked via `relative(vaultRoot, candidate)` starting
+  with `..`). The generic containment-check primitive, with no notion of titles or the `.md`
+  extension — added when [S012](S012-attachments.md) needed the exact same containment guarantee for
+  raw vault-relative attachment paths, which aren't titles and shouldn't have `.md` appended. `core/
+  attachments.js` calls this directly; `titleToPath` (below) is now defined in terms of it rather than
+  duplicating the `relative()` check a second time.
+- **`titleToPath(vaultRoot, title) -> string`** — `resolveVaultPath(vaultRoot, `${title}.md`)`. The one
+  place a title becomes a real filesystem path, inheriting the containment throw above (a title
+  containing `../` segments that walk past the vault root, e.g. `../../../../tmp/pwned`, fails the same
+  way). Every title-taking tool (`note_read`, `note_write`, `note_edit`, `note_append`, `note_rename`,
+  `grep`'s `note_title` scope) routes through this function on both the CLI and MCP surfaces, so this is
+  the single choke point for vault containment among title-based tools — nothing else needs its own
+  check. This is a containment guarantee, not a style rule: it's distinct from the "flat vault
+  structure" convention ([S003](S003-notes.md)), which stays intentionally unenforced — a title can
+  still nest into arbitrary subfolders, it just can't resolve outside `vaultRoot` entirely.
 - **`pathToTitle(vaultRoot, filePath) -> string`** — the inverse: an **absolute** filesystem path
   (e.g. from a directory walk or a ripgrep match) becomes a title. Normalizes path separators to `/`
   before stripping the `.md` extension, so the result is always identical regardless of platform path

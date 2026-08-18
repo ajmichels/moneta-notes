@@ -4,8 +4,8 @@ Status: **Approved**
 Owns: `src/logger.js`, `src/log-rotator.js`
 Depends on: none (used by every other component)
 Consumed by: `S005-indexing-daemon`, `S006-cli`, `S007-mcp-server`, `S009-config-and-install`
-(rotation LaunchAgent installation) — and, via `getContextLogger()`, every `core/` module
-(`S001`-`S004`), per CLAUDE.md's instruction that `core/` use the shared logger instead of ad hoc
+(rotation LaunchAgent installation), `S012-attachments` — and, via `getContextLogger()`, every `core/`
+module (`S001`-`S004`), per CLAUDE.md's instruction that `core/` use the shared logger instead of ad hoc
 `console.log`.
 
 ## Purpose
@@ -146,13 +146,16 @@ assume access to.
 - **`audit.log`** — the tool-call/mutation audit trail, separated out from `mcp-server.log` from the
   start (rather than the README's "maybe split later if noisy" framing) because it now has two
   sources, not one: every MCP tool call (per S007) **and** every CLI mutating command (`write`,
-  `edit`, `append`, `rename` — per S006's decision that these get logged too, just without a `reason`).
-  `tool` is the line's message; `note_title`, `source<"mcp"|"cli">`, `reason<string, present only when
-  source:"mcp">`, `outcome<"success"|"error">`, and `error_message<string, present only when
-  outcome:"error">` are trailing context fields per the Log line format above, e.g.:
+  `edit`, `append`, `rename`, `attachment write` — per S006's decision that these get logged too, just
+  without a `reason`). `tool` is the line's message; `note_title` (or, for `attachment_write`/
+  `attachment_read`, `attachment_path` — S012 — same slot, named for whichever identifier the tool
+  actually takes), `source<"mcp"|"cli">`, `reason<string, present only when source:"mcp">`,
+  `outcome<"success"|"error">`, and `error_message<string, present only when outcome:"error">` are
+  trailing context fields per the Log line format above, e.g.:
   ```
   2026-08-13T18:24:00.113Z INFO  [audit] note_write note_title="Weekly Notes/2026-W32" source=mcp reason="testing redaction" outcome=success
   2026-08-13T18:24:05.221Z INFO  [audit] write note_title="Test.md" source=cli outcome=error error_message="hash mismatch"
+  2026-08-13T18:24:11.402Z INFO  [audit] attachment_write attachment_path="Attachments/receipt.pdf" source=mcp reason="saving expense receipt" outcome=success
   ```
   `reason` is required by every MCP tool call and rendered only for `source: "mcp"`; it's always absent
   for `source: "cli"` (S006 explicitly has no `--reason` flag). `error_message` is required and
@@ -160,16 +163,17 @@ assume access to.
   that hides *why* something failed is much less useful). All at `info` level regardless of outcome —
   a failed mutation is still a normal, expected audit event, not a system error.
 
-CLI **read-only** commands (`search`, `grep`, `tags`, `read`) are not logged anywhere beyond their own
-stdout/stderr — only mutations go to `audit.log`, matching the README's original "CLI is interactive,
-doesn't need persistent logging" framing for the read side, while extending logging to the write side
-per S006.
+CLI **read-only** commands (`search`, `grep`, `tags`, `read`, `attachment read`) are not logged anywhere
+beyond their own stdout/stderr — only mutations go to `audit.log`, matching the README's original "CLI
+is interactive, doesn't need persistent logging" framing for the read side, while extending logging to
+the write side per S006.
 
 ## What never gets logged
 
-Per CLAUDE.md: never full note content, never diffs. `audit.log` entries carry `note_title` (an
-identifier, not content) and `reason` (Claude's stated justification, not the note body) — nothing in
-this spec's log shapes risks becoming a second, unmanaged copy of vault data.
+Per CLAUDE.md: never full note content, never diffs. `audit.log` entries carry `note_title`/
+`attachment_path` (an identifier, not content) and `reason` (Claude's stated justification, not the
+note body) — nothing in this spec's log shapes risks becoming a second, unmanaged copy of vault data.
+Extended by S012: never the attachment's bytes or base64 content either, same rationale.
 
 ## Explicitly out of scope here
 

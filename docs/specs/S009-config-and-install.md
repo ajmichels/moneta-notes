@@ -4,12 +4,13 @@ Status: **Approved**
 Owns: `src/config.js`, `scripts/install.sh`, `scripts/uninstall.sh`, `launchd/*.plist.template`,
 `launchd/launcher.c`, `launchd/Info.plist`
 Depends on: `S002-search`, `S003-notes`, `S004-grep-tags`, `S005-indexing-daemon`, `S007-mcp-server`,
-`S008-logging` (config knobs flagged across all of these land here)
+`S008-logging`, `S012-attachments` (config knobs flagged across all of these land here)
 
 ## Purpose
 
-Finalizes `config.toml`'s full shape (collecting every tunable flagged across S002/S003/S004/S005/S008
-into one coherent schema), and the install/uninstall flow — now covering **two** LaunchAgents (the
+Finalizes `config.toml`'s full shape (collecting every tunable flagged across
+S002/S003/S004/S005/S008/S012 into one coherent schema), and the install/uninstall flow — now covering
+**two** LaunchAgents (the
 indexing daemon from the README, plus S008's log-rotation agent) instead of one, plus registering (and
 deregistering) `mnotes-mcp` as an actual Claude Code MCP server and linking (and unlinking) the `mnotes`
 CLI onto `PATH` — rather than leaving either step manual.
@@ -34,6 +35,9 @@ size_drop_threshold = 0.50   # S003 — reject a write/edit dropping below this 
 [grep]
 line_match_cap = 10          # S004 — line numbers shown per note before "(+N more)"
 
+[attachments]
+max_read_bytes = 10000000    # S012 — attachment_read's include_content size cap
+
 [index]
 debounce_ms = 15000                    # S005 — per-path fswatch debounce window
 model_idle_unload_minutes = 10         # S005
@@ -48,8 +52,9 @@ rotation_keep = 5            # S008
 ```
 
 `vault_path`, `db_path`, and `embedding_model` are the three values already documented in the
-README/`config.example.toml`; everything under `[search]`/`[notes]`/`[grep]`/`[index]`/`[logging]` is
-new, collecting every value flagged as config-backed across S002-S005/S008.
+README/`config.example.toml`; everything under
+`[search]`/`[notes]`/`[grep]`/`[attachments]`/`[index]`/`[logging]` is new, collecting every value
+flagged as config-backed across S002-S005/S008/S012.
 
 **`config.toml` on disk is a sparse override file, not a full dump.** Every value shown above is also
 baked into `src/config.js` as an in-code default (one JS object mirroring this exact schema).
@@ -200,15 +205,16 @@ S009 lands" comment. Concretely:
   `MNOTES_DB_PATH` are no longer read anywhere. This was a clean replacement, not backwards-compatible
   shimming, per the "stand-in... until S009 lands" framing already in the code being replaced.
 
-## Wiring `[search]`/`[notes]`/`[grep]`/`[index]`/`[logging]` into `core/`, the daemon, and log-rotator
+## Wiring `[search]`/`[notes]`/`[grep]`/`[attachments]`/`[index]`/`[logging]` into `core/`, the daemon, and log-rotator
 
 The remaining sections are now read too — no `config.toml` key is decorative. `core/search.js`,
-`core/notes.js`, and `core/grep.js` stay config-ignorant per CLAUDE.md's architecture rules (they take
-plain JS options with the same defaults they always had — `search`/`explainSearch` accept
-`limitDefault`/`limitMax`/`overfetchMultiplier`/`overfetchCap`/`rrfK`; `noteWrite`/`noteEdit` accept
-`sizeDropThreshold`; `grep` already accepted `lineMatchCap`); it's `cli/main.js`, `mcp/tools.js`,
-`mcp/server.js`, and `indexer/daemon.js` that call `loadConfig()` and pass the relevant section's
-values down as options on every call.
+`core/notes.js`, `core/grep.js`, and `core/attachments.js` stay config-ignorant per CLAUDE.md's
+architecture rules (they take plain JS options with the same defaults they always had —
+`search`/`explainSearch` accept `limitDefault`/`limitMax`/`overfetchMultiplier`/`overfetchCap`/`rrfK`;
+`noteWrite`/`noteEdit` accept `sizeDropThreshold`; `grep` already accepted `lineMatchCap`;
+`readAttachment` accepts `maxReadBytes`); it's `cli/main.js`, `mcp/tools.js`, `mcp/server.js`, and
+`indexer/daemon.js` that call `loadConfig()` and pass the relevant section's values down as options on
+every call.
 
 - `cli/main.js`'s `buildRealDeps()` and `mcp/server.js`'s `main()` each call `loadConfig()` once and
   thread the resulting `config` object through `deps.config`, rather than re-reading the file per

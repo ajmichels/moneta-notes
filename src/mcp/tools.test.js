@@ -7,7 +7,7 @@ import { syncNoteTags } from '../core/tags.js';
 import { getAuditLogger, getLogger, getContextLogger } from '../logger.js';
 import {
     callTool, searchTool, grepTool, tagListTool, tagNotesTool, noteReadTool, noteWriteTool,
-    noteEditTool, noteAppendTool, noteRenameTool,
+    noteEditTool, noteAppendTool, noteRenameTool, attachmentReadTool, attachmentWriteTool,
 } from './tools.js';
 import { cleanupTempDir } from '../../vitest.helpers.js';
 
@@ -144,6 +144,21 @@ describe('callTool', () => {
         const searchLine = lines.find((l) => l.includes('[audit] search'));
         expect(renameLine).toContain('note_title="Old"');
         expect(searchLine).not.toContain('note_title=');
+    });
+
+    it('logs attachment_path instead of note_title when input has attachment_path', async () => {
+        const { auditLogger, mcpLogger, logDir } = makeDeps();
+
+        await callTool(
+            auditLogger, mcpLogger, 'attachment_write',
+            { attachment_path: 'Attachments/receipt.pdf', reason: 'testing attachment audit' },
+            async () => 'ok',
+        );
+
+        const [ line ] = await waitForAuditLines(logDir);
+        expect(line).toContain('INFO  [audit] attachment_write');
+        expect(line).toContain('attachment_path="Attachments/receipt.pdf"');
+        expect(line).not.toContain('note_title=');
     });
 
     it('runs fn inside a runWithLogger context, so a getContextLogger call in fn reaches mcp-server.log',
@@ -631,5 +646,109 @@ describe('noteRenameTool', () => {
         const row = verify.prepare('SELECT path FROM notes WHERE path = ?').get('Renamed.md');
         expect(row.path).toBe('Renamed.md');
         verify.close();
+    });
+});
+
+describe('attachmentReadTool', () => {
+    it('returns size_bytes/mime_type/content_base64, decodable back to the original bytes', async () => {
+        const vaultRoot = makeTempVault({});
+        const content = Buffer.from('pdf bytes here');
+        mkdirSync(join(vaultRoot, 'Attachments'), { recursive: true });
+        writeFileSync(join(vaultRoot, 'Attachments/receipt.pdf'), content);
+
+        const result = await attachmentReadTool(
+            makeDeps({ vaultRoot }),
+            { attachment_path: 'Attachments/receipt.pdf', reason: 'testing attachment read' },
+        );
+
+        const parsed = JSON.parse(result.content[0].text);
+        expect(parsed.path).toBe('Attachments/receipt.pdf');
+        expect(parsed.size_bytes).toBe(content.length);
+        expect(parsed.mime_type).toBe('application/pdf');
+        expect(Buffer.from(parsed.content_base64, 'base64').equals(content)).toBe(true);
+    });
+
+    it('omits content_base64 when include_content is false', async () => {
+        const vaultRoot = makeTempVault({});
+        mkdirSync(join(vaultRoot, 'Attachments'), { recursive: true });
+        writeFileSync(join(vaultRoot, 'Attachments/receipt.pdf'), 'bytes');
+
+        const result = await attachmentReadTool(
+            makeDeps({ vaultRoot }),
+            {
+                attachment_path: 'Attachments/receipt.pdf', include_content: false,
+                reason: 'testing metadata only',
+            },
+        );
+
+        const parsed = JSON.parse(result.content[0].text);
+        expect(parsed.content_base64).toBeUndefined();
+        expect(parsed.size_bytes).toBe(5);
+    });
+
+    it('maps an over-cap read with include_content: true to isError: true', async () => {
+        const vaultRoot = makeTempVault({});
+        mkdirSync(join(vaultRoot, 'Attachments'), { recursive: true });
+        writeFileSync(join(vaultRoot, 'Attachments/big.bin'), Buffer.alloc(100));
+
+        const result = await attachmentReadTool(
+            makeDeps({ vaultRoot, config: { attachments: { max_read_bytes: 10 } } }),
+            { attachment_path: 'Attachments/big.bin', reason: 'testing cap' },
+        );
+
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toMatch(/100 bytes.*10/);
+    });
+
+    it('maps a missing attachment to isError: true', async () => {
+        const vaultRoot = makeTempVault({});
+
+        const result = await attachmentReadTool(
+            makeDeps({ vaultRoot }),
+            { attachment_path: 'Attachments/missing.pdf', reason: 'testing missing' },
+        );
+
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toMatch(/not found/i);
+    });
+});
+
+describe('attachmentWriteTool', () => {
+    it('creates a new attachment from base64 content, returning { path, size_bytes, mime_type }', async () => {
+        const vaultRoot = makeTempVault({});
+        const content = Buffer.from('brand new image bytes');
+
+        const result = await attachmentWriteTool(
+            makeDeps({ vaultRoot }),
+            {
+                attachment_path: 'Attachments/logo.png', content_base64: content.toString('base64'),
+                reason: 'testing attachment write',
+            },
+        );
+
+        const parsed = JSON.parse(result.content[0].text);
+        expect(parsed).toEqual({
+            path: 'Attachments/logo.png', size_bytes: content.length, mime_type: 'image/png',
+        });
+        expect(readFileSync(join(vaultRoot, 'Attachments/logo.png')).equals(content)).toBe(true);
+    });
+
+    it('overwrites an existing attachment unconditionally (no hash guard)', async () => {
+        const vaultRoot = makeTempVault({});
+        mkdirSync(join(vaultRoot, 'Attachments'), { recursive: true });
+        writeFileSync(join(vaultRoot, 'Attachments/logo.png'), 'old bytes');
+        const deps = makeDeps({ vaultRoot });
+
+        const result = await attachmentWriteTool(
+            deps,
+            {
+                attachment_path: 'Attachments/logo.png',
+                content_base64: Buffer.from('new bytes').toString('base64'),
+                reason: 'testing overwrite',
+            },
+        );
+
+        expect(result.isError).toBeUndefined();
+        expect(readFileSync(join(vaultRoot, 'Attachments/logo.png'), 'utf8')).toBe('new bytes');
     });
 });

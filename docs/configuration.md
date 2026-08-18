@@ -61,6 +61,14 @@ Tunes the raw-file `grep` tool — see [S004 — Grep & Tags](specs/S004-grep-ta
 |---|---|---|
 | `line_match_cap` | `10` | Maximum number of matching line numbers shown per note in `grep` output before collapsing the rest into a `(+N more)` suffix. Applies per note, not to the total number of matching notes returned (which is always unbounded — `grep` is exhaustive, not relevance-ranked). |
 
+## `[attachments]`
+
+Tunes binary attachment read access — see [S012 — Attachments](specs/S012-attachments.md).
+
+| Key | Default | What it does |
+|---|---|---|
+| `max_read_bytes` | `10000000` (~10MB) | `attachment_read`'s cap on returning base64-encoded file content. A file over this size with `include_content: true` (the default) errors, directing the caller to retry with `include_content: false` for metadata only. Doesn't apply to the CLI's default `open`-in-OS-app mode, only `--raw` and the MCP tool's `content_base64`. |
+
 ## `[index]`
 
 Tunes the background indexing daemon — see [S005 — Indexing Daemon](specs/S005-indexing-daemon.md).
@@ -96,5 +104,5 @@ limit_default = 10
 model_idle_unload_minutes = 30
 ```
 
-Every other key — `db_path`, `embedding_model`, `[notes]`, `[grep]`, `[logging]`, and the rest of
-`[search]`/`[index]` — falls through to its built-in default, unaffected by this file.
+Every other key — `db_path`, `embedding_model`, `[notes]`, `[grep]`, `[attachments]`, `[logging]`, and
+the rest of `[search]`/`[index]` — falls through to its built-in default, unaffected by this file.

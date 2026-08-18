@@ -63,7 +63,7 @@ chosen specifically so `tail -f` / `grep` work directly, no log processor needed
 |---|---|
 | `indexer.log` | Daemon lifecycle (started, schema check, `fswatch` watcher started), queue drain activity, embedding model load/idle-unload, hash mismatches, permanent queue-item failures. |
 | `mcp-server.log` | MCP server lifecycle (started, stdio transport connected/disconnected), protocol-level errors. Tool-call outcomes are **not** here. |
-| `audit.log` | Every note mutation — MCP tool calls (`note_write`/`note_edit`/`note_append`/`note_rename`) and CLI mutating commands (`write`/`edit`/`append`/`rename`) — with outcome and, for MCP calls, the caller's stated `reason`. |
+| `audit.log` | Every note/attachment mutation — MCP tool calls (`note_write`/`note_edit`/`note_append`/`note_rename`/`attachment_write`) and CLI mutating commands (`write`/`edit`/`append`/`rename`/`attachment write`) — with outcome and, for MCP calls, the caller's stated `reason`. |
 
 ```sh
 tail -f ~/Library/Logs/com.ajmichels.mnotes/indexer.log

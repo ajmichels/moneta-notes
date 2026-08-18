@@ -1,14 +1,18 @@
 import { join, relative, sep } from 'node:path';
 
-export function titleToPath(vaultRoot, title) {
-    const candidate = join(vaultRoot, `${title}.md`);
+export function resolveVaultPath(vaultRoot, relativePath) {
+    const candidate = join(vaultRoot, relativePath);
     const rel = relative(vaultRoot, candidate);
 
     if (rel === '..' || rel.startsWith(`..${sep}`)) {
-        throw new Error(`titleToPath: title "${title}" resolves outside the vault`);
+        throw new Error(`resolveVaultPath: "${relativePath}" resolves outside the vault`);
     }
 
     return candidate;
+}
+
+export function titleToPath(vaultRoot, title) {
+    return resolveVaultPath(vaultRoot, `${title}.md`);
 }
 
 export function stripMdExtension(relativePath) {

@@ -13,7 +13,7 @@ import { loadConfig } from '../config.js';
 import { registerPrompts } from './prompts.js';
 import {
     searchTool, grepTool, tagListTool, tagNotesTool, noteReadTool, noteWriteTool,
-    noteEditTool, noteAppendTool, noteRenameTool,
+    noteEditTool, noteAppendTool, noteRenameTool, attachmentReadTool, attachmentWriteTool,
 } from './tools.js';
 
 function readStoredSchemaVersion(dbPath) {
@@ -162,6 +162,37 @@ const TOOL_DEFS = [
             reason: z.string(),
         },
         handler: noteRenameTool,
+    },
+    {
+        name: 'attachment_read',
+        description: 'Read a binary vault file that is not a note (image, PDF, etc.), referenced '
+            + 'from a note via a [[wikilink]]/![[embed]]/markdown-link. attachment_path must be the '
+            + 'exact vault-relative path as it appears in that reference — there is no short-form or '
+            + 'basename resolution for attachments, unlike note_title. size_bytes/mime_type are '
+            + 'always returned; content_base64 is included when include_content is true (the '
+            + 'default) and the file is under the configured size cap — otherwise omitted, or (if '
+            + 'include_content was left true and the file is over the cap) a hard error directing '
+            + 'you to retry with include_content: false.',
+        inputSchema: {
+            attachment_path: z.string(),
+            include_content: z.boolean().optional(),
+            reason: z.string(),
+        },
+        handler: attachmentReadTool,
+    },
+    {
+        name: 'attachment_write',
+        description: 'Create or overwrite a binary vault file that is not a note (image, PDF, etc.) '
+            + '— always a full replace, no hash guard (unlike the note_* mutating tools — binary '
+            + 'attachments have no diffable text content for a hash guard to protect). '
+            + 'attachment_path must be the exact vault-relative path; parent directories are created '
+            + 'as needed. content_base64 is the file\'s bytes, base64-encoded.',
+        inputSchema: {
+            attachment_path: z.string(),
+            content_base64: z.string(),
+            reason: z.string(),
+        },
+        handler: attachmentWriteTool,
     },
 ];
 

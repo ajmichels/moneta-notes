@@ -78,6 +78,7 @@ Husky hooks enforce.
 | [S009 — Config & Install](docs/specs/S009-config-and-install.md) | `config.toml` schema, install/uninstall, launchd |
 | [S010 — Shared Utilities](docs/specs/S010-shared-utilities.md) | Title↔path conversion, line counting, code-region stripping |
 | [S011 — Links](docs/specs/S011-links.md) | Wikilink extraction, backlinks, rename link-cascade, broken-link detection |
+| [S012 — Attachments](docs/specs/S012-attachments.md) | Reading/writing binary vault files (images, PDFs) by vault-relative path, unindexed |
 
 Specs are numbered (`S001`, `S002`, ...) and named with a short kebab-case topic. A spec may amend an
 earlier one (noted at the top of the file) as later design work surfaces a gap — e.g. S004 amends
@@ -109,7 +110,7 @@ preventive, not a substitute for being able to recover a prior version of a note
 ## Status
 
 **Fully speced** (see `docs/specs/`): data model, search, notes, grep/tags, indexing daemon, CLI, MCP
-server, logging, config & install.
+server, logging, config & install, links, attachments.
 
 **Not yet speced**: MCP prompts (weekly review automation, note triage, stale note detection, weekly
 note scaffolding, orphan note identification) — candidates identified, design deferred until the core

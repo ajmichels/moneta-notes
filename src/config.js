@@ -34,6 +34,9 @@ export function buildDefaultConfig() {
         grep: {
             line_match_cap: 10,
         },
+        attachments: {
+            max_read_bytes: 10000000,
+        },
         index: {
             debounce_ms: 15000,
             model_idle_unload_minutes: 10,

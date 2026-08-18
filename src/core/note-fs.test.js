@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
     titleToPath, pathToTitle, stripMdExtension, countLines, stripCodeRegions,
-    buildTitleIndex, resolveAgainstIndex, resolveTitle,
+    buildTitleIndex, resolveAgainstIndex, resolveTitle, resolveVaultPath,
 } from './note-fs.js';
 import { openDb } from './db.js';
 import { cleanupTempDir } from '../../vitest.helpers.js';
@@ -62,6 +62,25 @@ describe('titleToPath / pathToTitle', () => {
         expect(titleToPath(vaultRoot, 'Notes on 1..2 scaling')).toBe(
             join(vaultRoot, 'Notes on 1..2 scaling.md'),
         );
+    });
+});
+
+describe('resolveVaultPath', () => {
+    it('joins vaultRoot and a relative path with no extension appended', () => {
+        const vaultRoot = makeTempVault();
+        expect(resolveVaultPath(vaultRoot, 'Attachments/receipt.pdf')).toBe(
+            join(vaultRoot, 'Attachments', 'receipt.pdf'),
+        );
+    });
+
+    it('rejects a relative path whose ../ segments escape the vault', () => {
+        const vaultRoot = makeTempVault();
+        expect(() => resolveVaultPath(vaultRoot, '../../../../tmp/pwned')).toThrow(/outside the vault/);
+    });
+
+    it('is what titleToPath is now built on', () => {
+        const vaultRoot = makeTempVault();
+        expect(titleToPath(vaultRoot, 'Some Note')).toBe(resolveVaultPath(vaultRoot, 'Some Note.md'));
     });
 });
 

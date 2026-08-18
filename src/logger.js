@@ -81,7 +81,9 @@ export function getAuditLogger(logDir) {
 }
 
 export function logAudit(auditLogger, entry) {
-    const { tool, noteTitle, source, reason = null, outcome, errorMessage = null } = entry;
+    const {
+        tool, noteTitle = null, attachmentPath = null, source, reason = null, outcome, errorMessage = null,
+    } = entry;
 
     if (source !== 'mcp' && source !== 'cli') {
         throw new Error(`logAudit: source must be "mcp" or "cli", got ${JSON.stringify(source)}`);
@@ -102,8 +104,13 @@ export function logAudit(auditLogger, entry) {
         throw new Error('logAudit: errorMessage must be null when outcome is "success"');
     }
 
+    // attachment_* tools identify their target by vault-relative path, not note title (S012) — the
+    // audit line carries whichever identifier the calling tool actually has, never both.
+    const identifierField = attachmentPath !== null ? 'attachment_path' : 'note_title';
+    const identifierValue = attachmentPath !== null ? attachmentPath : noteTitle;
+
     return auditLogger.info(tool, {
-        note_title: noteTitle,
+        [identifierField]: identifierValue,
         source: new BareValue(source),
         reason,
         outcome: new BareValue(outcome),

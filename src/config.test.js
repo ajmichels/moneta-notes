@@ -55,6 +55,9 @@ describe('buildDefaultConfig', () => {
             grep: {
                 line_match_cap: 10,
             },
+            attachments: {
+                max_read_bytes: 10000000,
+            },
             index: {
                 debounce_ms: 15000,
                 model_idle_unload_minutes: 10,
@@ -148,6 +151,18 @@ describe('loadConfig: sparse top-level override', () => {
             expect(line).toContain('overridden_keys=vault_path');
         });
         await cleanupTempDir(logDir);
+    });
+});
+
+describe('loadConfig: [attachments] section override', () => {
+    it('merges max_read_bytes, leaving every other section at its default', () => {
+        const configPath = makeTempConfigPath();
+        writeFileSync(configPath, '[attachments]\nmax_read_bytes = 500\n', 'utf8');
+
+        const config = loadConfig(configPath);
+
+        expect(config.attachments.max_read_bytes).toBe(500);
+        expect(config.notes.size_drop_threshold).toBe(0.50);
     });
 });
 

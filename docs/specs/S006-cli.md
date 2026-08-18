@@ -3,7 +3,7 @@
 Status: **Approved**
 Owns: `src/cli/main.js`, `src/cli/reindex.js`, `src/cli/daemon.js`, `src/cli/stats.js`
 Depends on: `S001-data-model`, `S002-search`, `S003-notes`, `S004-grep-tags`, `S005-indexing-daemon`,
-`S010-shared-utilities`, `S011-links`
+`S010-shared-utilities`, `S011-links`, `S012-attachments`
 Consumed by: (terminal use, `obsidian.nvim` integration)
 
 ## Purpose
@@ -18,7 +18,8 @@ surface.
 
 Node's built-in `util.parseArgs` — no CLI framework dependency. Subcommand routing is a small
 dispatch table keyed on `argv[2]` (`search`, `grep`, `tags`, `links`, `read`, `write`, `edit`, `append`,
-`rename`, `reindex`, `daemon`, `stats`), each parsing its own remaining flags via `parseArgs`. This matches the
+`rename`, `attachment`, `reindex`, `daemon`, `stats`), each parsing its own remaining flags via
+`parseArgs`. This matches the
 project's minimal-dependency, no-build-step bias — a dozen flat subcommands doesn't need a framework's
 nested-command/auto-help machinery.
 
@@ -128,6 +129,8 @@ exact absolute title — see "Absolute titles for mutating commands" below).
 | `mnotes edit <title>` | `--hash=H`, `--old="..."`, `--new="..."`, `--metadata='{...}'` | |
 | `mnotes append <title>` | `--hash=H`, `--content="..."` | Content from stdin if `--content` omitted. |
 | `mnotes rename <old-title> <new-title>` | `--hash=H` | |
+| `mnotes attachment read <path>` | `--raw`, `--metadata`/`--json` | Default action opens the file via the OS default app (`open`); see S012. |
+| `mnotes attachment write <path> [local-file]` | | Reads `<local-file>` off local disk (stdin if omitted), writes it to `<path>` (vault-relative) — see S012. |
 | `mnotes reindex [title]` | | Talks to the daemon over the S005 Unix socket; hard error if daemon isn't running. Blocks until done, streaming attempt/retry progress for a single-title reindex. |
 | `mnotes daemon <start\|stop\|restart>` | | Controls the `launchd`-managed daemon process itself (not the IPC socket) — see below. |
 | `mnotes stats` | `--json` | See below. |
@@ -174,6 +177,21 @@ CLI-only — there's no MCP equivalent (S011 deliberately keeps the link graph o
 — a note literally titled "broken" can't be looked up via `mnotes links broken` (it'll run the broken-
 links listing instead). Accepted as a known, minor limitation rather than adding lookup ambiguity to
 resolve it; not expected to collide with real vault content.
+
+### `mnotes attachment read|write` (S012)
+
+Read/write access to binary vault files that aren't notes (images, PDFs, etc.) — no index backs these,
+so `<path>` is always the exact vault-relative path, never resolved against a short reference the way
+`read`/`grep --note=`/`links <title>` are.
+
+`mnotes attachment read <path>` has three modes: default shells out to `open <resolved-path>` (the OS
+default app for that file type — no bytes touch `mnotes`' own stdout); `--raw` streams the file's exact
+bytes to stdout (subject to the same `[attachments].max_read_bytes` cap the MCP tool's
+`include_content` uses); `--metadata`/`--json` (aliases) print `{ path, size_bytes, mime_type }` with
+no bytes and no cap. `mnotes attachment write <path> [local-file]` reads `<local-file>` off local disk
+(or, if omitted, raw bytes from stdin — same fallback `write`/`append` already have for note content)
+and writes it to `<path>` — create-or-overwrite, no hash guard (S012's binary-content rationale for why
+CLAUDE.md's hash rule doesn't apply here).
 
 ### `--explain` (search only)
 
@@ -241,15 +259,17 @@ Per `S008`, the CLI's *only* use of `src/logger.js` is the audit trail for mutat
 never uses the logger for its own normal stdout/stderr output, and (unlike the daemon and MCP server)
 it does **not** wrap command dispatch in a `runWithLogger` context:
 
-- `mnotes search`/`grep`/`tags`/`read` — no logging at all. These call into `core/search.js`,
-  `core/grep.js`, `core/tags.js`, `core/notes.js` with no enclosing `runWithLogger`, so any
-  `getContextLogger()` calls inside those `core/` modules (`S002`'s malformed-query `warn`, `S004`'s
-  ripgrep-not-found `warn`) silently resolve to the no-op logger when invoked from the CLI — those
-  lines only exist for the MCP server, which does establish a context (`S007`). This matches the
-  README's original "CLI is interactive, doesn't need persistent logging" framing for reads.
-- `mnotes write`/`edit`/`append`/`rename` — after the command completes (success or a caught thrown
-  error), the CLI calls `logAudit(getAuditLogger(defaultLogDir()), { tool, noteTitle, source: 'cli',
-  outcome, errorMessage })` (`S008`) — `reason` is always absent (`source: 'cli'` never carries one, per
+- `mnotes search`/`grep`/`tags`/`read`/`attachment read` — no logging at all. These call into
+  `core/search.js`, `core/grep.js`, `core/tags.js`, `core/notes.js`, `core/attachments.js` with no
+  enclosing `runWithLogger`, so any `getContextLogger()` calls inside those `core/` modules (`S002`'s
+  malformed-query `warn`, `S004`'s ripgrep-not-found `warn`) silently resolve to the no-op logger when
+  invoked from the CLI — those lines only exist for the MCP server, which does establish a context
+  (`S007`). This matches the README's original "CLI is interactive, doesn't need persistent logging"
+  framing for reads.
+- `mnotes write`/`edit`/`append`/`rename`/`attachment write` — after the command completes (success or
+  a caught thrown error), the CLI calls `logAudit(getAuditLogger(defaultLogDir()), { tool, noteTitle,
+  source: 'cli', outcome, errorMessage })` (`S008`) — `reason` is always absent (`source: 'cli'` never
+  carries one, per
   "No `reason` flag" above). This is a direct call to `logAudit`, not a `runWithLogger`-wrapped
   context, so — same as the read commands — `core/notes.js`'s own incidental logging (`S003`'s
   caller-supplied-`id`-overwrite `debug` line) resolves to the no-op logger for CLI-driven mutations;

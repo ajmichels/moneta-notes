@@ -152,6 +152,24 @@ describe('logAudit', () => {
         expect(line).toContain('error_message="hash mismatch"');
     });
 
+    it('logs under attachment_path instead of note_title when attachmentPath is given', async () => {
+        const logDir = makeTempLogDir();
+        const auditLogger = getAuditLogger(logDir);
+
+        await logAudit(auditLogger, {
+            tool: 'attachment_write',
+            attachmentPath: 'Attachments/receipt.pdf',
+            source: 'mcp',
+            reason: 'saving expense receipt',
+            outcome: 'success',
+        });
+
+        const line = readFileSync(join(logDir, 'audit.log'), 'utf8').trim();
+        expect(line).toContain('INFO  [audit] attachment_write');
+        expect(line).toContain('attachment_path="Attachments/receipt.pdf"');
+        expect(line).not.toContain('note_title=');
+    });
+
     it('throws when source is "mcp" and reason is missing', () => {
         const logDir = makeTempLogDir();
         const auditLogger = getAuditLogger(logDir);

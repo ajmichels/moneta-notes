@@ -2,6 +2,7 @@ import { search } from '../core/search.js';
 import { grep } from '../core/grep.js';
 import { tagList, tagNotes } from '../core/tags.js';
 import { noteRead, noteWrite, noteEdit, noteAppend, noteRename } from '../core/notes.js';
+import { readAttachment, writeAttachment } from '../core/attachments.js';
 import { openDb } from '../core/db.js';
 import { logAudit, runWithLogger } from '../logger.js';
 import { resolveConfig } from '../config.js';
@@ -24,6 +25,7 @@ async function withDb(dbPath, fn) {
 
 export async function callTool(auditLogger, mcpLogger, toolName, input, fn) {
     const noteTitle = input.note_title ?? input.old_title ?? null;
+    const attachmentPath = input.attachment_path ?? null;
     let text;
 
     try {
@@ -32,6 +34,7 @@ export async function callTool(auditLogger, mcpLogger, toolName, input, fn) {
         logAudit(auditLogger, {
             tool: toolName,
             noteTitle,
+            attachmentPath,
             source: 'mcp',
             reason: input.reason,
             outcome: 'error',
@@ -43,6 +46,7 @@ export async function callTool(auditLogger, mcpLogger, toolName, input, fn) {
     logAudit(auditLogger, {
         tool: toolName,
         noteTitle,
+        attachmentPath,
         source: 'mcp',
         reason: input.reason,
         outcome: 'success',
@@ -160,6 +164,30 @@ export async function noteRenameTool(deps, input) {
         const result = dbPath
             ? await withDb(dbPath, (db) => noteRename(vaultRoot, oldTitle, newTitle, hash, db))
             : noteRename(vaultRoot, oldTitle, newTitle, hash, null);
+        return formatJson(result);
+    });
+}
+
+export async function attachmentReadTool(deps, input) {
+    const { vaultRoot } = deps;
+    const { attachments: attachmentsConfig } = resolveConfig(deps);
+    const { attachment_path: attachmentPath, include_content: includeContent = true } = input;
+
+    return callTool(deps.auditLogger, deps.mcpLogger, 'attachment_read', input, async () => {
+        const result = readAttachment(vaultRoot, attachmentPath, {
+            includeContent, maxReadBytes: attachmentsConfig.max_read_bytes,
+        });
+        const { content, ...meta } = result;
+        return formatJson(content ? { ...meta, content_base64: content.toString('base64') } : meta);
+    });
+}
+
+export async function attachmentWriteTool(deps, input) {
+    const { vaultRoot } = deps;
+    const { attachment_path: attachmentPath, content_base64: contentBase64 } = input;
+
+    return callTool(deps.auditLogger, deps.mcpLogger, 'attachment_write', input, async () => {
+        const result = writeAttachment(vaultRoot, attachmentPath, Buffer.from(contentBase64, 'base64'));
         return formatJson(result);
     });
 }

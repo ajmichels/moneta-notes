@@ -15,6 +15,9 @@ size_drop_threshold = 0.50   # S003 — reject a write/edit dropping below this 
 [grep]
 line_match_cap = 10          # S004 — line numbers shown per note before "(+N more)"
 
+[attachments]
+max_read_bytes = 10000000    # S012 — attachment_read's include_content size cap
+
 [index]
 debounce_ms = 15000                    # S005 — per-path fswatch debounce window
 model_idle_unload_minutes = 10         # S005

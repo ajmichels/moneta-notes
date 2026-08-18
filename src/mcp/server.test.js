@@ -100,7 +100,7 @@ function makeTempDbPath() {
 }
 
 describe('createServer', () => {
-    it('registers all 9 tools, listable over a real (in-memory) MCP connection', async () => {
+    it('registers all 11 tools, listable over a real (in-memory) MCP connection', async () => {
         const dbPath = makeTempDbPath();
         openDb(dbPath).db.close();
 
@@ -108,8 +108,8 @@ describe('createServer', () => {
         const { tools } = await client.listTools();
 
         expect(tools.map((t) => t.name).sort()).toEqual([
-            'grep', 'note_append', 'note_edit', 'note_read', 'note_rename', 'note_write',
-            'search', 'tag_list', 'tag_notes',
+            'attachment_read', 'attachment_write', 'grep', 'note_append', 'note_edit', 'note_read',
+            'note_rename', 'note_write', 'search', 'tag_list', 'tag_notes',
         ]);
     });
 
@@ -130,6 +130,32 @@ describe('createServer', () => {
 
         expect(result.isError).toBeFalsy();
         expect(result.content[0].text).toBe('note_title|file_line_count\nA|3\n');
+    });
+
+    it('round-trips attachment_write then attachment_read, decoding back to the original bytes', async () => {
+        const dbPath = makeTempDbPath();
+        openDb(dbPath).db.close();
+        const content = Buffer.from('round-trip attachment bytes');
+
+        const client = await connectedClient({ dbPath, ...baseDeps() });
+        const writeResult = await client.callTool({
+            name: 'attachment_write',
+            arguments: {
+                attachment_path: 'Attachments/test.bin',
+                content_base64: content.toString('base64'),
+                reason: 'end-to-end attachment write',
+            },
+        });
+        expect(writeResult.isError).toBeFalsy();
+
+        const readResult = await client.callTool({
+            name: 'attachment_read',
+            arguments: { attachment_path: 'Attachments/test.bin', reason: 'end-to-end attachment read' },
+        });
+
+        expect(readResult.isError).toBeFalsy();
+        const parsed = JSON.parse(readResult.content[0].text);
+        expect(Buffer.from(parsed.content_base64, 'base64').equals(content)).toBe(true);
     });
 
     it('rejects a tool call missing the required reason argument', async () => {

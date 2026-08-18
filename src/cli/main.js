@@ -2,11 +2,13 @@
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { readFileSync, realpathSync, existsSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { search, explainSearch } from '../core/search.js';
 import { grep } from '../core/grep.js';
 import { tagList, tagNotes } from '../core/tags.js';
 import { getBrokenLinks } from '../core/links.js';
 import { noteRead, noteWrite, noteEdit, noteAppend, noteRename } from '../core/notes.js';
+import { readAttachment, writeAttachment, resolveAttachmentPath } from '../core/attachments.js';
 import { titleToPath, resolveTitle } from '../core/note-fs.js';
 import { logAudit, getAuditLogger, defaultLogDir } from '../logger.js';
 import { openDb } from '../core/db.js';
@@ -47,6 +49,7 @@ Commands:
   edit      Surgically replace text in an existing note
   append    Append content to an existing note
   rename    Rename a note
+  attachment  read <path> | write <path> <local-file>
   reindex   Trigger a reindex via the indexing daemon
   daemon    start | stop | restart the indexing daemon
   stats     Show index/daemon stats
@@ -72,6 +75,11 @@ const COMMAND_USAGE = {
         + '       (<title> must be the exact absolute title — as returned by read/search — no resolution)',
     rename: 'mnotes rename <old-title> <new-title> [--hash=H]\n'
         + '       (both titles must be exact absolute titles — as returned by read/search — no resolution)',
+    attachment: 'mnotes attachment read <path> [--raw] [--metadata|--json]\n'
+        + '       mnotes attachment write <path> [local-file]\n'
+        + '       (content is read from stdin if local-file is omitted)\n'
+        + '       (<path> is the exact vault-relative path — no resolution; default read action opens\n'
+        + '       the file via the OS default app)',
     reindex: 'mnotes reindex [title]',
     daemon: 'mnotes daemon <start|stop|restart>',
     stats: 'mnotes stats [--json]',
@@ -331,12 +339,16 @@ export async function runRead(args, deps) {
 
 registerCommand('read', runRead);
 
-export async function readStdinContent(stream) {
+export async function readStdinBytes(stream) {
     const chunks = [];
     for await (const chunk of stream) {
         chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
     }
-    return Buffer.concat(chunks).toString('utf8');
+    return Buffer.concat(chunks);
+}
+
+export async function readStdinContent(stream) {
+    return (await readStdinBytes(stream)).toString('utf8');
 }
 
 export function parseMetadataFlag(raw) {
@@ -462,6 +474,75 @@ export async function runRename(args, deps) {
 }
 
 registerCommand('rename', runRename);
+
+function defaultOpenAttachment(filePath) {
+    spawn('open', [ filePath ], { detached: true, stdio: 'ignore' }).unref();
+}
+
+export async function runAttachmentRead(args, deps) {
+    const { values, positionals } = parseArgs({
+        args,
+        allowPositionals: true,
+        options: {
+            raw: { type: 'boolean', default: false },
+            metadata: { type: 'boolean', default: false },
+            json: { type: 'boolean', default: false },
+        },
+    });
+    const path = positionals[0];
+    const { attachments: attachmentsConfig } = resolveConfig(deps);
+
+    if (values.metadata || values.json) {
+        const result = readAttachment(deps.vaultRoot, path, { includeContent: false });
+        return { stdout: formatJson(result), stderr: '', exitCode: 0 };
+    }
+
+    if (values.raw) {
+        const result = readAttachment(deps.vaultRoot, path, {
+            includeContent: true, maxReadBytes: attachmentsConfig.max_read_bytes,
+        });
+        return { stdout: result.content, stderr: '', exitCode: 0 };
+    }
+
+    const filePath = resolveAttachmentPath(deps.vaultRoot, path);
+    (deps.openAttachment ?? defaultOpenAttachment)(filePath);
+    return { stdout: `opened ${path}\n`, stderr: '', exitCode: 0 };
+}
+
+export async function runAttachmentWrite(args, deps) {
+    const { positionals } = parseArgs({ args, allowPositionals: true, options: {} });
+    const [ path, localFile ] = positionals;
+
+    try {
+        const buffer = localFile !== undefined
+            ? readFileSync(localFile)
+            : await readStdinBytes(deps.stdin ?? process.stdin);
+        const result = writeAttachment(deps.vaultRoot, path, buffer);
+        logAudit(deps.auditLogger, {
+            tool: 'attachment_write', attachmentPath: path, source: 'cli', outcome: 'success',
+        });
+        return { stdout: formatJson(result), stderr: '', exitCode: 0 };
+    } catch (err) {
+        logAudit(deps.auditLogger, {
+            tool: 'attachment_write', attachmentPath: path, source: 'cli', outcome: 'error',
+            errorMessage: err.message,
+        });
+        throw err;
+    }
+}
+
+export async function runAttachment(args, deps) {
+    const [ sub, ...rest ] = args;
+    if (sub === 'read') {
+        return runAttachmentRead(rest, deps);
+    }
+    if (sub === 'write') {
+        return runAttachmentWrite(rest, deps);
+    }
+    return { stdout: '', stderr: `mnotes: unknown attachment subcommand "${sub}"\n`, exitCode: 1 };
+}
+
+registerCommand('attachment', runAttachment);
 
 export async function runStats(args, deps) {
     const { values } = parseArgs({ args, options: { json: { type: 'boolean', default: false } } });

@@ -2,15 +2,15 @@
 
 Status: **Approved**
 Owns: `src/mcp/server.js`, `src/mcp/tools.js`, `src/mcp/prompts.js` (stub only — see Prompts)
-Depends on: `S001-data-model`, `S002-search`, `S003-notes`, `S004-grep-tags`
+Depends on: `S001-data-model`, `S002-search`, `S003-notes`, `S004-grep-tags`, `S012-attachments`
 Consumed by: Claude Code / Claude Desktop
 
 ## Purpose
 
 Defines the finalized MCP tool set (superseding the README's tool section, which this spec brings up
 to date with decisions made in S002/S003: `note_rename` is new, `note_edit` gains `metadata`, `search`
-gains `limit`), server bootstrap, and how `core/` errors map to MCP tool responses. Prompts are
-explicitly out of scope — see below.
+gains `limit`; S012 adds `attachment_read`/`attachment_write`), server bootstrap, and how `core/`
+errors map to MCP tool responses. Prompts are explicitly out of scope — see below.
 
 ## Transport
 
@@ -50,10 +50,11 @@ Two response shapes, chosen per tool for token efficiency (per the README's desi
   repetition across rows. This is deliberately **not JSON**: a JSON array of objects repeats every
   field name once per row, which is pure token overhead for tabular data Claude is going to scan down
   a column at a time anyway — the header row already documents the shape once.
-- **Structured JSON** for `note_read` and the four mutating tools (`note_write`, `note_edit`,
-  `note_append`, `note_rename`) — content and metadata are unconstrained text that could collide with
-  any plain-text delimiter scheme, so JSON's escaping is load-bearing there in a way it isn't for
-  tabular rank/count/line-number data.
+- **Structured JSON** for `note_read`, the four mutating note tools (`note_write`, `note_edit`,
+  `note_append`, `note_rename`), and both attachment tools (`attachment_read`, `attachment_write`,
+  S012) — content and metadata are unconstrained text (or, for attachments, base64-encoded binary) that
+  could collide with any plain-text delimiter scheme, so JSON's escaping is load-bearing there in a way
+  it isn't for tabular rank/count/line-number data.
 
 ## Tool set
 
@@ -180,6 +181,33 @@ synchronously inside the call, no separate tool or follow-up action needed. That
 internal matching against *other* notes' link text is basename-aware (S003/S011); `old_title`/
 `new_title` themselves are not — both require the exact absolute title, same as every other mutating
 tool, no resolution fallback (S003/S010).
+
+### `attachment_read` (new — S012)
+
+**Input**: `attachment_path<string>`, `?include_content<bool>=true`, `reason<string>`.
+**Output**: `{ path, size_bytes, mime_type, content_base64 }` (`content_base64` omitted when
+`include_content: false`).
+
+Reads a binary vault file that isn't a note — an image, PDF, or other attachment a note references via
+`![[...]]`/a markdown link. **No index backs this tool** (S012), so `attachment_path` requires the
+exact vault-relative path with no short-form/basename resolution — unlike `note_read`'s `note_title`,
+there's no fallback here at all, not even on the read side. The tool description states this plainly:
+*"attachment_path must be the exact vault-relative path, as it appears in the note's reference — there
+is no short-form or basename resolution for attachments, unlike note_title."*
+
+`content_base64` is capped by a config-backed size limit (S009's `[attachments].max_read_bytes`) — a
+file over the cap with `include_content: true` (the default) is a hard error naming the cap and
+directing the caller to retry with `include_content: false` for metadata only.
+
+### `attachment_write` (new — S012)
+
+**Input**: `attachment_path<string>`, `content_base64<string>`, `reason<string>`.
+**Output**: `{ path, size_bytes, mime_type }`.
+
+Create-or-overwrite, unconditional — **no hash guard** (S012: CLAUDE.md's hash-guard rule is scoped to
+notes' diffable text content, which binary attachments have no equivalent of). Same exact-path
+requirement as `attachment_read`, same vault-containment check every path-taking tool in this project
+already has (S010's `resolveVaultPath`).
 
 ## Prompts — explicitly out of scope here
 

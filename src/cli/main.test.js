@@ -6,6 +6,7 @@ import { Readable } from 'node:stream';
 import {
     main, dispatch, resolveVaultRoot, resolveDbPath, registerCommand, runSearch, runGrep, runTags,
     runLinks, runRead, runWrite, runEdit, runAppend, runRename, runStats,
+    runAttachment, runAttachmentRead, runAttachmentWrite,
 } from './main.js';
 import { openDb } from '../core/db.js';
 import { syncNoteTags } from '../core/tags.js';
@@ -718,6 +719,140 @@ describe('runRename', () => {
             expect(line).toMatch(/error_message=".*already exists.*"/i);
         });
         db.close();
+    });
+});
+
+function writeAttachmentFixture(vaultRoot, relPath, buffer) {
+    const filePath = join(vaultRoot, relPath);
+    mkdirSync(dirname(filePath), { recursive: true });
+    writeFileSync(filePath, buffer);
+    return filePath;
+}
+
+describe('runAttachmentRead', () => {
+    it('default mode: shells out to the injected openAttachment with the resolved absolute path', async () => {
+        const vaultRoot = makeTempVault();
+        const filePath = writeAttachmentFixture(vaultRoot, 'Attachments/receipt.pdf', Buffer.from('pdf bytes'));
+        const openAttachment = vi.fn();
+
+        const result = await runAttachmentRead(
+            [ 'Attachments/receipt.pdf' ], { vaultRoot, openAttachment },
+        );
+
+        expect(openAttachment).toHaveBeenCalledWith(filePath);
+        expect(result.stdout).toBe('opened Attachments/receipt.pdf\n');
+        expect(result.exitCode).toBe(0);
+    });
+
+    it('--raw: streams the exact file bytes to stdout', async () => {
+        const vaultRoot = makeTempVault();
+        const content = Buffer.from('exact raw bytes');
+        writeAttachmentFixture(vaultRoot, 'Attachments/receipt.pdf', content);
+
+        const result = await runAttachmentRead([ 'Attachments/receipt.pdf', '--raw' ], { vaultRoot });
+
+        expect(Buffer.isBuffer(result.stdout)).toBe(true);
+        expect(result.stdout.equals(content)).toBe(true);
+    });
+
+    it('--metadata: prints { path, size_bytes, mime_type } with no bytes', async () => {
+        const vaultRoot = makeTempVault();
+        writeAttachmentFixture(vaultRoot, 'Attachments/receipt.pdf', Buffer.from('pdf bytes'));
+
+        const result = await runAttachmentRead([ 'Attachments/receipt.pdf', '--metadata' ], { vaultRoot });
+
+        const parsed = JSON.parse(result.stdout);
+        expect(parsed).toEqual({
+            path: 'Attachments/receipt.pdf', size_bytes: 9, mime_type: 'application/pdf',
+        });
+    });
+
+    it('--json is an alias for --metadata', async () => {
+        const vaultRoot = makeTempVault();
+        writeAttachmentFixture(vaultRoot, 'Attachments/receipt.pdf', Buffer.from('pdf bytes'));
+
+        const result = await runAttachmentRead([ 'Attachments/receipt.pdf', '--json' ], { vaultRoot });
+
+        expect(JSON.parse(result.stdout).mime_type).toBe('application/pdf');
+    });
+
+    it('a missing attachment produces a descriptive error via dispatch', async () => {
+        const vaultRoot = makeTempVault();
+
+        const result = await dispatch(
+            [ 'attachment', 'read', 'Attachments/missing.pdf' ], { vaultRoot },
+        );
+
+        expect(result.exitCode).toBe(1);
+        expect(result.stderr).toMatch(/not found/i);
+    });
+});
+
+describe('runAttachmentWrite', () => {
+    it('reads a local file and writes it into the vault, logging a success audit entry', async () => {
+        const vaultRoot = makeTempVault();
+        const localDir = makeTempVault();
+        const localFile = join(localDir, 'source.png');
+        writeFileSync(localFile, Buffer.from('local image bytes'));
+        const logDir = makeTempVault();
+        const auditLogger = getAuditLogger(logDir);
+
+        const result = await runAttachmentWrite(
+            [ 'Attachments/logo.png', localFile ], { vaultRoot, auditLogger },
+        );
+
+        expect(result.exitCode).toBe(0);
+        const parsed = JSON.parse(result.stdout);
+        expect(parsed).toEqual({
+            path: 'Attachments/logo.png', size_bytes: 17, mime_type: 'image/png',
+        });
+
+        await vi.waitFor(() => {
+            const line = readAuditLog(join(logDir, 'audit.log'), 'utf8').trim();
+            expect(line).toContain('INFO  [audit] attachment_write');
+            expect(line).toContain('attachment_path="Attachments/logo.png"');
+            expect(line).toContain('source=cli');
+            expect(line).toContain('outcome=success');
+        });
+    });
+
+    it('reads bytes from stdin when local-file is omitted', async () => {
+        const vaultRoot = makeTempVault();
+        const auditLogger = getAuditLogger(makeTempVault());
+        const content = Buffer.from([ 0x89, 0x50, 0x4e, 0x47, 0x00, 0x01 ]); // binary, not valid utf8
+
+        const result = await runAttachmentWrite(
+            [ 'Attachments/piped.png' ], { vaultRoot, auditLogger, stdin: Readable.from([ content ]) },
+        );
+
+        expect(result.exitCode).toBe(0);
+        expect(JSON.parse(result.stdout).size_bytes).toBe(6);
+        const written = readAuditLog(join(vaultRoot, 'Attachments/piped.png'));
+        expect(written.equals(content)).toBe(true);
+    });
+
+    it('overwrites an existing attachment unconditionally, no hash flag involved', async () => {
+        const vaultRoot = makeTempVault();
+        writeAttachmentFixture(vaultRoot, 'Attachments/logo.png', Buffer.from('old bytes'));
+        const localDir = makeTempVault();
+        const localFile = join(localDir, 'source.png');
+        writeFileSync(localFile, Buffer.from('new bytes'));
+        const auditLogger = getAuditLogger(makeTempVault());
+
+        const result = await runAttachmentWrite(
+            [ 'Attachments/logo.png', localFile ], { vaultRoot, auditLogger },
+        );
+
+        expect(result.exitCode).toBe(0);
+        expect(readAuditLog(join(vaultRoot, 'Attachments/logo.png'), 'utf8')).toBe('new bytes');
+    });
+});
+
+describe('runAttachment dispatcher', () => {
+    it('routes "read"/"write" to their handlers and errors on an unknown subcommand', async () => {
+        const result = await runAttachment([ 'bogus' ], {});
+        expect(result.exitCode).toBe(1);
+        expect(result.stderr).toMatch(/unknown attachment subcommand "bogus"/);
     });
 });
 

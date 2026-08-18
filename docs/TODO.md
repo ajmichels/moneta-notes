@@ -4,7 +4,6 @@
   of the index
 - Seems like there should be some kind of "re-install" mechanism to pick up changes that might occur
   as a result of pulling the latest changes from the repo
-- add tools for fetching and putting attachments
 
 ## Future Features
 
