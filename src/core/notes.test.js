@@ -921,8 +921,10 @@ describe('noteRename with db write-through', () => {
         const noteId = db.prepare('SELECT id FROM notes WHERE path = ?').get(path).id;
         db.prepare('INSERT INTO notes_fts (rowid, title, body) VALUES (?, ?, ?)').run(noteId, title, body);
         db.prepare(`
-            INSERT INTO chunks (note_id, chunk_index, char_start, char_end, token_count, embedding_model, embedding_version)
-            VALUES (?, 0, 0, 10, 5, 'test-model', 'v1')
+            INSERT INTO chunks
+                (note_id, chunk_index, char_start, char_end, line_start, line_end, token_count,
+                 embedding_model, embedding_version)
+            VALUES (?, 0, 0, 10, 1, 1, 5, 'test-model', 'v1')
         `).run(noteId);
         const chunkId = db.prepare('SELECT id FROM chunks WHERE note_id = ?').get(noteId).id;
         const vector = new Float32Array(1024).fill(0.5);

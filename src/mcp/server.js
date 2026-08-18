@@ -46,7 +46,11 @@ export function assertSchemaCurrent(dbPath) {
 
 const SEARCH_DESCRIPTION = 'Full-text, semantic, or hybrid search over the vault. FTS5 query syntax '
     + '(AND/OR/NOT, "phrase", word*, NEAR) is live in both fulltext and hybrid mode — a malformed '
-    + 'expression is a hard error in either mode, not just fulltext.';
+    + 'expression is a hard error in either mode, not just fulltext. In semantic mode, and in hybrid '
+    + 'mode for results that matched via the semantic side, results also include chunk_line_start/ '
+    + 'chunk_line_end — the line span (within the note body) of the specific passage that matched, '
+    + 'not the whole note. Pass these straight through as note_read\'s start_line/end_line to fetch '
+    + 'just that slice of a large note instead of reading it in full.';
 
 const TOOL_DEFS = [
     {

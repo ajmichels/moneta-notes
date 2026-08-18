@@ -37,7 +37,7 @@ describe('chunkText: short body (single chunk)', () => {
         const chunks = chunkText(body, fakeTokenizeWithOffsets, { chunkSize: 10, overlapTokens: 3 });
 
         expect(chunks).toEqual([
-            { chunkIndex: 0, charStart: 0, charEnd: body.length, tokenCount: 5 },
+            { chunkIndex: 0, charStart: 0, charEnd: body.length, lineStart: 1, lineEnd: 1, tokenCount: 5 },
         ]);
     });
 
@@ -48,7 +48,20 @@ describe('chunkText: short body (single chunk)', () => {
         const chunks = chunkText(body, fakeTokenizeWithOffsets, { chunkSize: 10, overlapTokens: 3 });
 
         expect(chunks).toEqual([
-            { chunkIndex: 0, charStart: tokens[0].start, charEnd: tokens[9].end, tokenCount: 10 },
+            {
+                chunkIndex: 0, charStart: tokens[0].start, charEnd: tokens[9].end,
+                lineStart: 1, lineEnd: 1, tokenCount: 10,
+            },
+        ]);
+    });
+
+    it('returns one chunk spanning multiple lines, lineEnd matching the last line', () => {
+        const body = 'the quick brown\nfox jumps over\nthe lazy dog';
+
+        const chunks = chunkText(body, fakeTokenizeWithOffsets, { chunkSize: 10, overlapTokens: 3 });
+
+        expect(chunks).toEqual([
+            { chunkIndex: 0, charStart: 0, charEnd: body.length, lineStart: 1, lineEnd: 3, tokenCount: 9 },
         ]);
     });
 
@@ -67,13 +80,16 @@ describe('chunkText: long body (sliding window with overlap)', () => {
         expect(chunks.map((c) => c.chunkIndex)).toEqual([ 0, 1, 2, 3 ]);
         expect(chunks.map((c) => c.tokenCount)).toEqual([ 10, 10, 10, 4 ]);
         expect(chunks[0]).toEqual({
-            chunkIndex: 0, charStart: tokens[0].start, charEnd: tokens[9].end, tokenCount: 10,
+            chunkIndex: 0, charStart: tokens[0].start, charEnd: tokens[9].end,
+            lineStart: 1, lineEnd: 1, tokenCount: 10,
         });
         expect(chunks[1]).toEqual({
-            chunkIndex: 1, charStart: tokens[7].start, charEnd: tokens[16].end, tokenCount: 10,
+            chunkIndex: 1, charStart: tokens[7].start, charEnd: tokens[16].end,
+            lineStart: 1, lineEnd: 1, tokenCount: 10,
         });
         expect(chunks[3]).toEqual({
-            chunkIndex: 3, charStart: tokens[21].start, charEnd: tokens[24].end, tokenCount: 4,
+            chunkIndex: 3, charStart: tokens[21].start, charEnd: tokens[24].end,
+            lineStart: 1, lineEnd: 1, tokenCount: 4,
         });
     });
 
@@ -85,6 +101,55 @@ describe('chunkText: long body (sliding window with overlap)', () => {
         for (const chunk of chunks) {
             expect(chunk.tokenCount).toBeGreaterThan(0);
         }
+    });
+
+    it('assigns each chunk its correct line span across a multi-line body', () => {
+        const words = Array.from({ length: 25 }, (_, i) => `w${i}`);
+        const lines = Array.from({ length: 5 }, (_, i) => words.slice(i * 5, i * 5 + 5).join(' '));
+        const body = lines.join('\n');
+        const tokens = fakeTokenizeWithOffsets(body);
+
+        const chunks = chunkText(body, fakeTokenizeWithOffsets, { chunkSize: 10, overlapTokens: 3 });
+
+        // tokens 0-4 on line 1, 5-9 on line 2, 10-14 on line 3, 15-19 on line 4, 20-24 on line 5.
+        expect(chunks[0]).toEqual({
+            chunkIndex: 0, charStart: tokens[0].start, charEnd: tokens[9].end,
+            lineStart: 1, lineEnd: 2, tokenCount: 10,
+        });
+        expect(chunks[1]).toEqual({
+            chunkIndex: 1, charStart: tokens[7].start, charEnd: tokens[16].end,
+            lineStart: 2, lineEnd: 4, tokenCount: 10,
+        });
+        // Chunk 2's charStart (token 14, line 3) falls *before* chunk 1's charEnd (token 16, line
+        // 4) due to overlap — regression check for a line-finder cursor that doesn't rewind
+        // between chunks and would otherwise carry chunk 1's line-4 position into this lookup.
+        expect(chunks[2]).toEqual({
+            chunkIndex: 2, charStart: tokens[14].start, charEnd: tokens[23].end,
+            lineStart: 3, lineEnd: 5, tokenCount: 10,
+        });
+        expect(chunks[3]).toEqual({
+            chunkIndex: 3, charStart: tokens[21].start, charEnd: tokens[24].end,
+            lineStart: 5, lineEnd: 5, tokenCount: 4,
+        });
+    });
+
+    it('assigns the line containing the character immediately before a newline chunk boundary', () => {
+        // Each line is exactly one token, so chunk boundaries land right at line boundaries.
+        const body = 'w0\nw1\nw2\nw3';
+        const tokens = fakeTokenizeWithOffsets(body);
+
+        const chunks = chunkText(body, fakeTokenizeWithOffsets, { chunkSize: 2, overlapTokens: 0 });
+
+        expect(chunks).toEqual([
+            {
+                chunkIndex: 0, charStart: tokens[0].start, charEnd: tokens[1].end,
+                lineStart: 1, lineEnd: 2, tokenCount: 2,
+            },
+            {
+                chunkIndex: 1, charStart: tokens[2].start, charEnd: tokens[3].end,
+                lineStart: 3, lineEnd: 4, tokenCount: 2,
+            },
+        ]);
     });
 });
 

@@ -63,14 +63,18 @@ function replaceChunks(db, noteId, embeddedChunks, embeddingModel, embeddingVers
     db.prepare('DELETE FROM chunks WHERE note_id = ?').run(noteId);
 
     const insertChunk = db.prepare(`
-        INSERT INTO chunks (note_id, chunk_index, char_start, char_end, token_count, embedding_model, embedding_version)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO chunks (
+            note_id, chunk_index, char_start, char_end, line_start, line_end, token_count,
+            embedding_model, embedding_version
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const insertVector = db.prepare('INSERT INTO chunk_vectors (rowid, embedding) VALUES (CAST(? AS INTEGER), ?)');
 
     for (const chunk of embeddedChunks) {
         const { lastInsertRowid: chunkId } = insertChunk.run(
-            noteId, chunk.chunkIndex, chunk.charStart, chunk.charEnd, chunk.tokenCount,
+            noteId, chunk.chunkIndex, chunk.charStart, chunk.charEnd,
+            chunk.lineStart, chunk.lineEnd, chunk.tokenCount,
             embeddingModel, embeddingVersion,
         );
         insertVector.run(chunkId, Buffer.from(chunk.vector.buffer));

@@ -163,6 +163,16 @@ excluded — matches S001's `chunks.char_start`/`char_end` being offsets into th
   since the chunk's text itself is never persisted (S001) — it's re-derived from the vault file by
   slicing `body[char_start:char_end]` whenever needed again (re-embedding, CLI `--explain` debug
   output).
+- `char_start`/`char_end` are also converted to `line_start`/`line_end` (S001) at this same point —
+  counting newlines in `body` up to each offset, 1-indexed, `line_end` computed from `char_end - 1`
+  (since `char_end` itself is exclusive). This reuses the `body` string the chunker already holds in
+  memory; no separate file read. Both `charStart` and `charEnd` increase monotonically chunk-to-chunk
+  (per the sliding window above — `windowStart` and therefore `windowEnd` only ever grow), so each can
+  be resolved to a line via its own forward-only pointer walk over `body`'s newline positions, one pass
+  each rather than rescanning from the start every time. **The two pointers must stay separate**:
+  overlap means a *later* chunk's `charStart` routinely falls before an *earlier* chunk's `charEnd`, so
+  a single pointer fed both interleaved would see a non-monotonic sequence and undercount lines for
+  the later chunk.
 
 ## Embedding pipeline lifecycle
 

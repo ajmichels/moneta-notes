@@ -98,8 +98,9 @@ describe('schema: chunks table', () => {
 
         db.prepare(`
             INSERT INTO chunks
-                (note_id, chunk_index, char_start, char_end, token_count, embedding_model, embedding_version)
-            VALUES (?, 0, 0, 100, 50, ?, ?)
+                (note_id, chunk_index, char_start, char_end, line_start, line_end, token_count,
+                 embedding_model, embedding_version)
+            VALUES (?, 0, 0, 100, 1, 5, 50, ?, ?)
         `).run(noteId, 'Qwen3-Embedding-0.6B', 'v1');
 
         db.prepare('DELETE FROM notes WHERE id = ?').run(noteId);
@@ -118,15 +119,17 @@ describe('schema: chunks table', () => {
 
         db.prepare(`
             INSERT INTO chunks
-                (note_id, chunk_index, char_start, char_end, token_count, embedding_model, embedding_version)
-            VALUES (?, 0, 0, 100, 50, ?, ?)
+                (note_id, chunk_index, char_start, char_end, line_start, line_end, token_count,
+                 embedding_model, embedding_version)
+            VALUES (?, 0, 0, 100, 1, 5, 50, ?, ?)
         `).run(noteId, 'Qwen3-Embedding-0.6B', 'v1');
 
         expect(() => {
             db.prepare(`
                 INSERT INTO chunks
-                    (note_id, chunk_index, char_start, char_end, token_count, embedding_model, embedding_version)
-                VALUES (?, 0, 100, 200, 50, ?, ?)
+                    (note_id, chunk_index, char_start, char_end, line_start, line_end, token_count,
+                     embedding_model, embedding_version)
+                VALUES (?, 0, 100, 200, 6, 10, 50, ?, ?)
             `).run(noteId, 'Qwen3-Embedding-0.6B', 'v1');
         }).toThrow();
         db.close();
@@ -143,8 +146,9 @@ describe('schema: chunk_vectors table', () => {
 
         db.prepare(`
             INSERT INTO chunks
-                (note_id, chunk_index, char_start, char_end, token_count, embedding_model, embedding_version)
-            VALUES (?, 0, 0, 100, 50, ?, ?)
+                (note_id, chunk_index, char_start, char_end, line_start, line_end, token_count,
+                 embedding_model, embedding_version)
+            VALUES (?, 0, 0, 100, 1, 5, 50, ?, ?)
         `).run(noteId, 'Qwen3-Embedding-0.6B', 'v1');
         const chunkId = db.prepare('SELECT id FROM chunks WHERE note_id = ?').get(noteId).id;
 

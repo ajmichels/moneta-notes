@@ -77,13 +77,27 @@ describe('formatSearchTable', () => {
         expect(text).toBe('note_title|file_line_count\nA|5\n');
     });
 
-    it('includes fulltext_rank/semantic_rank columns for hybrid mode, even with a null rank', () => {
+    it('includes fulltext_rank/semantic_rank/chunk_line columns for hybrid mode, even with null values', () => {
         const text = formatSearchTable(
-            [ { note_title: 'A', file_line_count: 5, fulltext_rank: 1, semantic_rank: null } ],
+            [ {
+                note_title: 'A', file_line_count: 5, fulltext_rank: 1, semantic_rank: null,
+                chunk_line_start: null, chunk_line_end: null,
+            } ],
             'hybrid',
         );
 
-        expect(text).toBe('note_title|file_line_count|fulltext_rank|semantic_rank\nA|5|1|\n');
+        expect(text).toBe(
+            'note_title|file_line_count|fulltext_rank|semantic_rank|chunk_line_start|chunk_line_end\nA|5|1|||\n',
+        );
+    });
+
+    it('includes chunk_line_start/chunk_line_end columns for semantic mode', () => {
+        const text = formatSearchTable(
+            [ { note_title: 'A', file_line_count: 5, chunk_line_start: 12, chunk_line_end: 18 } ],
+            'semantic',
+        );
+
+        expect(text).toBe('note_title|file_line_count|chunk_line_start|chunk_line_end\nA|5|12|18\n');
     });
 
     it('aligns columns when align is true', () => {
@@ -109,17 +123,16 @@ describe('formatExplain', () => {
         expect(text).toContain('1    | A          | 10              | -1.2');
     });
 
-    it('renders a cosine + chunk-window row for semantic mode', () => {
+    it('renders a cosine + chunk-window row (line span and char offsets) for semantic mode', () => {
         const text = formatExplain({
             results: [ {
                 note_title: 'A', file_line_count: 10, cosine_distance: 0.01,
-                winning_chunk: { char_start: 0, char_end: 100 }, rank: 1,
+                winning_chunk: { char_start: 0, char_end: 100, line_start: 1, line_end: 5 }, rank: 1,
             } ],
             pipeline: { mode: 'semantic', limit: 20, overfetchLimit: 100, fulltextExpression: 'x' },
         });
         expect(text).toContain('rank | note_title | file_line_count | cosine | chunk');
-        expect(text).toContain('---- | ---------- | --------------- | ------ | -------');
-        expect(text).toContain('1    | A          | 10              | 0.01   | [0:100]');
+        expect(text).toContain('1    | A          | 10              | 0.01   | L1-5 [0:100]');
     });
 
     it('renders the rrf formula for hybrid mode', () => {

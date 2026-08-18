@@ -31,11 +31,17 @@ export function formatTable(columns, rows, { align = false } = {}) {
     return `${[ renderRow(columns), separator, ...lines ].join('\n')}\n`;
 }
 
+const SEARCH_COLUMNS = {
+    fulltext: [ 'note_title', 'file_line_count' ],
+    semantic: [ 'note_title', 'file_line_count', 'chunk_line_start', 'chunk_line_end' ],
+    hybrid: [
+        'note_title', 'file_line_count', 'fulltext_rank', 'semantic_rank',
+        'chunk_line_start', 'chunk_line_end',
+    ],
+};
+
 export function formatSearchTable(results, mode, { align = false } = {}) {
-    const columns = mode === 'hybrid'
-        ? [ 'note_title', 'file_line_count', 'fulltext_rank', 'semantic_rank' ]
-        : [ 'note_title', 'file_line_count' ];
-    return formatTable(columns, results, { align });
+    return formatTable(SEARCH_COLUMNS[mode], results, { align });
 }
 
 const EXPLAIN_COLUMNS = {
@@ -49,9 +55,10 @@ function formatExplainRow(r, rank, mode) {
         return { rank, note_title: r.note_title, file_line_count: r.file_line_count, bm25: r.bm25_score };
     }
     if (mode === 'semantic') {
+        const { char_start: charStart, char_end: charEnd, line_start: lineStart, line_end: lineEnd } = r.winning_chunk;
         return {
             rank, note_title: r.note_title, file_line_count: r.file_line_count,
-            cosine: r.cosine_distance, chunk: `[${r.winning_chunk.char_start}:${r.winning_chunk.char_end}]`,
+            cosine: r.cosine_distance, chunk: `L${lineStart}-${lineEnd} [${charStart}:${charEnd}]`,
         };
     }
     return {

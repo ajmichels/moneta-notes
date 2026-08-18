@@ -4,6 +4,23 @@ import { getContextLogger } from '../logger.js';
 const DEFAULT_CHUNK_SIZE = 512;
 const DEFAULT_OVERLAP_TOKENS = 77;
 
+// Finds the 1-indexed line number containing `charOffset`, given `newlineOffsets` (the char index
+// of every '\n' in the body, ascending) and a forward-only cursor into that list. Only safe to call
+// with a non-decreasing sequence of `charOffset`s — the cursor never rewinds. `chunkText` below
+// satisfies this with two separate finders (one fed only chunks' charStart, one only charEnd):
+// windowStart, and therefore windowEnd, both increase monotonically chunk-to-chunk (the sliding
+// window's overlap only makes a *later* chunk's charStart fall before an *earlier* chunk's charEnd
+// — a single finder fed both interleaved would see a decreasing sequence and undercount).
+function makeLineFinder(newlineOffsets) {
+    let cursor = 0;
+    return (charOffset) => {
+        while (cursor < newlineOffsets.length && newlineOffsets[cursor] < charOffset) {
+            cursor += 1;
+        }
+        return cursor + 1;
+    };
+}
+
 export function chunkText(body, tokenizeWithOffsets, options = {}) {
     const { chunkSize = DEFAULT_CHUNK_SIZE, overlapTokens = DEFAULT_OVERLAP_TOKENS } = options;
     const tokens = tokenizeWithOffsets(body);
@@ -12,6 +29,10 @@ export function chunkText(body, tokenizeWithOffsets, options = {}) {
         return [];
     }
 
+    const newlineOffsets = [ ...body.matchAll(/\n/g) ].map((m) => m.index);
+    const lineAtStart = makeLineFinder(newlineOffsets);
+    const lineAtEnd = makeLineFinder(newlineOffsets);
+
     const chunks = [];
     const step = chunkSize - overlapTokens;
     let windowStart = 0;
@@ -19,10 +40,14 @@ export function chunkText(body, tokenizeWithOffsets, options = {}) {
 
     while (windowStart < tokens.length) {
         const windowEnd = Math.min(windowStart + chunkSize, tokens.length);
+        const charStart = tokens[windowStart].start;
+        const charEnd = tokens[windowEnd - 1].end;
         chunks.push({
             chunkIndex,
-            charStart: tokens[windowStart].start,
-            charEnd: tokens[windowEnd - 1].end,
+            charStart,
+            charEnd,
+            lineStart: lineAtStart(charStart),
+            lineEnd: lineAtEnd(charEnd - 1),
             tokenCount: windowEnd - windowStart,
         });
         chunkIndex += 1;

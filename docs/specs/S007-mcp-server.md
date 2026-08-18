@@ -63,8 +63,16 @@ Every tool takes `reason<string>` (required) — logged per S008, not used to ga
 
 **Input**: `query<string>`, `?mode<fulltext|semantic|hybrid>=hybrid`, `?limit<int>=20` (max `100`,
 both config-backed per S002), `reason<string>`.
-**Output**: `note_title`, `file_line_count`, `?fulltext_rank`, `?semantic_rank` (rank position only,
-never raw scores — CLAUDE.md).
+**Output**: `note_title`, `file_line_count`, `?fulltext_rank`, `?semantic_rank`, `?chunk_line_start`,
+`?chunk_line_end` (rank position only, never raw scores — CLAUDE.md).
+
+`chunk_line_start`/`chunk_line_end` (S001/S002) are present only when the result has a semantic-side
+match — always in `semantic` mode, and in `hybrid` mode only for notes that matched (at least partly)
+via the semantic side; absent for `fulltext` mode entirely and for any `hybrid` note that matched only
+via the fulltext side. They're 1-indexed line numbers into the note's body, in the same coordinate
+space `note_read`'s `start_line`/`end_line` accept — the tool description should tell Claude it can
+pass them straight through to a follow-up `note_read` call to fetch just the matching slice of a large
+note instead of reading the whole thing.
 
 Tool **description** must document (per S002) that FTS5 query syntax (`AND`/`OR`/`NOT`, `"phrase"`,
 `word*`, `NEAR`) is live in both `fulltext` and `hybrid` mode (not gated behind an opt-in), and that a

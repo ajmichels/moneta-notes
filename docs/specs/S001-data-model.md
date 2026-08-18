@@ -134,6 +134,8 @@ One row per embedding chunk. A note with N chunks has N rows here.
 | `chunk_index`       | INTEGER | NOT NULL                                      | 0-based position within the note. |
 | `char_start`        | INTEGER | NOT NULL                                      | Offset into the note body (chars), inclusive. |
 | `char_end`          | INTEGER | NOT NULL                                      | Offset into the note body (chars), exclusive. |
+| `line_start`        | INTEGER | NOT NULL                                      | 1-indexed line number (within the note body) containing `char_start`. |
+| `line_end`          | INTEGER | NOT NULL                                      | 1-indexed line number (within the note body) containing the chunk's last character (`char_end - 1`). |
 | `token_count`       | INTEGER | NOT NULL                                      | Token count of this chunk (target ~512, see S005 for the chunker itself). |
 | `embedding_model`   | TEXT    | NOT NULL                                      | e.g. `Qwen3-Embedding-0.6B`. |
 | `embedding_version` | TEXT    | NOT NULL                                      | Model/build version string, so a re-pull of the same model name with different weights is still detectable. |
@@ -155,6 +157,17 @@ Chunk **text** is never stored — only offsets. The chunk's actual content is r
 vault file (`body[char_start:char_end]`) whenever needed (e.g. re-embedding, `--explain` debug
 output). This keeps chunk bookkeeping from becoming a second copy of note content, consistent with
 the FTS5 contentless decision above.
+
+`line_start`/`line_end` are derived from `char_start`/`char_end` at chunk time (S005 already has the
+body text in hand when it computes the character offsets, so counting newlines up to those offsets is
+free — no extra file read). They deliberately use the **same coordinate space as `note_read`'s
+`start_line`/`end_line`** (S003): both count 1-indexed lines within the frontmatter-stripped body,
+*not* `grep`'s raw-file-including-frontmatter line numbers (S004) — those are a different convention
+for a different purpose (locating a match on disk vs. a line inside the body a chunk was computed
+over). This is what makes the pair directly usable together: a caller can take `chunk_line_start`/
+`chunk_line_end` off a `search` result (S002's semantic/hybrid best-chunk-wins collapse) and pass them
+straight through to `note_read`'s `start_line`/`end_line` to fetch just the matching slice of a large
+note, with no frontmatter-offset math of its own.
 
 ### `chunk_vectors` (sqlite-vec `vec0`)
 

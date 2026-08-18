@@ -56,8 +56,10 @@ describe('computeStats', () => {
         ).run('A.md', 'hash', 1, 1000, 1000);
         const noteId = db.prepare('SELECT id FROM notes WHERE path = ?').get('A.md').id;
         db.prepare(`
-            INSERT INTO chunks (note_id, chunk_index, char_start, char_end, token_count, embedding_model, embedding_version)
-            VALUES (?, 0, 0, 1, 1, 'old-model', 'v0')
+            INSERT INTO chunks
+                (note_id, chunk_index, char_start, char_end, line_start, line_end, token_count,
+                 embedding_model, embedding_version)
+            VALUES (?, 0, 0, 1, 1, 1, 1, 'old-model', 'v0')
         `).run(noteId);
 
         const stats = computeStats(db, dbPath, 'test-model', 'v1');

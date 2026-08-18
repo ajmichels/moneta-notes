@@ -23,12 +23,15 @@ function insertChunkWithVector(db, noteId, {
     seed,
     embeddingModel = 'test-model',
     embeddingVersion = 'v1',
+    lineStart = 1,
+    lineEnd = 1,
 }) {
     db.prepare(`
         INSERT INTO chunks
-            (note_id, chunk_index, char_start, char_end, token_count, embedding_model, embedding_version)
-        VALUES (?, ?, 0, 100, 50, ?, ?)
-    `).run(noteId, chunkIndex, embeddingModel, embeddingVersion);
+            (note_id, chunk_index, char_start, char_end, line_start, line_end, token_count,
+             embedding_model, embedding_version)
+        VALUES (?, ?, 0, 100, ?, ?, 50, ?, ?)
+    `).run(noteId, chunkIndex, lineStart, lineEnd, embeddingModel, embeddingVersion);
 
     const chunkId = db.prepare(
         'SELECT id FROM chunks WHERE note_id = ? AND chunk_index = ?',
@@ -149,6 +152,45 @@ describe('search: semantic mode', () => {
         db.close();
     });
 
+    it("includes the winning chunk's line span as chunk_line_start/chunk_line_end", async () => {
+        const { db } = openDb(':memory:');
+        const noteId = insertNote(db, { path: 'Lines.md' });
+        insertChunkWithVector(db, noteId, { seed: 0.5, lineStart: 12, lineEnd: 18 });
+
+        const results = await search(db, {
+            query: 'anything',
+            mode: 'semantic',
+            limit: 20,
+            embed: fakeEmbed(0.5),
+            embeddingModel: 'test-model',
+            embeddingVersion: 'v1',
+        });
+
+        expect(results[0].chunk_line_start).toBe(12);
+        expect(results[0].chunk_line_end).toBe(18);
+        db.close();
+    });
+
+    it("reports the winning (closest) chunk's line span, not another chunk's, on a multi-chunk note", async () => {
+        const { db } = openDb(':memory:');
+        const noteId = insertNote(db, { path: 'Multi.md' });
+        insertChunkWithVector(db, noteId, { chunkIndex: 0, seed: 0.9, lineStart: 1, lineEnd: 5 });
+        insertChunkWithVector(db, noteId, { chunkIndex: 1, seed: 0.5, lineStart: 40, lineEnd: 55 });
+
+        const results = await search(db, {
+            query: 'anything',
+            mode: 'semantic',
+            limit: 20,
+            embed: fakeEmbed(0.5),
+            embeddingModel: 'test-model',
+            embeddingVersion: 'v1',
+        });
+
+        expect(results[0].chunk_line_start).toBe(40);
+        expect(results[0].chunk_line_end).toBe(55);
+        db.close();
+    });
+
     it('excludes chunks from a stale embedding_model/version', async () => {
         const { db } = openDb(':memory:');
         const staleId = insertNote(db, { path: 'Stale.md' });
@@ -225,6 +267,28 @@ describe('search: hybrid mode', () => {
         expect(results[0].note_title).toBe('FulltextOnly');
         expect(results[0].fulltext_rank).toBe(1);
         expect(results[0].semantic_rank).toBeNull();
+        expect(results[0].chunk_line_start).toBeNull();
+        expect(results[0].chunk_line_end).toBeNull();
+        db.close();
+    });
+
+    it('includes chunk_line_start/chunk_line_end for a note that matched (partly) via the semantic side', async () => {
+        const { db } = openDb(':memory:');
+        const noteId = insertNote(db, { path: 'Both.md' });
+        insertFtsRow(db, noteId, 'Both', 'graph search');
+        insertChunkWithVector(db, noteId, { seed: 0.5, lineStart: 4, lineEnd: 9 });
+
+        const results = await search(db, {
+            query: 'graph',
+            mode: 'hybrid',
+            limit: 20,
+            embed: fakeEmbed(0.5),
+            embeddingModel: 'test-model',
+            embeddingVersion: 'v1',
+        });
+
+        expect(results[0].chunk_line_start).toBe(4);
+        expect(results[0].chunk_line_end).toBe(9);
         db.close();
     });
 
@@ -408,7 +472,7 @@ describe('explainSearch: semantic mode', () => {
         });
 
         expect(typeof results[0].cosine_distance).toBe('number');
-        expect(results[0].winning_chunk).toEqual({ char_start: 0, char_end: 100 });
+        expect(results[0].winning_chunk).toEqual({ char_start: 0, char_end: 100, line_start: 1, line_end: 1 });
         db.close();
     });
 });

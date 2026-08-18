@@ -23,7 +23,10 @@ afterEach(async () => {
 
 function baseDeps() {
     return {
-        chunkText: (body) => (body.length === 0 ? [] : [ { chunkIndex: 0, charStart: 0, charEnd: body.length, tokenCount: 1 } ]),
+        chunkText: (body) => (body.length === 0 ? [] : [ {
+            chunkIndex: 0, charStart: 0, charEnd: body.length,
+            lineStart: 1, lineEnd: body.split('\n').length, tokenCount: 1,
+        } ]),
         embed: async () => new Float32Array(1024).fill(0.1),
         embeddingModel: 'test-model',
         embeddingVersion: 'v1',

@@ -41,7 +41,10 @@ function writeNote(vaultRoot, relativePath, content, mtimeSec) {
 }
 
 function fakeChunkText(body) {
-    return body.length === 0 ? [] : [ { chunkIndex: 0, charStart: 0, charEnd: body.length, tokenCount: 1 } ];
+    return body.length === 0 ? [] : [ {
+        chunkIndex: 0, charStart: 0, charEnd: body.length,
+        lineStart: 1, lineEnd: body.split('\n').length, tokenCount: 1,
+    } ];
 }
 
 async function fakeEmbed() {
@@ -191,6 +194,26 @@ describe('processPath: content changed', () => {
         const linkRow = db.prepare('SELECT target_title FROM note_links WHERE source_note_id = ?')
             .get(note.id);
         expect(linkRow.target_title).toBe('Other Note');
+    });
+
+    it("persists each chunk's line_start/line_end alongside its char offsets", async () => {
+        const vaultRoot = makeTempVault();
+        const db = makeTestDb();
+        writeNote(vaultRoot, 'Lines.md', 'first line\nsecond line\nthird line', 1000);
+
+        const chunkTextWithLines = (body) => [
+            { chunkIndex: 0, charStart: 0, charEnd: 10, lineStart: 1, lineEnd: 1, tokenCount: 2 },
+            {
+                chunkIndex: 1, charStart: 11, charEnd: body.length,
+                lineStart: 2, lineEnd: 3, tokenCount: 4,
+            },
+        ];
+
+        await processPath(vaultRoot, db, 'Lines.md', { ...baseDeps(), chunkText: chunkTextWithLines });
+
+        const note = db.prepare('SELECT id FROM notes WHERE path = ?').get('Lines.md');
+        const chunkRows = db.prepare('SELECT * FROM chunks WHERE note_id = ? ORDER BY chunk_index').all(note.id);
+        expect(chunkRows.map((r) => [ r.line_start, r.line_end ])).toEqual([ [ 1, 1 ], [ 2, 3 ] ]);
     });
 
     it('replaces stale chunks/fts/tags/links rather than appending on a content change', async () => {

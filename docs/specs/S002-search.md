@@ -57,7 +57,9 @@ possibility in the default mode, not just an opt-in `fulltext` mode.
    across different embedding models is meaningless, not a degraded result, so there's nothing to
    surface to the caller here. Staleness is visible via `mnotes stats`, not search output.
 3. Collapse to one row per note: **best chunk wins** — keep each note's single lowest-distance chunk,
-   discard the rest. A note's semantic rank is its best chunk's rank among the collapsed list.
+   discard the rest. A note's semantic rank is its best chunk's rank among the collapsed list. The
+   winning chunk's `line_start`/`line_end` (S001) travel with it through the collapse and surface on
+   the note's result row as `chunk_line_start`/`chunk_line_end` — see "Output" below.
 
 The `limit × 5` (capped at `500`) over-fetch exists because multiple chunks from the same note can
 dominate the raw top-N chunk hits (e.g. three chunks of one long note outranking single chunks from
@@ -97,10 +99,27 @@ native ranking (BM25 ascending / cosine distance ascending after chunk collapse)
 
 ## Output
 
-Unchanged from the README's documented shape: `note_title`, `file_line_count`, and (in `hybrid` mode)
-`fulltext_rank` / `semantic_rank` — rank position only, never raw scores. `file_line_count` and
-`note_title` are read from the `notes` row (`line_count` column, `path` → title derivation per S010);
-no additional query needed beyond what's already fetched during ranking.
+`note_title`, `file_line_count`, and (in `hybrid` mode) `fulltext_rank` / `semantic_rank` — rank
+position only, never raw scores. `file_line_count` and `note_title` are read from the `notes` row
+(`line_count` column, `path` → title derivation per S010); no additional query needed beyond what's
+already fetched during ranking.
+
+**`chunk_line_start` / `chunk_line_end`** (added by this change): the winning chunk's `line_start`/
+`line_end` (S001), present on a result row whenever that note has a semantic side to its match —
+always in `semantic` mode, and in `hybrid` mode for any note whose result came (at least partly) from
+the semantic side. A `hybrid`-mode note that matched only via the fulltext side (no `semantic_rank`)
+has no chunk to report — `chunk_line_start`/`chunk_line_end` are absent for that row, the same
+per-row-optional treatment `fulltext_rank`/`semantic_rank` already get. `fulltext`-only mode never
+has these fields at all: there's no chunk on that side, full stop (S001's "Chunking algorithm is out
+of scope" note above still holds — fulltext ranks whole notes, not chunks).
+
+These are 1-indexed line numbers into the note's **frontmatter-stripped body**, the same coordinate
+space `note_read`'s `start_line`/`end_line` (S003) use — deliberately so a caller can pass them
+straight through to a follow-up `note_read` call to fetch just the matching slice of a large note,
+without reading the whole thing first. This is the point of exposing them: `search`'s note-level
+collapse (above) already throws away *which part* of a note matched — for a short note that's fine,
+but for a long one it forces a full read to relocate the hit. See S001 for why this is body-only line
+numbers, not `grep`'s raw-file-including-frontmatter convention.
 
 ## Logging
 

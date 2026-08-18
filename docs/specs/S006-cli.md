@@ -179,8 +179,9 @@ resolve it; not expected to collide with real vault content.
 
 Since the MCP-facing "no raw scores" rule (README) doesn't apply to this CLI debug surface,
 `--explain` shows, per result: raw BM25 score, raw cosine distance, which chunk won the
-best-chunk-wins collapse (with its `char_start`/`char_end`), and the RRF score with its formula
-breakdown (`1/(k+fulltext_rank) + 1/(k+semantic_rank) = ...`). Plus pipeline-level detail: how many
+best-chunk-wins collapse (with both its `char_start`/`char_end` and its derived `line_start`/
+`line_end`, per S001/S002), and the RRF score with its formula breakdown
+(`1/(k+fulltext_rank) + 1/(k+semantic_rank) = ...`). Plus pipeline-level detail: how many
 chunks/notes were over-fetched before collapsing/truncating to `limit`, and the actual FTS5 expression
 sent to `MATCH` (relevant now that `hybrid` mode passes DSL through unmodified, per S002) — this is
 the level of detail that makes "why didn't note X show up" actually answerable.

@@ -70,7 +70,9 @@ function runSemanticQuery(db, vector, fetchCount, embeddingModel, embeddingVersi
     // (computeOverfetch of a caller-supplied limit), never raw user input, so interpolating it here
     // carries no injection risk.
     return db.prepare(`
-        SELECT c.note_id AS note_id, cv.distance AS distance
+        SELECT c.note_id AS note_id, cv.distance AS distance,
+               c.char_start AS char_start, c.char_end AS char_end,
+               c.line_start AS line_start, c.line_end AS line_end
         FROM chunk_vectors cv
         JOIN chunks c ON c.id = cv.rowid
         WHERE cv.embedding MATCH ? AND k = ${fetchCount}
@@ -81,13 +83,19 @@ function runSemanticQuery(db, vector, fetchCount, embeddingModel, embeddingVersi
 }
 
 function collapseToBestChunkPerNote(rows) {
-    const bestDistanceByNote = new Map();
+    const bestByNote = new Map();
     for (const row of rows) {
-        if (!bestDistanceByNote.has(row.note_id)) {
-            bestDistanceByNote.set(row.note_id, row.distance);
+        if (!bestByNote.has(row.note_id)) {
+            bestByNote.set(row.note_id, {
+                distance: row.distance,
+                charStart: row.char_start,
+                charEnd: row.char_end,
+                lineStart: row.line_start,
+                lineEnd: row.line_end,
+            });
         }
     }
-    return bestDistanceByNote;
+    return bestByNote;
 }
 
 function hydrateNotes(db, noteIds) {
@@ -127,17 +135,21 @@ async function semanticSearch(db, query, overfetchLimit, { embed, embeddingModel
         });
     }
 
-    const bestDistanceByNote = collapseToBestChunkPerNote(rawRows);
-    const notesById = hydrateNotes(db, [ ...bestDistanceByNote.keys() ]);
+    const bestByNote = collapseToBestChunkPerNote(rawRows);
+    const notesById = hydrateNotes(db, [ ...bestByNote.keys() ]);
 
-    const collapsed = [ ...bestDistanceByNote.entries() ].map(([ noteId, distance ]) => {
+    const collapsed = [ ...bestByNote.entries() ].map(([ noteId, best ]) => {
         const note = notesById.get(noteId);
         return {
             noteId,
             noteTitle: pathToTitle(note.path),
             fileLineCount: note.file_line_count,
             mtime: note.mtime,
-            distance,
+            distance: best.distance,
+            charStart: best.charStart,
+            charEnd: best.charEnd,
+            lineStart: best.lineStart,
+            lineEnd: best.lineEnd,
         };
     });
 
@@ -150,6 +162,8 @@ function toSemanticOutput(results, limit) {
     return results.slice(0, limit).map((r) => ({
         note_title: r.noteTitle,
         file_line_count: r.fileLineCount,
+        chunk_line_start: r.lineStart,
+        chunk_line_end: r.lineEnd,
     }));
 }
 
@@ -167,6 +181,7 @@ function computeRrfScore(fulltextRank, semanticRank, rrfK) {
 function mergeHybrid(fulltextResults, semanticResults, limit, rrfK) {
     const fulltextRankById = new Map(fulltextResults.map((r) => [ r.noteId, r.rank ]));
     const semanticRankById = new Map(semanticResults.map((r) => [ r.noteId, r.rank ]));
+    const chunkLinesById = new Map(semanticResults.map((r) => [ r.noteId, { lineStart: r.lineStart, lineEnd: r.lineEnd } ]));
 
     const byId = new Map();
     for (const r of [ ...fulltextResults, ...semanticResults ]) {
@@ -178,12 +193,15 @@ function mergeHybrid(fulltextResults, semanticResults, limit, rrfK) {
     const merged = [ ...byId.values() ].map((r) => {
         const fulltextRank = fulltextRankById.get(r.noteId);
         const semanticRank = semanticRankById.get(r.noteId);
+        const chunkLines = chunkLinesById.get(r.noteId);
         return {
             noteTitle: r.noteTitle,
             fileLineCount: r.fileLineCount,
             mtime: r.mtime,
             fulltextRank: fulltextRank ?? null,
             semanticRank: semanticRank ?? null,
+            lineStart: chunkLines?.lineStart ?? null,
+            lineEnd: chunkLines?.lineEnd ?? null,
             score: computeRrfScore(fulltextRank, semanticRank, rrfK),
         };
     });
@@ -198,6 +216,8 @@ function toHybridOutput(results) {
         file_line_count: r.fileLineCount,
         fulltext_rank: r.fulltextRank,
         semantic_rank: r.semanticRank,
+        chunk_line_start: r.lineStart,
+        chunk_line_end: r.lineEnd,
     }));
 }
 
@@ -230,61 +250,6 @@ export async function search(db, options = {}) {
     throw new Error(`search: unknown mode "${mode}"`);
 }
 
-function runSemanticQueryWithChunkDetail(db, vector, fetchCount, embeddingModel, embeddingVersion) {
-    return db.prepare(`
-        SELECT c.note_id AS note_id, c.char_start AS char_start, c.char_end AS char_end,
-               cv.distance AS distance
-        FROM chunk_vectors cv
-        JOIN chunks c ON c.id = cv.rowid
-        WHERE cv.embedding MATCH ? AND k = ${fetchCount}
-          AND c.embedding_model = ?
-          AND c.embedding_version = ?
-        ORDER BY cv.distance
-    `).all(vectorToBuffer(vector), embeddingModel, embeddingVersion);
-}
-
-function collapseToBestChunkPerNoteWithDetail(rows) {
-    const bestByNote = new Map();
-    for (const row of rows) {
-        if (!bestByNote.has(row.note_id)) {
-            bestByNote.set(row.note_id, {
-                distance: row.distance,
-                charStart: row.char_start,
-                charEnd: row.char_end,
-            });
-        }
-    }
-    return bestByNote;
-}
-
-async function semanticSearchDetail(db, query, overfetchLimit, { embed, embeddingModel, embeddingVersion }) {
-    if (typeof embed !== 'function') {
-        throw new Error('search: semantic and hybrid modes require an `embed` function');
-    }
-
-    const vector = await embed(query);
-    const rawRows = runSemanticQueryWithChunkDetail(
-        db, vector, overfetchLimit, embeddingModel, embeddingVersion,
-    );
-    const bestByNote = collapseToBestChunkPerNoteWithDetail(rawRows);
-    const notesById = hydrateNotes(db, [ ...bestByNote.keys() ]);
-
-    const collapsed = [ ...bestByNote.entries() ].map(([ noteId, best ]) => {
-        const note = notesById.get(noteId);
-        return {
-            noteTitle: pathToTitle(note.path),
-            fileLineCount: note.file_line_count,
-            mtime: note.mtime,
-            distance: best.distance,
-            charStart: best.charStart,
-            charEnd: best.charEnd,
-        };
-    });
-
-    collapsed.sort((a, b) => a.distance - b.distance || b.mtime - a.mtime);
-    return collapsed.map((row, index) => ({ ...row, rank: index + 1 }));
-}
-
 function formatRrfFormula(fulltextRank, semanticRank, score, rrfK) {
     const terms = [];
     if (fulltextRank !== null) {
@@ -307,7 +272,10 @@ function toSemanticExplainResults(rows) {
     return rows.map((r) => ({
         note_title: r.noteTitle, file_line_count: r.fileLineCount,
         cosine_distance: r.distance,
-        winning_chunk: { char_start: r.charStart, char_end: r.charEnd },
+        winning_chunk: {
+            char_start: r.charStart, char_end: r.charEnd,
+            line_start: r.lineStart, line_end: r.lineEnd,
+        },
         rank: r.rank,
     }));
 }
@@ -343,7 +311,7 @@ export async function explainSearch(db, options = {}) {
     }
 
     if (mode === 'semantic') {
-        const rows = (await semanticSearchDetail(db, query, overfetchLimit, options)).slice(0, limit);
+        const rows = (await semanticSearch(db, query, overfetchLimit, options)).slice(0, limit);
         return { results: toSemanticExplainResults(rows), pipeline };
     }
 
