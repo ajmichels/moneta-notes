@@ -8,7 +8,7 @@ import {
     vectorToBuffer, bufferToVector, cosineSimilarity, cosineDistance,
     getChunkVectors, getAllChunkVectors, getNoteVector,
     noteIdForTitle, titleForNoteId, resolveNoteId, resolveScopeNoteIds, compareVectors,
-    nearestNeighbors, clusterVectors, reduceVectors, tagFit, tagRedundancy, findOutliers,
+    nearestNeighbors, clusterVectors, reduceVectors, tagFit, tagRedundancy, findOutliers, calibrate,
 } from './vectors.js';
 
 const EMB = { embeddingModel: 'test-model', embeddingVersion: 'v1' };
@@ -32,6 +32,10 @@ function insertNote(db, path, { lineCount = 10, mtime = 1000 } = {}) {
         'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
     ).run(path, 'hash', lineCount, mtime, mtime);
     return db.prepare('SELECT id FROM notes WHERE path = ?').get(path).id;
+}
+
+function linkNotes(db, sourceNoteId, targetTitle) {
+    db.prepare('INSERT INTO note_links (source_note_id, target_title) VALUES (?, ?)').run(sourceNoteId, targetTitle);
 }
 
 function tagNote(db, noteId, tagName) {
@@ -989,6 +993,92 @@ describe('findOutliers: validation', () => {
         insertChunk(db, a, { seed: 0.1 });
         insertChunk(db, b, { seed: 0.9 });
         expect(() => findOutliers(db, { level: 'note', mode: 'nope', ...EMB })).toThrow(/unknown --mode/);
+        db.close();
+    });
+});
+
+describe('calibrate', () => {
+    it('includes every resolvable linked pair with no sampling', () => {
+        const db = makeTempDb();
+        const a = insertNote(db, 'A.md');
+        const b = insertNote(db, 'B.md');
+        const c = insertNote(db, 'C.md');
+        insertChunk(db, a, { seed: 0.1 });
+        insertChunk(db, b, { seed: 0.2 });
+        insertChunk(db, c, { seed: 0.3 });
+        linkNotes(db, a, 'B');
+        linkNotes(db, b, 'C');
+
+        const { linked } = calibrate(db, { level: 'note', sampleSize: 10, ...EMB });
+
+        expect(linked).toHaveLength(2);
+        expect(linked.every((r) => typeof r.similarity === 'number')).toBe(true);
+        db.close();
+    });
+
+    it('excludes links to a non-existent (broken) target', () => {
+        const db = makeTempDb();
+        const a = insertNote(db, 'A.md');
+        insertChunk(db, a, { seed: 0.1 });
+        linkNotes(db, a, 'Nonexistent');
+
+        const { linked } = calibrate(db, { level: 'note', sampleSize: 10, ...EMB });
+
+        expect(linked).toEqual([]);
+        db.close();
+    });
+
+    it('excludes a self-link', () => {
+        const db = makeTempDb();
+        const a = insertNote(db, 'A.md');
+        insertChunk(db, a, { seed: 0.1 });
+        linkNotes(db, a, 'A');
+
+        const { linked } = calibrate(db, { level: 'note', sampleSize: 10, ...EMB });
+
+        expect(linked).toEqual([]);
+        db.close();
+    });
+
+    it('samples up to --sample-size unlinked pairs, excluding linked ones', () => {
+        const db = makeTempDb();
+        const a = insertNote(db, 'A.md');
+        const b = insertNote(db, 'B.md');
+        const c = insertNote(db, 'C.md');
+        insertChunk(db, a, { seed: 0.1 });
+        insertChunk(db, b, { seed: 0.2 });
+        insertChunk(db, c, { seed: 0.3 });
+        linkNotes(db, a, 'B');
+
+        const { unlinked } = calibrate(db, { level: 'note', sampleSize: 10, ...EMB });
+
+        // A-B is linked, so only A-C and B-C are eligible unlinked pairs.
+        expect(unlinked).toHaveLength(2);
+        const pairs = unlinked.map((r) => [ r.note_a, r.note_b ].sort().join('-'));
+        expect(pairs.sort()).toEqual([ 'A-C', 'B-C' ]);
+        db.close();
+    });
+
+    it('--level chunk uses the best chunk-pair similarity (mirroring compare --aggregate=best-chunk)', () => {
+        const db = makeTempDb();
+        const a = insertNote(db, 'A.md');
+        const b = insertNote(db, 'B.md');
+        insertChunk(db, a, { chunkIndex: 0, seed: 0.1 });
+        insertChunk(db, a, { chunkIndex: 1, seed: 0.9 });
+        insertChunk(db, b, { seed: 0.9 });
+        linkNotes(db, a, 'B');
+
+        const { linked } = calibrate(db, { level: 'chunk', sampleSize: 10, ...EMB });
+
+        expect(linked[0].similarity).toBeCloseTo(1, 5);
+        db.close();
+    });
+
+    it('returns empty populations for a vault with fewer than 2 notes', () => {
+        const db = makeTempDb();
+        const { linked, unlinked } = calibrate(db, { level: 'note', sampleSize: 10, ...EMB });
+        expect(linked).toEqual([]);
+        expect(unlinked).toEqual([]);
         db.close();
     });
 });

@@ -178,6 +178,34 @@ export function formatOutliersTable(rows, { mode = 'isolated', align = true } = 
     return formatTable(columns, rows, { align });
 }
 
+const CALIBRATE_PERCENTILES = [ 10, 25, 50, 75, 90 ];
+
+function percentile(sortedValues, p) {
+    if (sortedValues.length === 0) {
+        return null;
+    }
+    const index = Math.min(sortedValues.length - 1, Math.floor((p / 100) * sortedValues.length));
+    return sortedValues[index];
+}
+
+function summarizeCalibratePopulation(name, rows) {
+    const sorted = rows.map((r) => r.similarity).sort((a, b) => a - b);
+    const row = { population: name, count: rows.length };
+    for (const p of CALIBRATE_PERCENTILES) {
+        row[`p${p}`] = percentile(sorted, p);
+    }
+    return row;
+}
+
+export function formatCalibrateTable({ linked, unlinked }, { align = true } = {}) {
+    const rows = [
+        summarizeCalibratePopulation('linked', linked),
+        summarizeCalibratePopulation('unlinked', unlinked),
+    ];
+    const columns = [ 'population', 'count', ...CALIBRATE_PERCENTILES.map((p) => `p${p}`) ];
+    return formatTable(columns, rows, { align });
+}
+
 export function formatExplain({ results, pipeline }) {
     const header = `mode=${pipeline.mode} limit=${pipeline.limit} overfetch=${pipeline.overfetchLimit} `
         + `fts5_expression=${JSON.stringify(pipeline.fulltextExpression)}`;

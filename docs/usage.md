@@ -366,7 +366,24 @@ Whole-vault, no `--tag`/`--folder` scoping.
 DBSCAN noise points (`cluster_id: -1`) are excluded from bridge scoring, since a noise point isn't
 "between" clusters, it's unclustered.
 
-`calibrate` lands here as it's implemented.
+#### `mnotes vectors calibrate`
+
+```sh
+mnotes vectors calibrate
+mnotes vectors calibrate --level=chunk --sample-size=1000 --format=json
+```
+
+Flags: `--level=note|chunk` (default `note`), `--sample-size=N` (default from
+`[vectors].calibrate_sample_size`, see [Configuration](configuration.md#vectors) — size of the random
+unlinked-pair baseline), `--format=table|json` (default `table`).
+
+Empirical similarity-threshold finding from the vault's own link graph: compares the similarity
+distribution of every actually-linked note pair (S011's link graph, broken links excluded) against a
+random unlinked-pair baseline. `table` shows a `p10/p25/p50/p75/p90` percentile summary for both
+populations; `json` dumps the full raw pairs (`{ linked: [...], unlinked: [...] }`) for plotting a
+histogram elsewhere. If the linked distribution's low percentiles sit clearly above the unlinked
+distribution's high percentiles, that gap is a reasonable place to pick a similarity threshold to use
+elsewhere in your own workflow — this command doesn't pick one for you.
 
 ## MCP server (Claude Code / Claude Desktop)
 

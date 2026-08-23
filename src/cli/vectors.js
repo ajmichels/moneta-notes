@@ -2,11 +2,11 @@ import { parseArgs } from 'node:util';
 import { readFileSync, writeFileSync } from 'node:fs';
 import {
     compareVectors, nearestNeighbors, clusterVectors, reduceVectors, tagFit, tagRedundancy,
-    findOutliers,
+    findOutliers, calibrate,
 } from '../core/vectors.js';
 import {
     formatCompareResult, formatNearestTable, formatClusterTable, formatReduceCsv,
-    formatTagFitTable, formatTagRedundancyTable, formatOutliersTable, formatJson,
+    formatTagFitTable, formatTagRedundancyTable, formatOutliersTable, formatCalibrateTable, formatJson,
 } from '../format.js';
 import { resolveConfig } from '../config.js';
 
@@ -285,6 +285,29 @@ async function runOutliers(args, deps) {
     return { stdout: formatOutliersTable(rows, { mode: values.mode }), stderr: '', exitCode: 0 };
 }
 
+async function runCalibrate(args, deps) {
+    const { values } = parseArgs({
+        args,
+        options: {
+            level: { type: 'string', default: 'note' },
+            'sample-size': { type: 'string' },
+            format: { type: 'string', default: 'table' },
+        },
+    });
+
+    const { vectors: vectorsConfig } = resolveConfig(deps);
+    const sampleSize = values['sample-size'] !== undefined
+        ? Number(values['sample-size'])
+        : vectorsConfig.calibrate_sample_size;
+
+    const result = calibrate(deps.db, { level: values.level, sampleSize, ...embeddingOptions(deps) });
+
+    if (values.format === 'json') {
+        return { stdout: formatJson(result), stderr: '', exitCode: 0 };
+    }
+    return { stdout: formatCalibrateTable(result), stderr: '', exitCode: 0 };
+}
+
 const VECTORS_SUBCOMMANDS = {
     compare: runCompare,
     nearest: runNearest,
@@ -293,6 +316,7 @@ const VECTORS_SUBCOMMANDS = {
     'tag-fit': runTagFit,
     'tag-redundancy': runTagRedundancy,
     outliers: runOutliers,
+    calibrate: runCalibrate,
 };
 
 export async function runVectorsCommand(args, deps) {

@@ -3,7 +3,7 @@ import { agnes } from 'ml-hclust';
 import { DBSCAN } from 'density-clustering';
 import { PCA } from 'ml-pca';
 import { UMAP } from 'umap-js';
-import { resolveTitle, stripMdExtension } from './note-fs.js';
+import { resolveTitle, stripMdExtension, buildTitleIndex, resolveAgainstIndex } from './note-fs.js';
 
 export function vectorToBuffer(vector) {
     return Buffer.from(vector.buffer, vector.byteOffset, vector.byteLength);
@@ -816,4 +816,98 @@ export function findOutliers(db, options = {}) {
         return findBridge(db, level, points, clusters, top);
     }
     throw new Error(`vectors: unknown --mode "${mode}"`);
+}
+
+// Every note_links row (S001/S011) whose target actually resolves to an indexed note — a link to
+// a non-existent note has no target vector to compare (S011's `getBrokenLinks` already owns
+// surfacing that condition, not this command). Self-links are dropped too: a note linking to
+// itself is trivially similarity 1.0, which would skew the linked-pair distribution for nothing.
+function getLinkedNotePairs(db) {
+    const index = buildTitleIndex(db);
+    const rows = db.prepare('SELECT source_note_id AS source_note_id, target_title FROM note_links').all();
+
+    const pairs = [];
+    for (const row of rows) {
+        const resolvedTitle = resolveAgainstIndex(index, row.target_title);
+        const targetId = resolvedTitle === null ? null : noteIdForTitle(db, resolvedTitle);
+        if (targetId !== null && targetId !== row.source_note_id) {
+            pairs.push([ row.source_note_id, targetId ]);
+        }
+    }
+    return pairs;
+}
+
+function pairKey(a, b) {
+    return a < b ? `${a}:${b}` : `${b}:${a}`;
+}
+
+// Random pairs of indexed notes with no note_links row between them in either direction —
+// `linkedPairs` (already computed for the linked side) doubles as the exclusion set via the same
+// symmetric `pairKey`. Reproducibility isn't a goal here (S013) — the point is the distribution,
+// not any individual sampled pair, so plain Math.random() is fine.
+function sampleUnlinkedPairs(db, linkedPairs, sampleSize) {
+    const noteIds = db.prepare('SELECT id FROM notes').all().map((row) => row.id);
+    if (noteIds.length < 2) {
+        return [];
+    }
+
+    const linkedKeys = new Set(linkedPairs.map(([ a, b ]) => pairKey(a, b)));
+    const sampled = new Map();
+    const maxAttempts = sampleSize * 50;
+
+    for (let attempts = 0; sampled.size < sampleSize && attempts < maxAttempts; attempts += 1) {
+        const a = noteIds[Math.floor(Math.random() * noteIds.length)];
+        const b = noteIds[Math.floor(Math.random() * noteIds.length)];
+        const key = pairKey(a, b);
+        if (a !== b && !linkedKeys.has(key) && !sampled.has(key)) {
+            sampled.set(key, [ a, b ]);
+        }
+    }
+    return [ ...sampled.values() ];
+}
+
+function pairRow(db, noteIdA, noteIdB, similarity) {
+    return { note_a: titleForNoteId(db, noteIdA), note_b: titleForNoteId(db, noteIdB), similarity };
+}
+
+// `chunk` level mirrors `compare --aggregate best-chunk`'s "best pair wins" logic — S013 has no
+// separate chunk-level linkage concept, so this reuses the same primitive rather than inventing
+// one. Either side missing chunks (an empty note) silently drops that pair from the sample rather
+// than erroring — one bad pair shouldn't kill an otherwise-useful calibration run.
+function similarityForPair(db, level, noteIdA, noteIdB, embeddingOptions) {
+    if (level === 'chunk') {
+        const chunksA = getAllChunkVectors(db, { noteIds: [ noteIdA ], ...embeddingOptions });
+        const chunksB = getAllChunkVectors(db, { noteIds: [ noteIdB ], ...embeddingOptions });
+        if (chunksA.length === 0 || chunksB.length === 0) {
+            return null;
+        }
+        return pairRow(db, noteIdA, noteIdB, bestChunkPair(chunksA, chunksB).similarity);
+    }
+
+    const vectorA = getNoteVector(db, noteIdA, embeddingOptions);
+    const vectorB = getNoteVector(db, noteIdB, embeddingOptions);
+    if (vectorA === null || vectorB === null) {
+        return null;
+    }
+    return pairRow(db, noteIdA, noteIdB, cosineSimilarity(vectorA, vectorB));
+}
+
+// Empirical similarity-threshold finding from the vault's own link graph (S013): compares the
+// similarity distribution of actually-linked note pairs against a random unlinked-pair baseline,
+// grounded in real vault structure rather than a guessed constant.
+export function calibrate(db, options = {}) {
+    const { level = 'note', sampleSize = 500, embeddingModel, embeddingVersion } = options;
+    const embeddingOptions = { embeddingModel, embeddingVersion };
+
+    const linkedPairs = getLinkedNotePairs(db);
+    const linked = linkedPairs
+        .map(([ a, b ]) => similarityForPair(db, level, a, b, embeddingOptions))
+        .filter((row) => row !== null);
+
+    const unlinkedPairs = sampleUnlinkedPairs(db, linkedPairs, sampleSize);
+    const unlinked = unlinkedPairs
+        .map(([ a, b ]) => similarityForPair(db, level, a, b, embeddingOptions))
+        .filter((row) => row !== null);
+
+    return { linked, unlinked };
 }

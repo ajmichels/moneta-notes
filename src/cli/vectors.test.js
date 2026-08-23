@@ -28,6 +28,10 @@ function insertNote(db, path) {
     return db.prepare('SELECT id FROM notes WHERE path = ?').get(path).id;
 }
 
+function linkNotes(db, sourceNoteId, targetTitle) {
+    db.prepare('INSERT INTO note_links (source_note_id, target_title) VALUES (?, ?)').run(sourceNoteId, targetTitle);
+}
+
 function tagNote(db, noteId, tagName) {
     db.prepare('INSERT INTO tags (name) VALUES (?) ON CONFLICT(name) DO NOTHING').run(tagName);
     const { id: tagId } = db.prepare('SELECT id FROM tags WHERE name = ?').get(tagName);
@@ -633,6 +637,72 @@ describe('mnotes vectors outliers', () => {
         await expect(runVectorsCommand(
             [ 'outliers', '--mode', 'isolated', '--threshold', '0.5', '--top', '3' ], makeDeps(db),
         )).rejects.toThrow(/mutually exclusive/);
+        db.close();
+    });
+});
+
+describe('mnotes vectors calibrate', () => {
+    it('prints a population | count | p10..p90 table by default', async () => {
+        const db = makeTempDb();
+        const a = insertNote(db, 'A.md');
+        const b = insertNote(db, 'B.md');
+        const c = insertNote(db, 'C.md');
+        insertChunk(db, a, { seed: 0.1 });
+        insertChunk(db, b, { seed: 0.2 });
+        insertChunk(db, c, { seed: 0.3 });
+        linkNotes(db, a, 'B');
+
+        const result = await runVectorsCommand([ 'calibrate' ], makeDeps(db));
+
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout).toContain('population');
+        expect(result.stdout).toContain('linked');
+        expect(result.stdout).toContain('unlinked');
+        db.close();
+    });
+
+    it('--format json prints raw linked/unlinked pairs', async () => {
+        const db = makeTempDb();
+        const a = insertNote(db, 'A.md');
+        const b = insertNote(db, 'B.md');
+        insertChunk(db, a, { seed: 0.1 });
+        insertChunk(db, b, { seed: 0.2 });
+        linkNotes(db, a, 'B');
+
+        const result = await runVectorsCommand([ 'calibrate', '--format', 'json' ], makeDeps(db));
+
+        const parsed = JSON.parse(result.stdout);
+        expect(parsed.linked).toHaveLength(1);
+        expect(parsed.unlinked).toEqual([]);
+        db.close();
+    });
+
+    it('--sample-size overrides the default sample size', async () => {
+        const db = makeTempDb();
+        for (let i = 0; i < 5; i += 1) {
+            const noteId = insertNote(db, `N${i}.md`);
+            insertChunk(db, noteId, { seed: 0.1 * i });
+        }
+
+        const result = await runVectorsCommand(
+            [ 'calibrate', '--sample-size', '2', '--format', 'json' ], makeDeps(db),
+        );
+
+        expect(JSON.parse(result.stdout).unlinked.length).toBeLessThanOrEqual(2);
+        db.close();
+    });
+
+    it('defaults --sample-size from config.vectors.calibrate_sample_size', async () => {
+        const db = makeTempDb();
+        for (let i = 0; i < 5; i += 1) {
+            const noteId = insertNote(db, `N${i}.md`);
+            insertChunk(db, noteId, { seed: 0.1 * i });
+        }
+
+        const deps = { ...makeDeps(db), config: { vectors: { calibrate_sample_size: 1 } } };
+        const result = await runVectorsCommand([ 'calibrate', '--format', 'json' ], deps);
+
+        expect(JSON.parse(result.stdout).unlinked).toHaveLength(1);
         db.close();
     });
 });
