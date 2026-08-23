@@ -716,3 +716,48 @@ describe('mnotes vectors: unknown subcommand', () => {
         db.close();
     });
 });
+
+describe('mnotes vectors: help output', () => {
+    it('no subcommand prints the overview listing every subcommand', async () => {
+        const result = await runVectorsCommand([], {});
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout).toContain('Subcommands:');
+        for (const name of [
+            'compare', 'nearest', 'cluster', 'reduce', 'tag-fit', 'tag-redundancy', 'outliers', 'calibrate',
+        ]) {
+            expect(result.stdout).toContain(name);
+        }
+    });
+
+    it('"vectors --help" and "vectors -h" print the same overview', async () => {
+        const long = await runVectorsCommand([ '--help' ], {});
+        const short = await runVectorsCommand([ '-h' ], {});
+        expect(long.stdout).toBe(short.stdout);
+        expect(long.stdout).toContain('Subcommands:');
+    });
+
+    it.each([
+        'compare', 'nearest', 'cluster', 'reduce', 'tag-fit', 'tag-redundancy', 'outliers', 'calibrate',
+    ])('"vectors %s --help" prints that subcommand\'s own usage and flags, without invoking it', async (sub) => {
+        const result = await runVectorsCommand([ sub, '--help' ], {});
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout).toContain(`Usage: mnotes vectors ${sub}`);
+        expect(result.stdout).toContain('Flags:');
+    });
+
+    it('"-h" is also recognized, not just "--help"', async () => {
+        const result = await runVectorsCommand([ 'compare', '-h' ], {});
+        expect(result.stdout).toContain('Usage: mnotes vectors compare');
+    });
+
+    it('--help can appear anywhere in the subcommand args, not just first', async () => {
+        const result = await runVectorsCommand([ 'compare', 'a', 'b', '--help' ], {});
+        expect(result.stdout).toContain('Usage: mnotes vectors compare');
+    });
+
+    it('an unknown subcommand with --help is still reported as unknown, not shown help', async () => {
+        const result = await runVectorsCommand([ 'bogus', '--help' ], {});
+        expect(result.exitCode).toBe(1);
+        expect(result.stderr).toMatch(/unknown vectors subcommand/);
+    });
+});

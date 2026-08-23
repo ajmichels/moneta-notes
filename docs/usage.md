@@ -235,6 +235,12 @@ CLI-only debug/analysis tooling over the raw embedding space — see
 [S013 — Vector Tools](specs/S013-vector-tools.md) for full detail on every subcommand. No MCP
 equivalent (same rationale as `mnotes links`).
 
+Unlike every other command, `vectors` has its own two-tier `--help`: `mnotes vectors --help` (or no
+subcommand at all) lists every subcommand with a one-line description; `mnotes vectors <subcommand>
+--help` prints that subcommand's full usage, argument, and flag documentation — each subcommand has
+its own genuinely distinct flag set, so a single flat usage line (the convention every other command
+here uses) wasn't enough.
+
 #### `mnotes vectors compare <a> <b>`
 
 ```sh

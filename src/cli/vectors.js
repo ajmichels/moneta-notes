@@ -319,11 +319,373 @@ const VECTORS_SUBCOMMANDS = {
     calibrate: runCalibrate,
 };
 
+const VECTORS_OVERVIEW_HELP = `Usage: mnotes vectors <subcommand> [flags]
+
+CLI-only debug/analysis tooling over the raw embedding space (S013) — no MCP equivalent,
+same rationale as \`mnotes links\`. All read-only.
+
+Subcommands:
+  compare           Direct pairwise similarity between two notes or two chunks
+  nearest           Nearest neighbors of an existing note's/chunk's own embedding
+  cluster           Whole-vault (or scoped) grouping via kmeans/hierarchical/dbscan
+  reduce            Dimensionality reduction (PCA/UMAP) for visualization
+  tag-fit           How well each note fits the centroid of its tag(s)
+  tag-redundancy    Pairwise tag-centroid comparison to flag likely-duplicate tags
+  outliers          Isolated notes, or notes bridging two clusters
+  calibrate         Empirical similarity thresholds from the vault's link graph
+
+Run 'mnotes vectors <subcommand> --help' for full flag documentation on any of these.
+`;
+
+const VECTORS_HELP = {
+    compare: `Usage: mnotes vectors compare <a> <b> [flags]
+
+Direct pairwise similarity between two notes or two chunks, using each one's own stored
+embedding — no query text is embedded. This is the primitive the other vectors
+subcommands' "how close are these two things" logic reduces to.
+
+Arguments:
+  <a> <b>
+      Note titles (--level=note, the default) or chunk ids (--level=chunk). Note
+      titles resolve the same way \`mnotes read\`'s <title> does: an exact match first,
+      then a unique-basename fallback.
+
+Flags:
+  --level=note|chunk
+      Granularity to compare at. Default: note.
+
+  --aggregate=centroid|best-chunk|all-pairs
+      Note-level only — a usage error combined with --level=chunk. Default: centroid.
+        centroid    Compare each note's single collapsed (mean, re-normalized) chunk
+                    vector.
+        best-chunk  Compare every chunk in <a> against every chunk in <b> and keep
+                    the closest pair; output includes which chunk pair won (their
+                    line spans).
+        all-pairs   Return the full chunks_a x chunks_b similarity matrix. Always
+                    JSON, regardless of --json.
+
+  --json
+      Print structured JSON instead of a plain "similarity: N" line.
+
+Examples:
+  mnotes vectors compare "Weekly Notes/2026-W32" "Weekly Notes/2026-W33"
+  mnotes vectors compare "Note A" "Note B" --aggregate=best-chunk
+  mnotes vectors compare "Note A" "Note B" --aggregate=all-pairs
+  mnotes vectors compare 42 108 --level=chunk
+`,
+
+    nearest: `Usage: mnotes vectors nearest <note-title|chunk-id> [flags]
+
+Nearest-neighbor lookup using an existing note's or chunk's own stored embedding as the
+query — distinct from \`mnotes search --mode=semantic\`, which re-embeds typed query text.
+The query itself is always excluded from its own results.
+
+Arguments:
+  <note-title|chunk-id>
+      A note title (--level=note, the default) or a raw chunk id (--level=chunk).
+      Note titles resolve like \`mnotes read\`'s <title> does (exact match, then
+      unique-basename fallback).
+
+Flags:
+  --level=note|chunk
+      Query-side granularity: is the argument a note or a chunk id? Default: note.
+
+  --against=note|chunk
+      Corpus-side granularity — what to search. Default: matches --level. Set
+      independently to ask e.g. "which chunks are nearest this note's centroid"
+      (--level=note --against=chunk).
+
+  --aggregate=centroid|best-chunk
+      Query-side aggregation, note-level queries only — a usage error combined with
+      --level=chunk. Default: centroid.
+        centroid    Collapse the query note to one centroid vector.
+        best-chunk  Keep every one of the query note's chunk vectors; each candidate
+                    is scored by its single best match against any of them (mirrors
+                    compare's best-chunk "closest pair wins" logic).
+
+  --k=N
+      Number of results to return. Default: [vectors].nearest_k_default (10 unless
+      overridden in config.toml).
+
+  --score
+      Include the raw similarity in the output. Omitted: rank-only (matching this
+      project's "no raw scores" convention elsewhere).
+
+  --json
+      Print structured JSON instead of an aligned table.
+
+Examples:
+  mnotes vectors nearest "Weekly Notes/2026-W32"
+  mnotes vectors nearest "Weekly Notes/2026-W32" --score
+  mnotes vectors nearest "Projects/Moneta" --against=chunk --k=5
+  mnotes vectors nearest 42 --level=chunk
+`,
+
+    cluster: `Usage: mnotes vectors cluster --algo=<algo> [flags]
+
+Whole-vault (or --tag/--folder-scoped) grouping over full-dimensional vectors — never
+runs on a \`reduce\` projection, since reducing to 2D/3D first would throw away exactly
+the structure clustering is looking for.
+
+Flags:
+  --level=note|chunk
+      Granularity to cluster. Default: note. Note-level always uses each note's
+      centroid — there is no --aggregate flag on this command.
+
+  --algo=kmeans|hierarchical|dbscan
+      Required. Which clustering algorithm to run.
+
+  --k=N
+      kmeans: required, the cluster count. hierarchical: an alternative to
+      --cut-height for cutting the dendrogram to a fixed cluster count — exactly one
+      of --k / --cut-height is required for hierarchical (giving both, or neither,
+      is an error).
+
+  --cut-height=F
+      hierarchical only — cut the dendrogram by cosine-distance height instead of a
+      fixed cluster count.
+
+  --epsilon=F
+      dbscan only, required together with --min-points. Cosine-distance
+      neighborhood radius. No default — a reasonable value depends entirely on your
+      vault's actual embedding density.
+
+  --min-points=N
+      dbscan only, required together with --epsilon. Minimum neighborhood size
+      needed to seed a cluster.
+
+  --tag=T
+      Restrict to notes carrying this tag (and its hierarchical children, e.g.
+      --tag=project also matches project/moneta). Mutually exclusive with --folder.
+
+  --folder=P
+      Restrict to notes under this vault-relative folder path. Mutually exclusive
+      with --tag.
+
+  --format=table|json
+      Default: table.
+        table  cluster_id | size | example_titles (up to 3 titles per cluster,
+               closest to its centroid)
+        json   Full membership: one row per point, { cluster_id, note_title } (or
+               { cluster_id, chunk_id, note_title } at --level=chunk).
+
+DBSCAN's unclustered points get cluster_id: -1 (its own "noise" convention, not
+remapped). Fewer points in scope than requested (--k too large, too few points for a
+--cut-height cut) is a hard error, not a silently smaller cluster count.
+
+Examples:
+  mnotes vectors cluster --algo=kmeans --k=8
+  mnotes vectors cluster --algo=hierarchical --cut-height=0.3 --folder="Weekly Notes"
+  mnotes vectors cluster --algo=dbscan --epsilon=0.25 --min-points=3 --format=json
+`,
+
+    reduce: `Usage: mnotes vectors reduce --algo=<algo> [flags]
+
+Dimensionality reduction for visualization. Streams to stdout by default — the point is
+piping straight into a plotting tool that reads delimited data from stdin (uplot,
+gnuplot's \`plot '-'\`), not reading the output directly in a terminal.
+
+Flags:
+  --level=note|chunk
+      Granularity to reduce. Default: note. Note-level always uses each note's
+      centroid — there is no --aggregate flag on this command.
+
+  --algo=pca|umap
+      Required.
+
+  --dims=2|3
+      Output dimensionality. Default: 2.
+
+  --neighbors=N
+      umap only (its nNeighbors parameter) — a usage error combined with
+      --algo=pca. Default: umap-js's own default (15).
+
+  --min-dist=F
+      umap only (its minDist parameter) — a usage error combined with --algo=pca.
+      Default: umap-js's own default (0.1).
+
+  --tag=T
+      Restrict to notes carrying this tag. Mutually exclusive with --folder.
+
+  --folder=P
+      Restrict to notes under this vault-relative folder path. Mutually exclusive
+      with --tag.
+
+  --color-by=tag|cluster|none
+      Attach a label per point. Default: none.
+        tag      Each point's label is its note's first tag, alphabetically.
+        cluster  Runs \`cluster --algo=kmeans\` internally with a fixed-heuristic k,
+                 unless --clusters points at an already-saved clustering to reuse
+                 instead.
+
+  --clusters=path
+      Reuse an already-inspected clustering (a saved
+      \`vectors cluster --format=json --output=...\` file) for --color-by=cluster,
+      instead of computing a fresh, differently-parameterized one internally.
+
+  --output=path
+      Write to a file instead of stdout. Same content either way, only the
+      destination changes.
+
+  --format=csv|json
+      Default: csv — a bare header row (id,title,x,y,z,label, plus
+      chunk_line_start/chunk_line_end at --level=chunk) plus one row per point,
+      nothing else, so it pipes cleanly into a plotting tool. json gives
+      { points, metadata } where metadata.cluster_source is "internal" or the
+      --clusters path used (present only for --color-by=cluster).
+
+Examples:
+  mnotes vectors reduce --algo=pca | uplot scatter -H -d,
+  mnotes vectors reduce --algo=umap --neighbors=15 --min-dist=0.1 --color-by=cluster
+  mnotes vectors reduce --algo=pca --dims=3 --format=json --output=points.json
+`,
+
+    'tag-fit': `Usage: mnotes vectors tag-fit [flags]
+
+Does each note actually sit near the centroid of the tag(s) it carries?
+
+Flags:
+  --tag=T
+      Restrict to a single tag. Omit to check every tag in the vault at once.
+
+  --threshold=F
+      Only show rows below this similarity. Omit to show every row.
+
+  --format=table|json
+      Default: table.
+        table  tag | note_title | similarity_to_centroid, sorted ascending (worst
+               fit first).
+        json   The same rows as structured JSON.
+
+A tag with only one member note is skipped for that tag — that note *is* the centroid,
+so 1.0 similarity isn't a real signal.
+
+Examples:
+  mnotes vectors tag-fit
+  mnotes vectors tag-fit --tag=project --threshold=0.6
+`,
+
+    'tag-redundancy': `Usage: mnotes vectors tag-redundancy --threshold=F [flags]
+
+Pairwise tag-centroid comparison, flagging tags that are probably duplicates of each
+other.
+
+Flags:
+  --threshold=F
+      Required — minimum centroid similarity to report. No default: what counts as
+      "probably duplicate" depends entirely on how your vault's tags are actually
+      used.
+
+  --format=table|json
+      Default: table.
+        table  tag_a | tag_b | centroid_similarity, sorted descending.
+        json   The same rows as structured JSON.
+
+Unlike tag-fit, a tag with a single member note still gets a centroid here (that note's
+own vector) — every tag with at least one member is compared.
+
+Example:
+  mnotes vectors tag-redundancy --threshold=0.85
+`,
+
+    outliers: `Usage: mnotes vectors outliers --mode=<mode> [flags]
+
+Whole-vault outlier detection (no --tag/--folder scoping).
+
+Flags:
+  --level=note|chunk
+      Granularity. Default: note. Note-level always uses each note's centroid —
+      there is no --aggregate flag on this command.
+
+  --mode=isolated|bridge
+      Required.
+        isolated  Rank every point by its similarity to its single nearest
+                  neighbor, most isolated first.
+        bridge    Rank points that sit ambiguously between two clusters from a
+                  --clusters file.
+
+  --threshold=F
+      isolated only — only show points whose nearest-neighbor similarity is below
+      this. Mutually exclusive with --top. Not valid with --mode=bridge (bridge's
+      score isn't on an independently meaningful scale).
+
+  --top=N
+      Show only the N most extreme results. Valid in both modes; the only limiting
+      option in bridge mode.
+
+  --clusters=path
+      Required for --mode=bridge. A saved
+      \`vectors cluster --format=json --output=...\` file — bridge mode never
+      recomputes its own clustering, since a bridge result is only meaningful
+      relative to a clustering you've actually inspected.
+
+  --format=table|json
+      Default: table.
+        isolated  note_title | nearest_neighbor_similarity
+        bridge    note_title | cluster_a | cluster_b | bridge_score
+
+In bridge mode, points DBSCAN marked as noise (cluster_id: -1 in the --clusters file)
+are excluded from scoring — a noise point isn't "between" clusters, it's unclustered
+(that's what isolated mode is for).
+
+Examples:
+  mnotes vectors outliers --mode=isolated --threshold=0.3
+  mnotes vectors outliers --mode=isolated --top=10
+  mnotes vectors cluster --algo=kmeans --k=8 --format=json --output=clusters.json
+  mnotes vectors outliers --mode=bridge --clusters=clusters.json --top=10
+`,
+
+    calibrate: `Usage: mnotes vectors calibrate [flags]
+
+Empirical similarity-threshold finding from the vault's own link graph: compares the
+similarity distribution of every actually-linked note pair against a random
+unlinked-pair baseline, grounded in real vault structure rather than a guessed constant.
+
+Flags:
+  --level=note|chunk
+      Default: note. At --level=chunk, each pair's similarity is the best
+      chunk-pair match (mirrors compare --aggregate=best-chunk) — there's no
+      separate chunk-level linkage concept.
+
+  --sample-size=N
+      Size of the random unlinked-pair baseline sample. Default:
+      [vectors].calibrate_sample_size (500 unless overridden in config.toml). The
+      linked side is never sampled — every resolvable linked pair is included.
+
+  --format=table|json
+      Default: table.
+        table  A p10/p25/p50/p75/p90 percentile summary for both the linked and
+               unlinked populations.
+        json   { linked: [{note_a, note_b, similarity}], unlinked: [...] } — full
+               raw pairs, e.g. for plotting a histogram elsewhere.
+
+Links to a non-existent note, and self-links, are excluded from the linked population.
+
+Examples:
+  mnotes vectors calibrate
+  mnotes vectors calibrate --level=chunk --sample-size=1000 --format=json
+`,
+};
+
+function hasHelpFlag(args) {
+    return args.includes('--help') || args.includes('-h');
+}
+
 export async function runVectorsCommand(args, deps) {
     const [ sub, ...rest ] = args;
+
+    if (sub === undefined || sub === '--help' || sub === '-h') {
+        return { stdout: VECTORS_OVERVIEW_HELP, stderr: '', exitCode: 0 };
+    }
+
     const handler = VECTORS_SUBCOMMANDS[sub];
     if (!handler) {
         return { stdout: '', stderr: `mnotes: unknown vectors subcommand "${sub}"\n`, exitCode: 1 };
     }
+
+    if (hasHelpFlag(rest)) {
+        return { stdout: VECTORS_HELP[sub], stderr: '', exitCode: 0 };
+    }
+
     return handler(rest, deps);
 }

@@ -887,3 +887,21 @@ describe('dispatch: reindex and stats are registered', () => {
         db.close();
     });
 });
+
+describe('dispatch: "vectors" bypasses the generic --help short-circuit', () => {
+    it('mnotes vectors --help lists subcommands, not a flat usage line', async () => {
+        const result = await dispatch([ 'vectors', '--help' ], {});
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout).toContain('Subcommands:');
+        expect(result.stdout).toContain('compare');
+        expect(result.stdout).toContain('calibrate');
+    });
+
+    it('mnotes vectors compare --help shows compare-specific flag documentation', async () => {
+        const result = await dispatch([ 'vectors', 'compare', '--help' ], {});
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout).toContain('Usage: mnotes vectors compare <a> <b>');
+        expect(result.stdout).toContain('--aggregate=centroid|best-chunk|all-pairs');
+        expect(result.stdout).not.toContain('mnotes vectors nearest');
+    });
+});

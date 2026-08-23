@@ -26,8 +26,19 @@ nested-command/auto-help machinery.
 `dispatch()` intercepts `--help`/`-h` itself, ahead of routing to a command handler: `mnotes` (no
 command), `mnotes --help`, or `mnotes -h` prints the full command list; `mnotes <command> --help` (the
 flag can appear anywhere in that command's args) prints just that command's usage line instead of
-running it. This is a static lookup table in `cli/main.js`, not per-handler flag parsing — an unknown
-command is still an error regardless of a trailing `--help`.
+running it. This is a static lookup table (`COMMAND_USAGE` in `cli/main.js`) keyed by top-level
+command name, not per-handler flag parsing — an unknown command is still an error regardless of a
+trailing `--help`.
+
+**`vectors` is the one exception to the static-lookup-table approach**, per S013: it has no
+`COMMAND_USAGE` entry, and `dispatch()` explicitly skips its generic `--help` short-circuit for this
+one command, always calling `runVectorsCommand` (`cli/vectors.js`) and letting it interpret `--help`
+itself. This is because `vectors` has eight sub-subcommands with genuinely distinct, non-trivial flag
+sets — a single flat usage line (adequate for every other command's `--help`) would either have to
+cram all eight together or lose the sub-subcommand-specific detail entirely. `runVectorsCommand`
+implements the same two-tier shape the top-level CLI does (`mnotes vectors`/`mnotes vectors --help`
+lists subcommands; `mnotes vectors <subcommand> --help` gives that subcommand's full usage, argument,
+and flag documentation), just one level down.
 
 ## Output format
 

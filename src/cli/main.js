@@ -85,20 +85,10 @@ const COMMAND_USAGE = {
     reindex: 'mnotes reindex [title]',
     daemon: 'mnotes daemon <start|stop|restart>',
     stats: 'mnotes stats [--json]',
-    vectors: 'mnotes vectors compare <a> <b> [--level=note|chunk] [--aggregate=centroid|best-chunk|all-pairs] [--json]\n'
-        + '       mnotes vectors nearest <note-title|chunk-id> [--level=note|chunk] [--against=note|chunk]\n'
-        + '           [--aggregate=centroid|best-chunk] [--k=N] [--score] [--json]\n'
-        + '       mnotes vectors cluster --algo=kmeans|hierarchical|dbscan [--level=note|chunk]\n'
-        + '           [--k=N] [--cut-height=F] [--epsilon=F] [--min-points=N] [--tag=T] [--folder=P]\n'
-        + '           [--format=table|json]\n'
-        + '       mnotes vectors reduce --algo=pca|umap [--level=note|chunk] [--dims=2|3]\n'
-        + '           [--neighbors=N] [--min-dist=F] [--tag=T] [--folder=P]\n'
-        + '           [--color-by=tag|cluster|none] [--clusters=path] [--output=path] [--format=csv|json]\n'
-        + '       mnotes vectors tag-fit [--tag=T] [--threshold=F] [--format=table|json]\n'
-        + '       mnotes vectors tag-redundancy --threshold=F [--format=table|json]\n'
-        + '       mnotes vectors outliers --mode=isolated|bridge [--level=note|chunk]\n'
-        + '           [--threshold=F] [--top=N] [--clusters=path] [--format=table|json]\n'
-        + '       mnotes vectors calibrate [--level=note|chunk] [--sample-size=N] [--format=table|json]',
+    // No entry for 'vectors': unlike every other command here, `vectors` has enough
+    // sub-subcommands with distinct flag sets that a single flat usage line doesn't cut it —
+    // dispatch() below special-cases 'vectors' to skip this table entirely and let
+    // runVectorsCommand (cli/vectors.js) handle --help itself, per-subcommand.
 };
 
 export async function dispatch(argv, deps) {
@@ -114,7 +104,10 @@ export async function dispatch(argv, deps) {
         return { stdout: '', stderr: `mnotes: unknown command "${command}"\n`, exitCode: 1 };
     }
 
-    if (rest.includes('--help') || rest.includes('-h')) {
+    // 'vectors' has its own per-subcommand --help handling (cli/vectors.js) — richer than a
+    // single flat usage line, since each subcommand's flag set is genuinely distinct. Every
+    // other command's --help is this one generic short-circuit.
+    if (command !== 'vectors' && (rest.includes('--help') || rest.includes('-h'))) {
         return { stdout: `Usage: ${COMMAND_USAGE[command]}\n`, stderr: '', exitCode: 0 };
     }
 
