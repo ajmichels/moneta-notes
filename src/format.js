@@ -115,6 +115,22 @@ export function formatStats(stats, { json = false, daemonRunning } = {}) {
     return `${Object.entries(withDaemon).map(([ key, value ]) => `${key}: ${value}`).join('\n')}\n`;
 }
 
+function formatLineSpan(span) {
+    return `L${span.line_start}-${span.line_end}`;
+}
+
+export function formatCompareResult(result, { aggregate = 'centroid', json = false } = {}) {
+    if (aggregate === 'all-pairs' || json) {
+        return formatJson(result);
+    }
+    const lines = [ `similarity: ${result.similarity}` ];
+    if (result.chunk_a) {
+        lines.push(`chunk_a: ${formatLineSpan(result.chunk_a)}`);
+        lines.push(`chunk_b: ${formatLineSpan(result.chunk_b)}`);
+    }
+    return `${lines.join('\n')}\n`;
+}
+
 export function formatExplain({ results, pipeline }) {
     const header = `mode=${pipeline.mode} limit=${pipeline.limit} overfetch=${pipeline.overfetchLimit} `
         + `fts5_expression=${JSON.stringify(pipeline.fulltextExpression)}`;

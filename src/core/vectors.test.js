@@ -7,8 +7,10 @@ import { cleanupTempDir } from '../../vitest.helpers.js';
 import {
     vectorToBuffer, bufferToVector, cosineSimilarity, cosineDistance,
     getChunkVectors, getAllChunkVectors, getNoteVector,
-    noteIdForTitle, titleForNoteId, resolveNoteId, resolveScopeNoteIds,
+    noteIdForTitle, titleForNoteId, resolveNoteId, resolveScopeNoteIds, compareVectors,
 } from './vectors.js';
+
+const EMB = { embeddingModel: 'test-model', embeddingVersion: 'v1' };
 
 const tempDirs = [];
 
@@ -228,6 +230,106 @@ describe('resolveScopeNoteIds', () => {
         const db = makeTempDb();
         insertNote(db, 'Weekly Notes/2026-W32.md');
         expect(resolveScopeNoteIds(db, { folder: 'Weekly_Notes' })).toEqual([]);
+        db.close();
+    });
+});
+
+describe('compareVectors: level=chunk', () => {
+    it('compares two chunks directly by id', () => {
+        const db = makeTempDb();
+        const noteId = insertNote(db, 'A.md');
+        const chunkA = insertChunk(db, noteId, { chunkIndex: 0, seed: 0.1 });
+        const chunkB = insertChunk(db, noteId, { chunkIndex: 1, seed: 0.1 });
+
+        const result = compareVectors(db, chunkA, chunkB, { level: 'chunk' });
+
+        expect(result).toEqual({ similarity: expect.any(Number) });
+        expect(result.similarity).toBeCloseTo(1, 5);
+        db.close();
+    });
+
+    it('throws for an unknown chunk id', () => {
+        const db = makeTempDb();
+        expect(() => compareVectors(db, 999, 998, { level: 'chunk' })).toThrow(/no chunk found/);
+        db.close();
+    });
+});
+
+describe('compareVectors: level=note', () => {
+    it('aggregate=centroid compares each note\'s single collapsed vector', () => {
+        const db = makeTempDb();
+        const noteA = insertNote(db, 'A.md');
+        const noteB = insertNote(db, 'B.md');
+        insertChunk(db, noteA, { seed: 0.1 });
+        insertChunk(db, noteB, { seed: 0.1 });
+
+        const result = compareVectors(db, 'A', 'B', { level: 'note', aggregate: 'centroid', ...EMB });
+
+        expect(result).toEqual({ similarity: expect.any(Number) });
+        expect(result.similarity).toBeCloseTo(1, 5);
+        db.close();
+    });
+
+    it('resolves note titles the same way read does (unique basename fallback)', () => {
+        const db = makeTempDb();
+        const noteA = insertNote(db, 'Deep/A.md');
+        const noteB = insertNote(db, 'B.md');
+        insertChunk(db, noteA, { seed: 0.1 });
+        insertChunk(db, noteB, { seed: 0.9 });
+
+        expect(() => compareVectors(db, 'A', 'B', { level: 'note', ...EMB })).not.toThrow();
+        db.close();
+    });
+
+    it('aggregate=best-chunk reports the closest chunk pair with its line span', () => {
+        const db = makeTempDb();
+        const noteA = insertNote(db, 'A.md');
+        const noteB = insertNote(db, 'B.md');
+        insertChunk(db, noteA, { chunkIndex: 0, seed: 0.1, lineStart: 1, lineEnd: 5 });
+        insertChunk(db, noteA, { chunkIndex: 1, seed: 0.9, lineStart: 6, lineEnd: 10 });
+        insertChunk(db, noteB, { seed: 0.1, lineStart: 20, lineEnd: 25 });
+
+        const result = compareVectors(db, 'A', 'B', { level: 'note', aggregate: 'best-chunk', ...EMB });
+
+        expect(result.chunk_a).toEqual({ line_start: 1, line_end: 5 });
+        expect(result.chunk_b).toEqual({ line_start: 20, line_end: 25 });
+        expect(result.similarity).toBeCloseTo(1, 5);
+        db.close();
+    });
+
+    it('aggregate=all-pairs returns a full chunk x chunk similarity matrix', () => {
+        const db = makeTempDb();
+        const noteA = insertNote(db, 'A.md');
+        const noteB = insertNote(db, 'B.md');
+        insertChunk(db, noteA, { chunkIndex: 0, seed: 0.1 });
+        insertChunk(db, noteA, { chunkIndex: 1, seed: 0.2 });
+        insertChunk(db, noteB, { seed: 0.3 });
+
+        const result = compareVectors(db, 'A', 'B', { level: 'note', aggregate: 'all-pairs', ...EMB });
+
+        expect(result.chunks_a).toHaveLength(2);
+        expect(result.chunks_b).toHaveLength(1);
+        expect(result.matrix).toHaveLength(2);
+        expect(result.matrix[0]).toHaveLength(1);
+        db.close();
+    });
+
+    it('throws when a compared note has no chunks', () => {
+        const db = makeTempDb();
+        insertNote(db, 'A.md');
+        insertNote(db, 'B.md');
+        expect(() => compareVectors(db, 'A', 'B', { level: 'note', ...EMB })).toThrow(/no chunks/);
+        db.close();
+    });
+
+    it('throws for an unknown aggregate', () => {
+        const db = makeTempDb();
+        const noteA = insertNote(db, 'A.md');
+        const noteB = insertNote(db, 'B.md');
+        insertChunk(db, noteA, { seed: 0.1 });
+        insertChunk(db, noteB, { seed: 0.2 });
+        expect(() => compareVectors(db, 'A', 'B', { level: 'note', aggregate: 'nope', ...EMB }))
+            .toThrow(/unknown aggregate/);
         db.close();
     });
 });

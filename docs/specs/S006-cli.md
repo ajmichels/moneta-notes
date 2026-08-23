@@ -18,8 +18,8 @@ surface.
 
 Node's built-in `util.parseArgs` — no CLI framework dependency. Subcommand routing is a small
 dispatch table keyed on `argv[2]` (`search`, `grep`, `tags`, `links`, `read`, `write`, `edit`, `append`,
-`rename`, `attachment`, `reindex`, `daemon`, `stats`), each parsing its own remaining flags via
-`parseArgs`. This matches the
+`rename`, `attachment`, `reindex`, `daemon`, `stats`, `vectors`), each parsing its own remaining flags
+via `parseArgs`. This matches the
 project's minimal-dependency, no-build-step bias — a dozen flat subcommands doesn't need a framework's
 nested-command/auto-help machinery.
 
@@ -134,6 +134,7 @@ exact absolute title — see "Absolute titles for mutating commands" below).
 | `mnotes reindex [title]` | | Talks to the daemon over the S005 Unix socket; hard error if daemon isn't running. Blocks until done, streaming attempt/retry progress for a single-title reindex. |
 | `mnotes daemon <start\|stop\|restart>` | | Controls the `launchd`-managed daemon process itself (not the IPC socket) — see below. |
 | `mnotes stats` | `--json` | See below. |
+| `mnotes vectors <subcommand>` | (per subcommand) | `compare`/`nearest`/`cluster`/`reduce`/`tag-fit`/`tag-redundancy`/`outliers`/`calibrate` — CLI-only debug/analysis tooling over the raw embedding space, no MCP equivalent (same rationale as `mnotes links`). Fully specified in [S013 — Vector Tools](S013-vector-tools.md), which owns `src/cli/vectors.js` and amends this spec only to add `vectors` to the dispatch table above. |
 
 Every command other than `reindex`/`stats` is a thin wrapper: parse flags, call the corresponding
 `core/` function directly in-process (`core/search.js`, `core/grep.js`, `core/tags.js`,

@@ -162,3 +162,107 @@ export function resolveScopeNoteIds(db, options = {}) {
     }
     return null;
 }
+
+function requireNoteVector(db, noteId, embeddingModel, embeddingVersion) {
+    const vector = getNoteVector(db, noteId, { embeddingModel, embeddingVersion });
+    if (vector === null) {
+        throw new Error(`vectors: note ${noteId} has no chunks to compare`);
+    }
+    return vector;
+}
+
+function requireChunks(chunks, noteId) {
+    if (chunks.length === 0) {
+        throw new Error(`vectors: note ${noteId} has no chunks to compare`);
+    }
+    return chunks;
+}
+
+function requireChunkVector(vectors, chunkId) {
+    if (!vectors.has(chunkId)) {
+        throw new Error(`vectors: no chunk found with id ${chunkId}`);
+    }
+    return vectors.get(chunkId);
+}
+
+function toChunkRef(chunk) {
+    return { id: chunk.chunkId, line_start: chunk.lineStart, line_end: chunk.lineEnd };
+}
+
+function toChunkLineSpan(chunk) {
+    return { line_start: chunk.lineStart, line_end: chunk.lineEnd };
+}
+
+function compareChunks(db, chunkIdA, chunkIdB) {
+    const vectors = getChunkVectors(db, [ chunkIdA, chunkIdB ]);
+    const a = requireChunkVector(vectors, chunkIdA);
+    const b = requireChunkVector(vectors, chunkIdB);
+    return { similarity: cosineSimilarity(a, b) };
+}
+
+function compareCentroids(db, noteIdA, noteIdB, embeddingModel, embeddingVersion) {
+    const a = requireNoteVector(db, noteIdA, embeddingModel, embeddingVersion);
+    const b = requireNoteVector(db, noteIdB, embeddingModel, embeddingVersion);
+    return { similarity: cosineSimilarity(a, b) };
+}
+
+// Exhaustive over chunks_a x chunks_b — acceptable at this vault's scale (S013/S001: thousands of
+// notes, not millions; a single note's chunk count stays small).
+function bestChunkPair(chunksA, chunksB) {
+    let best = null;
+    for (const a of chunksA) {
+        for (const b of chunksB) {
+            const similarity = cosineSimilarity(a.vector, b.vector);
+            if (best === null || similarity > best.similarity) {
+                best = { similarity, a, b };
+            }
+        }
+    }
+    return best;
+}
+
+function compareBestChunk(db, noteIdA, noteIdB, embeddingModel, embeddingVersion) {
+    const chunksA = requireChunks(
+        getAllChunkVectors(db, { noteIds: [ noteIdA ], embeddingModel, embeddingVersion }), noteIdA,
+    );
+    const chunksB = requireChunks(
+        getAllChunkVectors(db, { noteIds: [ noteIdB ], embeddingModel, embeddingVersion }), noteIdB,
+    );
+    const best = bestChunkPair(chunksA, chunksB);
+    return { similarity: best.similarity, chunk_a: toChunkLineSpan(best.a), chunk_b: toChunkLineSpan(best.b) };
+}
+
+function compareAllPairs(db, noteIdA, noteIdB, embeddingModel, embeddingVersion) {
+    const chunksA = requireChunks(
+        getAllChunkVectors(db, { noteIds: [ noteIdA ], embeddingModel, embeddingVersion }), noteIdA,
+    );
+    const chunksB = requireChunks(
+        getAllChunkVectors(db, { noteIds: [ noteIdB ], embeddingModel, embeddingVersion }), noteIdB,
+    );
+    const matrix = chunksA.map((a) => chunksB.map((b) => cosineSimilarity(a.vector, b.vector)));
+    return { chunks_a: chunksA.map(toChunkRef), chunks_b: chunksB.map(toChunkRef), matrix };
+}
+
+const NOTE_AGGREGATORS = {
+    centroid: compareCentroids,
+    'best-chunk': compareBestChunk,
+    'all-pairs': compareAllPairs,
+};
+
+// `a`/`b` are note titles at `level: 'note'` (resolved the same way `mnotes read`'s title does —
+// exact match, then unique-basename fallback) or raw chunk ids at `level: 'chunk'`. S013's
+// primitive comparison — everything else in this module that compares "two specific things"
+// reduces to this.
+export function compareVectors(db, a, b, options = {}) {
+    const { level = 'note', aggregate = 'centroid', embeddingModel, embeddingVersion } = options;
+
+    if (level === 'chunk') {
+        return compareChunks(db, Number(a), Number(b));
+    }
+
+    const aggregator = NOTE_AGGREGATORS[aggregate];
+    if (!aggregator) {
+        throw new Error(`vectors: unknown aggregate "${aggregate}"`);
+    }
+    return aggregator(db, resolveNoteId(db, a), resolveNoteId(db, b), embeddingModel, embeddingVersion);
+}

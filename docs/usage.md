@@ -229,6 +229,34 @@ listing), total/average note length, embedding model + version, count of notes p
 index file size, last full reindex time, daemon status, and current queue depth. Pure DB
 reads plus a best-effort socket probe — never itself requires the daemon to be running.
 
+### `mnotes vectors <subcommand>`
+
+CLI-only debug/analysis tooling over the raw embedding space — see
+[S013 — Vector Tools](specs/S013-vector-tools.md) for full detail on every subcommand. No MCP
+equivalent (same rationale as `mnotes links`).
+
+#### `mnotes vectors compare <a> <b>`
+
+```sh
+mnotes vectors compare "Weekly Notes/2026-W32" "Weekly Notes/2026-W33"
+mnotes vectors compare "Note A" "Note B" --aggregate=best-chunk
+mnotes vectors compare "Note A" "Note B" --aggregate=all-pairs
+mnotes vectors compare 42 108 --level=chunk
+```
+
+Flags: `--level=note|chunk` (default `note`), `--aggregate=centroid|best-chunk|all-pairs` (default
+`centroid`, note-level only — a usage error combined with `--level=chunk`), `--json`.
+
+Direct pairwise similarity using each note's/chunk's **own stored embedding** — no query text, no
+re-embedding. `note`-level `<a>`/`<b>` resolve the same way `mnotes read`'s `<title>` does (exact
+match, then unique-basename fallback); `chunk`-level `<a>`/`<b>` are raw `chunks.id` integers.
+`centroid` and `best-chunk` print a plain `similarity: <n>` line by default (`best-chunk` also prints
+the winning `chunk_a`/`chunk_b` line spans); `all-pairs` always prints the full chunk × chunk
+similarity matrix as JSON, regardless of `--json`.
+
+More `vectors` subcommands (`nearest`, `cluster`, `reduce`, `tag-fit`, `tag-redundancy`, `outliers`,
+`calibrate`) land here as they're implemented.
+
 ## MCP server (Claude Code / Claude Desktop)
 
 Once registered (`claude mcp add mnotes ...` — done automatically by

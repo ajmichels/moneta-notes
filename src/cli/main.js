@@ -18,6 +18,7 @@ import { loadConfig, resolveConfig } from '../config.js';
 import { computeStats, checkDaemonRunning } from './stats.js';
 import { runReindexCommand } from './reindex.js';
 import { runDaemonCommand } from './daemon.js';
+import { runVectorsCommand } from './vectors.js';
 import {
     formatSearchTable, formatExplain, formatGrepTable, formatTagListTable, formatTagNotesTable,
     formatLinksTable, formatBrokenLinksTable, formatStats, formatJson, formatJsonPretty,
@@ -53,6 +54,7 @@ Commands:
   reindex   Trigger a reindex via the indexing daemon
   daemon    start | stop | restart the indexing daemon
   stats     Show index/daemon stats
+  vectors   compare | nearest | cluster | reduce | tag-fit | tag-redundancy | outliers | calibrate
 
 Run 'mnotes <command> --help' for command-specific flags.
 `;
@@ -83,6 +85,8 @@ const COMMAND_USAGE = {
     reindex: 'mnotes reindex [title]',
     daemon: 'mnotes daemon <start|stop|restart>',
     stats: 'mnotes stats [--json]',
+    vectors: 'mnotes vectors compare <a> <b> [--level=note|chunk] [--aggregate=centroid|best-chunk|all-pairs] [--json]\n'
+        + '       (more vectors subcommands land here as they\'re implemented — see S013)',
 };
 
 export async function dispatch(argv, deps) {
@@ -554,6 +558,7 @@ export async function runStats(args, deps) {
 registerCommand('reindex', runReindexCommand);
 registerCommand('daemon', runDaemonCommand);
 registerCommand('stats', runStats);
+registerCommand('vectors', runVectorsCommand);
 
 function buildRealDeps() {
     const config = loadConfig();
