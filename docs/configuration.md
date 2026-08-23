@@ -69,6 +69,15 @@ Tunes binary attachment read access — see [S012 — Attachments](specs/S012-at
 |---|---|---|
 | `max_read_bytes` | `10000000` (~10MB) | `attachment_read`'s cap on returning base64-encoded file content. A file over this size with `include_content: true` (the default) errors, directing the caller to retry with `include_content: false` for metadata only. Doesn't apply to the CLI's default `open`-in-OS-app mode, only `--raw` and the MCP tool's `content_base64`. |
 
+## `[vectors]`
+
+Tunes `mnotes vectors` — see [S013 — Vector Tools](specs/S013-vector-tools.md).
+
+| Key | Default | What it does |
+|---|---|---|
+| `nearest_k_default` | `10` | Default `--k` for `mnotes vectors nearest` when the flag is omitted. |
+| `calibrate_sample_size` | `500` | Default `--sample-size` for `mnotes vectors calibrate` — size of the random unlinked-pair baseline sample. |
+
 ## `[index]`
 
 Tunes the background indexing daemon — see [S005 — Indexing Daemon](specs/S005-indexing-daemon.md).

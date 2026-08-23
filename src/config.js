@@ -37,6 +37,10 @@ export function buildDefaultConfig() {
         attachments: {
             max_read_bytes: 10000000,
         },
+        vectors: {
+            nearest_k_default: 10,
+            calibrate_sample_size: 500,
+        },
         index: {
             debounce_ms: 15000,
             model_idle_unload_minutes: 10,
