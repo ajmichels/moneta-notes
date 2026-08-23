@@ -94,6 +94,8 @@ const COMMAND_USAGE = {
         + '       mnotes vectors reduce --algo=pca|umap [--level=note|chunk] [--dims=2|3]\n'
         + '           [--neighbors=N] [--min-dist=F] [--tag=T] [--folder=P]\n'
         + '           [--color-by=tag|cluster|none] [--clusters=path] [--output=path] [--format=csv|json]\n'
+        + '       mnotes vectors tag-fit [--tag=T] [--threshold=F] [--format=table|json]\n'
+        + '       mnotes vectors tag-redundancy --threshold=F [--format=table|json]\n'
         + '       (more vectors subcommands land here as they\'re implemented — see S013)',
 };
 

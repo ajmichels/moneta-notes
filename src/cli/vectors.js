@@ -1,8 +1,11 @@
 import { parseArgs } from 'node:util';
 import { readFileSync, writeFileSync } from 'node:fs';
-import { compareVectors, nearestNeighbors, clusterVectors, reduceVectors } from '../core/vectors.js';
 import {
-    formatCompareResult, formatNearestTable, formatClusterTable, formatReduceCsv, formatJson,
+    compareVectors, nearestNeighbors, clusterVectors, reduceVectors, tagFit, tagRedundancy,
+} from '../core/vectors.js';
+import {
+    formatCompareResult, formatNearestTable, formatClusterTable, formatReduceCsv,
+    formatTagFitTable, formatTagRedundancyTable, formatJson,
 } from '../format.js';
 import { resolveConfig } from '../config.js';
 
@@ -201,11 +204,52 @@ async function runReduce(args, deps) {
     return { stdout: body, stderr: '', exitCode: 0 };
 }
 
+async function runTagFit(args, deps) {
+    const { values } = parseArgs({
+        args,
+        options: {
+            tag: { type: 'string' },
+            threshold: { type: 'string' },
+            format: { type: 'string', default: 'table' },
+        },
+    });
+
+    const rows = tagFit(deps.db, {
+        tag: values.tag, threshold: toFloatOrUndefined(values.threshold), ...embeddingOptions(deps),
+    });
+
+    if (values.format === 'json') {
+        return { stdout: formatJson(rows), stderr: '', exitCode: 0 };
+    }
+    return { stdout: formatTagFitTable(rows), stderr: '', exitCode: 0 };
+}
+
+async function runTagRedundancy(args, deps) {
+    const { values } = parseArgs({
+        args,
+        options: {
+            threshold: { type: 'string' },
+            format: { type: 'string', default: 'table' },
+        },
+    });
+
+    const rows = tagRedundancy(deps.db, {
+        threshold: toFloatOrUndefined(values.threshold), ...embeddingOptions(deps),
+    });
+
+    if (values.format === 'json') {
+        return { stdout: formatJson(rows), stderr: '', exitCode: 0 };
+    }
+    return { stdout: formatTagRedundancyTable(rows), stderr: '', exitCode: 0 };
+}
+
 const VECTORS_SUBCOMMANDS = {
     compare: runCompare,
     nearest: runNearest,
     cluster: runCluster,
     reduce: runReduce,
+    'tag-fit': runTagFit,
+    'tag-redundancy': runTagRedundancy,
 };
 
 export async function runVectorsCommand(args, deps) {

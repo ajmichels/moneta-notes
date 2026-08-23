@@ -8,7 +8,7 @@ import {
     vectorToBuffer, bufferToVector, cosineSimilarity, cosineDistance,
     getChunkVectors, getAllChunkVectors, getNoteVector,
     noteIdForTitle, titleForNoteId, resolveNoteId, resolveScopeNoteIds, compareVectors,
-    nearestNeighbors, clusterVectors, reduceVectors,
+    nearestNeighbors, clusterVectors, reduceVectors, tagFit, tagRedundancy,
 } from './vectors.js';
 
 const EMB = { embeddingModel: 'test-model', embeddingVersion: 'v1' };
@@ -32,6 +32,12 @@ function insertNote(db, path, { lineCount = 10, mtime = 1000 } = {}) {
         'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
     ).run(path, 'hash', lineCount, mtime, mtime);
     return db.prepare('SELECT id FROM notes WHERE path = ?').get(path).id;
+}
+
+function tagNote(db, noteId, tagName) {
+    db.prepare('INSERT INTO tags (name) VALUES (?) ON CONFLICT(name) DO NOTHING').run(tagName);
+    const { id: tagId } = db.prepare('SELECT id FROM tags WHERE name = ?').get(tagName);
+    db.prepare('INSERT INTO note_tags (note_id, tag_id) VALUES (?, ?)').run(noteId, tagId);
 }
 
 // chunk_vectors is a fixed float[1024] vec0 column (S001) — every vector inserted here must match
@@ -707,6 +713,118 @@ describe('reduceVectors: umap', () => {
             expect(typeof p.x).toBe('number');
             expect(typeof p.y).toBe('number');
         }
+        db.close();
+    });
+});
+
+describe('tagFit', () => {
+    it('reports similarity to the tag centroid, worst fit first', () => {
+        const db = makeTempDb();
+        const inGroup1 = insertNote(db, 'A1.md');
+        const inGroup2 = insertNote(db, 'A2.md');
+        const outlier = insertNote(db, 'A3.md');
+        insertChunk(db, inGroup1, { seed: 0.1 });
+        insertChunk(db, inGroup2, { seed: 0.1 });
+        insertChunk(db, outlier, { seed: 0.9 });
+        tagNote(db, inGroup1, 'project');
+        tagNote(db, inGroup2, 'project');
+        tagNote(db, outlier, 'project');
+
+        const rows = tagFit(db, { ...EMB });
+
+        expect(rows).toHaveLength(3);
+        expect(rows[0].note_title).toBe('A3');
+        expect(rows[0].tag).toBe('project');
+        expect(rows[0].similarity_to_centroid).toBeLessThan(rows[1].similarity_to_centroid);
+        db.close();
+    });
+
+    it('skips a tag with only one member note', () => {
+        const db = makeTempDb();
+        const noteId = insertNote(db, 'A.md');
+        insertChunk(db, noteId, { seed: 0.1 });
+        tagNote(db, noteId, 'solo');
+
+        expect(tagFit(db, { ...EMB })).toEqual([]);
+        db.close();
+    });
+
+    it('--tag restricts to a single tag', () => {
+        const db = makeTempDb();
+        const a = insertNote(db, 'A.md');
+        const b = insertNote(db, 'B.md');
+        insertChunk(db, a, { seed: 0.1 });
+        insertChunk(db, b, { seed: 0.1 });
+        tagNote(db, a, 'project');
+        tagNote(db, b, 'other');
+        const c = insertNote(db, 'C.md');
+        insertChunk(db, c, { seed: 0.1 });
+        tagNote(db, b, 'project');
+        tagNote(db, c, 'other');
+
+        const rows = tagFit(db, { tag: 'project', ...EMB });
+
+        expect(rows.every((r) => r.tag === 'project')).toBe(true);
+        db.close();
+    });
+
+    it('--threshold only shows rows below that similarity', () => {
+        const db = makeTempDb();
+        const a = insertNote(db, 'A.md');
+        const b = insertNote(db, 'B.md');
+        const c = insertNote(db, 'C.md');
+        insertChunk(db, a, { seed: 0.1 });
+        insertChunk(db, b, { seed: 0.1 });
+        insertChunk(db, c, { seed: 0.9 });
+        tagNote(db, a, 'project');
+        tagNote(db, b, 'project');
+        tagNote(db, c, 'project');
+
+        const rows = tagFit(db, { threshold: 0.9, ...EMB });
+
+        expect(rows.map((r) => r.note_title)).toEqual([ 'C' ]);
+        db.close();
+    });
+});
+
+describe('tagRedundancy', () => {
+    it('flags tag pairs above the threshold, most similar first', () => {
+        const db = makeTempDb();
+        const a = insertNote(db, 'A.md');
+        const b = insertNote(db, 'B.md');
+        const c = insertNote(db, 'C.md');
+        insertChunk(db, a, { seed: 0.1 });
+        insertChunk(db, b, { seed: 0.1 });
+        insertChunk(db, c, { seed: 0.9 });
+        tagNote(db, a, 'alpha');
+        tagNote(db, b, 'beta');
+        tagNote(db, c, 'gamma');
+
+        const rows = tagRedundancy(db, { threshold: 0.9, ...EMB });
+
+        expect(rows).toHaveLength(1);
+        expect([ rows[0].tag_a, rows[0].tag_b ]).toEqual([ 'alpha', 'beta' ]);
+        db.close();
+    });
+
+    it('throws when --threshold is missing', () => {
+        const db = makeTempDb();
+        expect(() => tagRedundancy(db, { ...EMB })).toThrow(/--threshold is required/);
+        db.close();
+    });
+
+    it('includes tags with a single member note (unlike tag-fit)', () => {
+        const db = makeTempDb();
+        const a = insertNote(db, 'A.md');
+        const b = insertNote(db, 'B.md');
+        insertChunk(db, a, { seed: 0.1 });
+        insertChunk(db, b, { seed: 0.1 });
+        tagNote(db, a, 'solo-a');
+        tagNote(db, b, 'solo-b');
+
+        const rows = tagRedundancy(db, { threshold: 0.5, ...EMB });
+
+        expect(rows).toHaveLength(1);
         db.close();
     });
 });

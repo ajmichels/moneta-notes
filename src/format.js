@@ -163,6 +163,14 @@ export function formatReduceCsv(points, { level = 'note' } = {}) {
     return `${rows.map((row) => row.join(',')).join('\n')}\n`;
 }
 
+export function formatTagFitTable(rows, { align = true } = {}) {
+    return formatTable([ 'tag', 'note_title', 'similarity_to_centroid' ], rows, { align });
+}
+
+export function formatTagRedundancyTable(rows, { align = true } = {}) {
+    return formatTable([ 'tag_a', 'tag_b', 'centroid_similarity' ], rows, { align });
+}
+
 export function formatExplain({ results, pipeline }) {
     const header = `mode=${pipeline.mode} limit=${pipeline.limit} overfetch=${pipeline.overfetchLimit} `
         + `fts5_expression=${JSON.stringify(pipeline.fulltextExpression)}`;

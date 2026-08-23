@@ -606,3 +606,94 @@ export function reduceVectors(db, options = {}) {
 
     return { points: outPoints, metadata: { cluster_source: clusterSource } };
 }
+
+function allTagNames(db) {
+    return db.prepare('SELECT name FROM tags ORDER BY name COLLATE NOCASE').all().map((row) => row.name);
+}
+
+// Exact tag membership (no hierarchical `tag/child` rollup — unlike `resolveScopeNoteIds`'s
+// `--tag` scoping, tag-fit/tag-redundancy iterate each literal registered tag on its own terms).
+function exactTagNoteIds(db, tagName) {
+    return db.prepare(`
+        SELECT n.id AS id
+        FROM notes n
+        JOIN note_tags nt ON nt.note_id = n.id
+        JOIN tags t ON t.id = nt.tag_id
+        WHERE t.name = ?
+    `).all(tagName).map((row) => row.id);
+}
+
+function computeTagCentroid(db, tagName, embeddingOptions, minMembers) {
+    const vectors = exactTagNoteIds(db, tagName)
+        .map((noteId) => getNoteVector(db, noteId, embeddingOptions))
+        .filter((v) => v !== null);
+    return vectors.length >= minMembers ? centroidOf(vectors) : null;
+}
+
+const TAG_FIT_MIN_MEMBERS = 2;
+
+function computeTagFitRows(db, tagName, threshold, embeddingOptions) {
+    const centroid = computeTagCentroid(db, tagName, embeddingOptions, TAG_FIT_MIN_MEMBERS);
+    if (centroid === null) {
+        return [];
+    }
+    return exactTagNoteIds(db, tagName)
+        .map((noteId) => ({ noteId, vector: getNoteVector(db, noteId, embeddingOptions) }))
+        .filter((member) => member.vector !== null)
+        .map((member) => ({
+            tag: tagName,
+            note_title: titleForNoteId(db, member.noteId),
+            similarity_to_centroid: cosineSimilarity(member.vector, centroid),
+        }))
+        .filter((row) => threshold === undefined || row.similarity_to_centroid < threshold);
+}
+
+// Does each note actually sit near the centroid of the tag(s) it carries? (S013). A tag with only
+// one member note is skipped — that note *is* the centroid, similarity 1.0 is a definitionally
+// uninteresting result, not a real signal.
+export function tagFit(db, options = {}) {
+    const { tag, threshold, embeddingModel, embeddingVersion } = options;
+    const embeddingOptions = { embeddingModel, embeddingVersion };
+    const tagNames = tag ? [ tag ] : allTagNames(db);
+
+    const rows = tagNames.flatMap((tagName) => computeTagFitRows(db, tagName, threshold, embeddingOptions));
+    rows.sort((a, b) => a.similarity_to_centroid - b.similarity_to_centroid);
+    return rows;
+}
+
+const TAG_REDUNDANCY_MIN_MEMBERS = 1;
+
+function allTagCentroids(db, embeddingOptions) {
+    return allTagNames(db)
+        .map((name) => ({ name, centroid: computeTagCentroid(db, name, embeddingOptions, TAG_REDUNDANCY_MIN_MEMBERS) }))
+        .filter((entry) => entry.centroid !== null);
+}
+
+function tagCentroidPairs(centroids) {
+    const pairs = [];
+    for (let i = 0; i < centroids.length; i += 1) {
+        for (let j = i + 1; j < centroids.length; j += 1) {
+            pairs.push([ centroids[i], centroids[j] ]);
+        }
+    }
+    return pairs;
+}
+
+// Pairwise tag-centroid comparison, flagging tags that are probably duplicates of each other
+// (S013). `threshold` is required — there's no general-purpose default for "probably duplicates".
+export function tagRedundancy(db, options = {}) {
+    const { threshold, embeddingModel, embeddingVersion } = options;
+    if (threshold === undefined) {
+        throw new Error('vectors: --threshold is required for tag-redundancy');
+    }
+
+    const centroids = allTagCentroids(db, { embeddingModel, embeddingVersion });
+    const rows = tagCentroidPairs(centroids)
+        .map(([ a, b ]) => ({
+            tag_a: a.name, tag_b: b.name, centroid_similarity: cosineSimilarity(a.centroid, b.centroid),
+        }))
+        .filter((row) => row.centroid_similarity > threshold);
+
+    rows.sort((a, b) => b.centroid_similarity - a.centroid_similarity);
+    return rows;
+}

@@ -317,7 +317,34 @@ reading the output directly. `csv` is a bare header row (`id,title,x,y,z,label`,
 `json` gives `{ points: [...], metadata: { cluster_source } }`, where `cluster_source` is `"internal"`
 or the `--clusters` path used, present only when `--color-by=cluster`.
 
-`tag-fit`, `tag-redundancy`, `outliers`, and `calibrate` land here as they're implemented.
+#### `mnotes vectors tag-fit`
+
+```sh
+mnotes vectors tag-fit
+mnotes vectors tag-fit --tag=project --threshold=0.6
+```
+
+Flags: `--tag=T` (omit to check every tag at once), `--threshold=F` (only show rows below this
+similarity — omit to show all), `--format=table|json` (default `table`).
+
+Does each note actually sit near the centroid of the tag(s) it carries? Output:
+`tag | note_title | similarity_to_centroid`, sorted ascending (worst fit first). A tag with only one
+member note is skipped — that note *is* the centroid, so 1.0 similarity is not a real signal.
+
+#### `mnotes vectors tag-redundancy`
+
+```sh
+mnotes vectors tag-redundancy --threshold=0.85
+```
+
+Flags: `--threshold=F` (required — no general-purpose default for "probably duplicates"),
+`--format=table|json` (default `table`).
+
+Pairwise tag-centroid comparison, flagging tags that are probably duplicates of each other. Output:
+`tag_a | tag_b | centroid_similarity`, sorted descending. Unlike `tag-fit`, a tag with a single member
+note still gets a centroid here (that note's own vector).
+
+`outliers` and `calibrate` land here as they're implemented.
 
 ## MCP server (Claude Code / Claude Desktop)
 

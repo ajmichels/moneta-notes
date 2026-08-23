@@ -28,6 +28,12 @@ function insertNote(db, path) {
     return db.prepare('SELECT id FROM notes WHERE path = ?').get(path).id;
 }
 
+function tagNote(db, noteId, tagName) {
+    db.prepare('INSERT INTO tags (name) VALUES (?) ON CONFLICT(name) DO NOTHING').run(tagName);
+    const { id: tagId } = db.prepare('SELECT id FROM tags WHERE name = ?').get(tagName);
+    db.prepare('INSERT INTO note_tags (note_id, tag_id) VALUES (?, ?)').run(noteId, tagId);
+}
+
 function makeVector(seed, dims = 1024) {
     const vector = new Float32Array(dims);
     let state = Math.floor(seed * 1e6) + 1;
@@ -437,6 +443,112 @@ describe('mnotes vectors reduce', () => {
         await expect(runVectorsCommand(
             [ 'reduce', '--algo', 'pca', '--dims', '4' ], makeDeps(db),
         )).rejects.toThrow(/--dims must be 2 or 3/);
+        db.close();
+    });
+});
+
+describe('mnotes vectors tag-fit', () => {
+    it('prints a tag | note_title | similarity_to_centroid table by default', async () => {
+        const db = makeTempDb();
+        const a = insertNote(db, 'A.md');
+        const b = insertNote(db, 'B.md');
+        const c = insertNote(db, 'C.md');
+        insertChunk(db, a, { seed: 0.1 });
+        insertChunk(db, b, { seed: 0.1 });
+        insertChunk(db, c, { seed: 0.9 });
+        tagNote(db, a, 'project');
+        tagNote(db, b, 'project');
+        tagNote(db, c, 'project');
+
+        const result = await runVectorsCommand([ 'tag-fit' ], makeDeps(db));
+
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout).toContain('similarity_to_centroid');
+        expect(result.stdout).toContain('C');
+        db.close();
+    });
+
+    it('--format json prints structured rows', async () => {
+        const db = makeTempDb();
+        const a = insertNote(db, 'A.md');
+        const b = insertNote(db, 'B.md');
+        insertChunk(db, a, { seed: 0.1 });
+        insertChunk(db, b, { seed: 0.9 });
+        tagNote(db, a, 'project');
+        tagNote(db, b, 'project');
+
+        const result = await runVectorsCommand([ 'tag-fit', '--format', 'json' ], makeDeps(db));
+
+        const parsed = JSON.parse(result.stdout);
+        expect(parsed).toHaveLength(2);
+        expect(parsed[0]).toEqual({
+            tag: 'project', note_title: expect.any(String), similarity_to_centroid: expect.any(Number),
+        });
+        db.close();
+    });
+
+    it('--tag restricts to a single tag', async () => {
+        const db = makeTempDb();
+        const a = insertNote(db, 'A.md');
+        const b = insertNote(db, 'B.md');
+        insertChunk(db, a, { seed: 0.1 });
+        insertChunk(db, b, { seed: 0.9 });
+        tagNote(db, a, 'project');
+        tagNote(db, b, 'project');
+        tagNote(db, b, 'other');
+        const c = insertNote(db, 'C.md');
+        insertChunk(db, c, { seed: 0.5 });
+        tagNote(db, c, 'other');
+
+        const result = await runVectorsCommand([ 'tag-fit', '--tag', 'other', '--format', 'json' ], makeDeps(db));
+
+        const parsed = JSON.parse(result.stdout);
+        expect(parsed.every((r) => r.tag === 'other')).toBe(true);
+        db.close();
+    });
+});
+
+describe('mnotes vectors tag-redundancy', () => {
+    it('requires --threshold', async () => {
+        const db = makeTempDb();
+        await expect(runVectorsCommand([ 'tag-redundancy' ], makeDeps(db)))
+            .rejects.toThrow(/--threshold is required/);
+        db.close();
+    });
+
+    it('prints a tag_a | tag_b | centroid_similarity table by default', async () => {
+        const db = makeTempDb();
+        const a = insertNote(db, 'A.md');
+        const b = insertNote(db, 'B.md');
+        insertChunk(db, a, { seed: 0.1 });
+        insertChunk(db, b, { seed: 0.1 });
+        tagNote(db, a, 'alpha');
+        tagNote(db, b, 'beta');
+
+        const result = await runVectorsCommand([ 'tag-redundancy', '--threshold', '0.5' ], makeDeps(db));
+
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout).toContain('centroid_similarity');
+        expect(result.stdout).toContain('alpha');
+        db.close();
+    });
+
+    it('--format json prints structured rows', async () => {
+        const db = makeTempDb();
+        const a = insertNote(db, 'A.md');
+        const b = insertNote(db, 'B.md');
+        insertChunk(db, a, { seed: 0.1 });
+        insertChunk(db, b, { seed: 0.1 });
+        tagNote(db, a, 'alpha');
+        tagNote(db, b, 'beta');
+
+        const result = await runVectorsCommand(
+            [ 'tag-redundancy', '--threshold', '0.5', '--format', 'json' ], makeDeps(db),
+        );
+
+        expect(JSON.parse(result.stdout)).toEqual([
+            { tag_a: 'alpha', tag_b: 'beta', centroid_similarity: expect.any(Number) },
+        ]);
         db.close();
     });
 });
