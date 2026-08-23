@@ -258,6 +258,76 @@ describe('mnotes vectors nearest', () => {
     });
 });
 
+function seedTwoGroups(db) {
+    const groupA = [ insertNote(db, 'A1.md'), insertNote(db, 'A2.md') ];
+    const groupB = [ insertNote(db, 'B1.md'), insertNote(db, 'B2.md') ];
+    for (const noteId of groupA) {
+        insertChunk(db, noteId, { seed: 0.1 });
+    }
+    for (const noteId of groupB) {
+        insertChunk(db, noteId, { seed: 0.9 });
+    }
+}
+
+describe('mnotes vectors cluster', () => {
+    it('prints an aligned cluster_id | size | example_titles table by default', async () => {
+        const db = makeTempDb();
+        seedTwoGroups(db);
+
+        const result = await runVectorsCommand([ 'cluster', '--algo', 'kmeans', '--k', '2' ], makeDeps(db));
+
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout).toContain('cluster_id');
+        expect(result.stdout).toContain('example_titles');
+        db.close();
+    });
+
+    it('--format json prints full membership', async () => {
+        const db = makeTempDb();
+        seedTwoGroups(db);
+
+        const result = await runVectorsCommand(
+            [ 'cluster', '--algo', 'kmeans', '--k', '2', '--format', 'json' ], makeDeps(db),
+        );
+
+        const parsed = JSON.parse(result.stdout);
+        expect(parsed).toHaveLength(4);
+        expect(parsed[0]).toEqual({ cluster_id: expect.any(Number), note_title: expect.any(String) });
+        db.close();
+    });
+
+    it('--algo dbscan with --epsilon/--min-points separates the two groups', async () => {
+        const db = makeTempDb();
+        seedTwoGroups(db);
+
+        const result = await runVectorsCommand(
+            [ 'cluster', '--algo', 'dbscan', '--epsilon', '0.1', '--min-points', '2', '--format', 'json' ],
+            makeDeps(db),
+        );
+
+        const parsed = JSON.parse(result.stdout);
+        const byTitle = Object.fromEntries(parsed.map((r) => [ r.note_title, r.cluster_id ]));
+        expect(byTitle.A1).toBe(byTitle.A2);
+        expect(byTitle.B1).toBe(byTitle.B2);
+        expect(byTitle.A1).not.toBe(byTitle.B1);
+        db.close();
+    });
+
+    it('requires --algo', async () => {
+        const db = makeTempDb();
+        await expect(runVectorsCommand([ 'cluster' ], makeDeps(db))).rejects.toThrow(/--algo is required/);
+        db.close();
+    });
+
+    it('surfaces core validation errors (e.g. --k missing for kmeans)', async () => {
+        const db = makeTempDb();
+        seedTwoGroups(db);
+        await expect(runVectorsCommand([ 'cluster', '--algo', 'kmeans' ], makeDeps(db)))
+            .rejects.toThrow(/--k is required/);
+        db.close();
+    });
+});
+
 describe('mnotes vectors: unknown subcommand', () => {
     it('returns a non-zero exit code with an error on stderr', async () => {
         const db = makeTempDb();

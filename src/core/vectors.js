@@ -1,3 +1,6 @@
+import { kmeans } from 'ml-kmeans';
+import { agnes } from 'ml-hclust';
+import { DBSCAN } from 'density-clustering';
 import { resolveTitle, stripMdExtension } from './note-fs.js';
 
 export function vectorToBuffer(vector) {
@@ -346,4 +349,141 @@ export function nearestNeighbors(db, query, options = {}) {
     return scored.slice(0, k).map(({ entry, similarity }, index) => (
         toNeighborResult(db, entry, against, similarity, index + 1)
     ));
+}
+
+function scopedPoints(db, level, options) {
+    const { tag, folder, embeddingModel, embeddingVersion } = options;
+    const noteIds = resolveScopeNoteIds(db, { tag, folder });
+    const points = level === 'chunk'
+        ? getAllChunkVectors(db, { noteIds, embeddingModel, embeddingVersion })
+        : getAllNoteVectors(db, { noteIds, embeddingModel, embeddingVersion });
+    if (points.length === 0) {
+        throw new Error('vectors: no vectors in scope to cluster');
+    }
+    return points;
+}
+
+// A fixed seed makes repeated identical `cluster --algo kmeans` invocations reproducible — this
+// module has no other stated need for true randomness (unlike `calibrate`'s baseline sample,
+// where reproducibility is explicitly not a goal per S013).
+const KMEANS_SEED = 20260823;
+
+function runKmeansClustering(points, k) {
+    if (!Number.isInteger(k) || k < 1) {
+        throw new Error('vectors: --k is required for --algo kmeans');
+    }
+    if (points.length < k) {
+        throw new Error(`vectors: --k=${k} exceeds the number of points in scope (${points.length})`);
+    }
+    const data = points.map((p) => Array.from(p.vector));
+    return kmeans(data, k, { seed: KMEANS_SEED }).clusters;
+}
+
+function assignmentsFromGroups(pointCount, groups) {
+    const assignments = new Array(pointCount).fill(-1);
+    groups.forEach((cluster, clusterId) => {
+        for (const index of cluster.indices()) {
+            assignments[index] = clusterId;
+        }
+    });
+    return assignments;
+}
+
+function runHierarchicalClustering(points, k, cutHeight) {
+    if ((k === undefined) === (cutHeight === undefined)) {
+        throw new Error('vectors: --algo hierarchical requires exactly one of --k or --cut-height');
+    }
+    if (k !== undefined && (!Number.isInteger(k) || points.length < k)) {
+        throw new Error(`vectors: --k=${k} exceeds the number of points in scope (${points.length})`);
+    }
+
+    const data = points.map((p) => Array.from(p.vector));
+    const tree = agnes(data, { distanceFunction: cosineDistance });
+    const groups = k !== undefined ? tree.group(k).children : tree.cut(cutHeight);
+    return assignmentsFromGroups(points.length, groups);
+}
+
+function runDbscanClustering(points, epsilon, minPoints) {
+    if (epsilon === undefined || minPoints === undefined) {
+        throw new Error('vectors: --algo dbscan requires both --epsilon and --min-points');
+    }
+    const data = points.map((p) => Array.from(p.vector));
+    const clusters = new DBSCAN().run(data, epsilon, minPoints, cosineDistance);
+    const assignments = new Array(points.length).fill(-1);
+    clusters.forEach((cluster, clusterId) => {
+        for (const index of cluster) {
+            assignments[index] = clusterId;
+        }
+    });
+    return assignments;
+}
+
+function assignClusters(algo, points, options) {
+    if (algo === 'kmeans') {
+        return runKmeansClustering(points, options.k);
+    }
+    if (algo === 'hierarchical') {
+        return runHierarchicalClustering(points, options.k, options.cutHeight);
+    }
+    if (algo === 'dbscan') {
+        return runDbscanClustering(points, options.epsilon, options.minPoints);
+    }
+    throw new Error(`vectors: unknown --algo "${algo}"`);
+}
+
+function pointRef(db, level, point) {
+    return level === 'chunk'
+        ? { chunk_id: point.chunkId, note_title: titleForNoteId(db, point.noteId) }
+        : { note_title: titleForNoteId(db, point.noteId) };
+}
+
+function buildMembership(db, level, points, assignments) {
+    return points.map((point, index) => ({ cluster_id: assignments[index], ...pointRef(db, level, point) }));
+}
+
+function groupByCluster(points, assignments) {
+    const byCluster = new Map();
+    points.forEach((point, index) => {
+        const clusterId = assignments[index];
+        if (!byCluster.has(clusterId)) {
+            byCluster.set(clusterId, []);
+        }
+        byCluster.get(clusterId).push(point);
+    });
+    return byCluster;
+}
+
+const EXAMPLE_TITLES_PER_CLUSTER = 3;
+
+function exampleTitlesForCluster(db, level, members) {
+    const centroid = centroidOf(members.map((m) => m.vector));
+    const ranked = [ ...members ].sort(
+        (a, b) => cosineSimilarity(centroid, b.vector) - cosineSimilarity(centroid, a.vector),
+    );
+    return ranked.slice(0, EXAMPLE_TITLES_PER_CLUSTER).map((m) => pointRef(db, level, m).note_title);
+}
+
+function buildClusterSummary(db, level, points, assignments) {
+    const byCluster = groupByCluster(points, assignments);
+    const summary = [ ...byCluster.entries() ].map(([ clusterId, members ]) => ({
+        cluster_id: clusterId,
+        size: members.length,
+        example_titles: exampleTitlesForCluster(db, level, members),
+    }));
+    summary.sort((a, b) => a.cluster_id - b.cluster_id);
+    return summary;
+}
+
+// Whole-vault (or --tag/--folder-scoped) grouping. Note-level always uses centroids (S013 —
+// cluster/reduce/outliers never accept --aggregate). Runs on full-dimensional vectors regardless
+// of any `reduce` output for the same scope.
+export function clusterVectors(db, options = {}) {
+    const { level = 'note', algo } = options;
+    const points = scopedPoints(db, level, options);
+    const assignments = assignClusters(algo, points, options);
+
+    return {
+        membership: buildMembership(db, level, points, assignments),
+        clusters: buildClusterSummary(db, level, points, assignments),
+    };
 }

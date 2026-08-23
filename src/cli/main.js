@@ -88,6 +88,9 @@ const COMMAND_USAGE = {
     vectors: 'mnotes vectors compare <a> <b> [--level=note|chunk] [--aggregate=centroid|best-chunk|all-pairs] [--json]\n'
         + '       mnotes vectors nearest <note-title|chunk-id> [--level=note|chunk] [--against=note|chunk]\n'
         + '           [--aggregate=centroid|best-chunk] [--k=N] [--score] [--json]\n'
+        + '       mnotes vectors cluster --algo=kmeans|hierarchical|dbscan [--level=note|chunk]\n'
+        + '           [--k=N] [--cut-height=F] [--epsilon=F] [--min-points=N] [--tag=T] [--folder=P]\n'
+        + '           [--format=table|json]\n'
         + '       (more vectors subcommands land here as they\'re implemented — see S013)',
 };
 

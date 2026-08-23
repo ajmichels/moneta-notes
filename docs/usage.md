@@ -274,8 +274,28 @@ distinct from `search --mode=semantic`, which re-embeds typed query text. The qu
 excluded from its own results. `--against=chunk` output includes each hit's `chunk_line_start`/
 `chunk_line_end`.
 
-More `vectors` subcommands (`cluster`, `reduce`, `tag-fit`, `tag-redundancy`, `outliers`,
-`calibrate`) land here as they're implemented.
+#### `mnotes vectors cluster`
+
+```sh
+mnotes vectors cluster --algo=kmeans --k=8
+mnotes vectors cluster --algo=hierarchical --cut-height=0.3 --folder="Weekly Notes"
+mnotes vectors cluster --algo=dbscan --epsilon=0.25 --min-points=3 --format=json
+```
+
+Flags: `--level=note|chunk` (default `note`, always centroid at note level — no `--aggregate` flag on
+this command), `--algo=kmeans|hierarchical|dbscan` (required), `--k=N` (kmeans cluster count, or an
+alternative to `--cut-height` for hierarchical), `--cut-height=F` (hierarchical only), `--epsilon=F`
+/`--min-points=N` (dbscan only, both required — no invented defaults), `--tag=T`/`--folder=P` (scope
+filter, mutually exclusive), `--format=table|json` (default `table`).
+
+Whole-vault (or scoped) grouping over full-dimensional vectors — never runs on a `reduce` projection.
+`table` format shows `cluster_id | size | example_titles` (up to 3 titles per cluster, closest to its
+centroid); `json` gives full membership. DBSCAN noise points get `cluster_id: -1`. Fewer points in
+scope than requested (`--k` too large, too few points for a `--cut-height` cut) is a hard error, not a
+silently smaller cluster count.
+
+More `vectors` subcommands (`reduce`, `tag-fit`, `tag-redundancy`, `outliers`, `calibrate`) land here
+as they're implemented.
 
 ## MCP server (Claude Code / Claude Desktop)
 

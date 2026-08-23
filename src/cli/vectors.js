@@ -1,6 +1,6 @@
 import { parseArgs } from 'node:util';
-import { compareVectors, nearestNeighbors } from '../core/vectors.js';
-import { formatCompareResult, formatNearestTable, formatJson } from '../format.js';
+import { compareVectors, nearestNeighbors, clusterVectors } from '../core/vectors.js';
+import { formatCompareResult, formatNearestTable, formatClusterTable, formatJson } from '../format.js';
 import { resolveConfig } from '../config.js';
 
 // Detects an explicitly-passed `--name`/`--name=value` flag, as opposed to a parseArgs default —
@@ -86,9 +86,56 @@ async function runNearest(args, deps) {
     return { stdout: formatNearestTable(results, { against, score: values.score }), stderr: '', exitCode: 0 };
 }
 
+function toFloatOrUndefined(raw) {
+    return raw !== undefined ? Number(raw) : undefined;
+}
+
+function toIntOrUndefined(raw) {
+    return raw !== undefined ? parseInt(raw, 10) : undefined;
+}
+
+async function runCluster(args, deps) {
+    const { values } = parseArgs({
+        args,
+        options: {
+            level: { type: 'string', default: 'note' },
+            algo: { type: 'string' },
+            k: { type: 'string' },
+            'cut-height': { type: 'string' },
+            epsilon: { type: 'string' },
+            'min-points': { type: 'string' },
+            tag: { type: 'string' },
+            folder: { type: 'string' },
+            format: { type: 'string', default: 'table' },
+        },
+    });
+
+    if (!values.algo) {
+        throw new Error('mnotes vectors cluster: --algo is required (kmeans|hierarchical|dbscan)');
+    }
+
+    const { membership, clusters } = clusterVectors(deps.db, {
+        level: values.level,
+        algo: values.algo,
+        k: toIntOrUndefined(values.k),
+        cutHeight: toFloatOrUndefined(values['cut-height']),
+        epsilon: toFloatOrUndefined(values.epsilon),
+        minPoints: toIntOrUndefined(values['min-points']),
+        tag: values.tag,
+        folder: values.folder,
+        ...embeddingOptions(deps),
+    });
+
+    if (values.format === 'json') {
+        return { stdout: formatJson(membership), stderr: '', exitCode: 0 };
+    }
+    return { stdout: formatClusterTable(clusters), stderr: '', exitCode: 0 };
+}
+
 const VECTORS_SUBCOMMANDS = {
     compare: runCompare,
     nearest: runNearest,
+    cluster: runCluster,
 };
 
 export async function runVectorsCommand(args, deps) {

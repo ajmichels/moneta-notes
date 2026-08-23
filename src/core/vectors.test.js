@@ -8,7 +8,7 @@ import {
     vectorToBuffer, bufferToVector, cosineSimilarity, cosineDistance,
     getChunkVectors, getAllChunkVectors, getNoteVector,
     noteIdForTitle, titleForNoteId, resolveNoteId, resolveScopeNoteIds, compareVectors,
-    nearestNeighbors,
+    nearestNeighbors, clusterVectors,
 } from './vectors.js';
 
 const EMB = { embeddingModel: 'test-model', embeddingVersion: 'v1' };
@@ -429,6 +429,161 @@ describe('nearestNeighbors', () => {
     it('throws for an unresolvable query title', () => {
         const db = makeTempDb();
         expect(() => nearestNeighbors(db, 'Nope', { ...EMB })).toThrow(/no note found/);
+        db.close();
+    });
+});
+
+// Two seeds (0.1, 0.9) whose vectors sit at cosine distance ~0.25 from each other — two notes
+// sharing a seed get bit-identical vectors (distance 0), so any of the three algorithms below
+// should cleanly separate "same seed" from "different seed" regardless of init/linkage details.
+function seedTwoGroups(db, insertVector) {
+    const groupA = [ insertNote(db, 'A1.md'), insertNote(db, 'A2.md') ];
+    const groupB = [ insertNote(db, 'B1.md'), insertNote(db, 'B2.md') ];
+    for (const noteId of groupA) {
+        insertVector(db, noteId, { seed: 0.1 });
+    }
+    for (const noteId of groupB) {
+        insertVector(db, noteId, { seed: 0.9 });
+    }
+    return { groupA, groupB };
+}
+
+function clusterIdsByTitle(membership) {
+    return Object.fromEntries(membership.map((m) => [ m.note_title, m.cluster_id ]));
+}
+
+function expectTwoCleanClusters(membership) {
+    const byTitle = clusterIdsByTitle(membership);
+    expect(byTitle.A1).toBe(byTitle.A2);
+    expect(byTitle.B1).toBe(byTitle.B2);
+    expect(byTitle.A1).not.toBe(byTitle.B1);
+}
+
+describe('clusterVectors: kmeans', () => {
+    it('separates two well-separated groups into two clusters', () => {
+        const db = makeTempDb();
+        seedTwoGroups(db, insertChunk);
+
+        const { membership, clusters } = clusterVectors(db, { level: 'note', algo: 'kmeans', k: 2, ...EMB });
+
+        expectTwoCleanClusters(membership);
+        expect(clusters).toHaveLength(2);
+        expect(clusters[0].example_titles.length).toBeGreaterThan(0);
+        db.close();
+    });
+
+    it('throws when --k exceeds the number of points in scope', () => {
+        const db = makeTempDb();
+        seedTwoGroups(db, insertChunk);
+        expect(() => clusterVectors(db, { level: 'note', algo: 'kmeans', k: 99, ...EMB }))
+            .toThrow(/exceeds the number of points/);
+        db.close();
+    });
+
+    it('throws when --k is missing', () => {
+        const db = makeTempDb();
+        seedTwoGroups(db, insertChunk);
+        expect(() => clusterVectors(db, { level: 'note', algo: 'kmeans', ...EMB }))
+            .toThrow(/--k is required/);
+        db.close();
+    });
+});
+
+describe('clusterVectors: hierarchical', () => {
+    it('--k cuts the dendrogram to a fixed cluster count', () => {
+        const db = makeTempDb();
+        seedTwoGroups(db, insertChunk);
+        const { membership } = clusterVectors(db, { level: 'note', algo: 'hierarchical', k: 2, ...EMB });
+        expectTwoCleanClusters(membership);
+        db.close();
+    });
+
+    it('--cut-height cuts by distance instead of a fixed count', () => {
+        const db = makeTempDb();
+        seedTwoGroups(db, insertChunk);
+        const { membership } = clusterVectors(
+            db, { level: 'note', algo: 'hierarchical', cutHeight: 0.1, ...EMB },
+        );
+        expectTwoCleanClusters(membership);
+        db.close();
+    });
+
+    it('throws when both --k and --cut-height are given', () => {
+        const db = makeTempDb();
+        seedTwoGroups(db, insertChunk);
+        expect(() => clusterVectors(
+            db, { level: 'note', algo: 'hierarchical', k: 2, cutHeight: 0.1, ...EMB },
+        )).toThrow(/exactly one of --k or --cut-height/);
+        db.close();
+    });
+
+    it('throws when neither --k nor --cut-height is given', () => {
+        const db = makeTempDb();
+        seedTwoGroups(db, insertChunk);
+        expect(() => clusterVectors(db, { level: 'note', algo: 'hierarchical', ...EMB }))
+            .toThrow(/exactly one of --k or --cut-height/);
+        db.close();
+    });
+});
+
+describe('clusterVectors: dbscan', () => {
+    it('separates dense groups and requires both --epsilon and --min-points', () => {
+        const db = makeTempDb();
+        seedTwoGroups(db, insertChunk);
+        const { membership } = clusterVectors(
+            db, { level: 'note', algo: 'dbscan', epsilon: 0.1, minPoints: 2, ...EMB },
+        );
+        expectTwoCleanClusters(membership);
+        db.close();
+    });
+
+    it('throws when --epsilon or --min-points is missing', () => {
+        const db = makeTempDb();
+        seedTwoGroups(db, insertChunk);
+        expect(() => clusterVectors(db, { level: 'note', algo: 'dbscan', epsilon: 0.1, ...EMB }))
+            .toThrow(/requires both --epsilon and --min-points/);
+        db.close();
+    });
+});
+
+describe('clusterVectors: scoping and errors', () => {
+    it('--tag restricts the scope to notes carrying that tag', () => {
+        const db = makeTempDb();
+        const { groupA } = seedTwoGroups(db, insertChunk);
+        db.prepare('INSERT INTO tags (name) VALUES (?)').run('scoped');
+        const { id } = db.prepare('SELECT id FROM tags WHERE name = ?').get('scoped');
+        db.prepare('INSERT INTO note_tags (note_id, tag_id) VALUES (?, ?)').run(groupA[0], id);
+
+        const { membership } = clusterVectors(
+            db, { level: 'note', algo: 'kmeans', k: 1, tag: 'scoped', ...EMB },
+        );
+
+        expect(membership).toHaveLength(1);
+        expect(membership[0].note_title).toBe('A1');
+        db.close();
+    });
+
+    it('--level chunk clusters raw chunk vectors and reports chunk_id + note_title', () => {
+        const db = makeTempDb();
+        seedTwoGroups(db, insertChunk);
+        const { membership } = clusterVectors(db, { level: 'chunk', algo: 'kmeans', k: 2, ...EMB });
+        expect(membership[0]).toEqual({
+            cluster_id: expect.any(Number), chunk_id: expect.any(Number), note_title: expect.any(String),
+        });
+        db.close();
+    });
+
+    it('throws for an unknown --algo', () => {
+        const db = makeTempDb();
+        seedTwoGroups(db, insertChunk);
+        expect(() => clusterVectors(db, { level: 'note', algo: 'nope', ...EMB })).toThrow(/unknown --algo/);
+        db.close();
+    });
+
+    it('throws when there are no vectors in scope', () => {
+        const db = makeTempDb();
+        expect(() => clusterVectors(db, { level: 'note', algo: 'kmeans', k: 1, ...EMB }))
+            .toThrow(/no vectors in scope/);
         db.close();
     });
 });

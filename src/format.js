@@ -138,6 +138,13 @@ export function formatNearestTable(results, { against = 'note', score = false } 
     return formatTable(score ? [ ...columns, 'similarity' ] : columns, results, { align: true });
 }
 
+export function formatClusterTable(clusters, { align = true } = {}) {
+    const rows = clusters.map((c) => ({
+        cluster_id: c.cluster_id, size: c.size, example_titles: c.example_titles.join(', '),
+    }));
+    return formatTable([ 'cluster_id', 'size', 'example_titles' ], rows, { align });
+}
+
 export function formatExplain({ results, pipeline }) {
     const header = `mode=${pipeline.mode} limit=${pipeline.limit} overfetch=${pipeline.overfetchLimit} `
         + `fts5_expression=${JSON.stringify(pipeline.fulltextExpression)}`;
