@@ -2,10 +2,11 @@ import { parseArgs } from 'node:util';
 import { readFileSync, writeFileSync } from 'node:fs';
 import {
     compareVectors, nearestNeighbors, clusterVectors, reduceVectors, tagFit, tagRedundancy,
+    findOutliers,
 } from '../core/vectors.js';
 import {
     formatCompareResult, formatNearestTable, formatClusterTable, formatReduceCsv,
-    formatTagFitTable, formatTagRedundancyTable, formatJson,
+    formatTagFitTable, formatTagRedundancyTable, formatOutliersTable, formatJson,
 } from '../format.js';
 import { resolveConfig } from '../config.js';
 
@@ -243,6 +244,47 @@ async function runTagRedundancy(args, deps) {
     return { stdout: formatTagRedundancyTable(rows), stderr: '', exitCode: 0 };
 }
 
+function validateOutliersFlags(args, values) {
+    if (!values.mode) {
+        throw new Error('mnotes vectors outliers: --mode is required (isolated|bridge)');
+    }
+    if (values.mode === 'isolated' && hasFlag(args, 'threshold') && hasFlag(args, 'top')) {
+        throw new Error('mnotes vectors outliers: --threshold and --top are mutually exclusive');
+    }
+    if (values.mode === 'bridge' && hasFlag(args, 'threshold')) {
+        throw new Error('mnotes vectors outliers: --threshold is not valid with --mode bridge');
+    }
+}
+
+async function runOutliers(args, deps) {
+    const { values } = parseArgs({
+        args,
+        options: {
+            level: { type: 'string', default: 'note' },
+            mode: { type: 'string' },
+            threshold: { type: 'string' },
+            top: { type: 'string' },
+            clusters: { type: 'string' },
+            format: { type: 'string', default: 'table' },
+        },
+    });
+    validateOutliersFlags(args, values);
+
+    const rows = findOutliers(deps.db, {
+        level: values.level,
+        mode: values.mode,
+        threshold: toFloatOrUndefined(values.threshold),
+        top: toIntOrUndefined(values.top),
+        clusters: readClustersFile(values.clusters),
+        ...embeddingOptions(deps),
+    });
+
+    if (values.format === 'json') {
+        return { stdout: formatJson(rows), stderr: '', exitCode: 0 };
+    }
+    return { stdout: formatOutliersTable(rows, { mode: values.mode }), stderr: '', exitCode: 0 };
+}
+
 const VECTORS_SUBCOMMANDS = {
     compare: runCompare,
     nearest: runNearest,
@@ -250,6 +292,7 @@ const VECTORS_SUBCOMMANDS = {
     reduce: runReduce,
     'tag-fit': runTagFit,
     'tag-redundancy': runTagRedundancy,
+    outliers: runOutliers,
 };
 
 export async function runVectorsCommand(args, deps) {

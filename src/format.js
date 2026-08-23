@@ -171,6 +171,13 @@ export function formatTagRedundancyTable(rows, { align = true } = {}) {
     return formatTable([ 'tag_a', 'tag_b', 'centroid_similarity' ], rows, { align });
 }
 
+export function formatOutliersTable(rows, { mode = 'isolated', align = true } = {}) {
+    const columns = mode === 'bridge'
+        ? [ 'note_title', 'cluster_a', 'cluster_b', 'bridge_score' ]
+        : [ 'note_title', 'nearest_neighbor_similarity' ];
+    return formatTable(columns, rows, { align });
+}
+
 export function formatExplain({ results, pipeline }) {
     const header = `mode=${pipeline.mode} limit=${pipeline.limit} overfetch=${pipeline.overfetchLimit} `
         + `fts5_expression=${JSON.stringify(pipeline.fulltextExpression)}`;

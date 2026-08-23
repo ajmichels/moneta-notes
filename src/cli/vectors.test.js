@@ -553,6 +553,90 @@ describe('mnotes vectors tag-redundancy', () => {
     });
 });
 
+describe('mnotes vectors outliers', () => {
+    it('isolated mode prints a note_title | nearest_neighbor_similarity table by default', async () => {
+        const db = makeTempDb();
+        const a1 = insertNote(db, 'A1.md');
+        const a2 = insertNote(db, 'A2.md');
+        const outlier = insertNote(db, 'Outlier.md');
+        insertChunk(db, a1, { seed: 0.1 });
+        insertChunk(db, a2, { seed: 0.1 });
+        insertChunk(db, outlier, { seed: 0.9 });
+
+        const result = await runVectorsCommand([ 'outliers', '--mode', 'isolated' ], makeDeps(db));
+
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout).toContain('nearest_neighbor_similarity');
+        expect(result.stdout).toContain('Outlier');
+        db.close();
+    });
+
+    it('isolated --format json prints structured rows', async () => {
+        const db = makeTempDb();
+        const a = insertNote(db, 'A.md');
+        const b = insertNote(db, 'B.md');
+        insertChunk(db, a, { seed: 0.1 });
+        insertChunk(db, b, { seed: 0.9 });
+
+        const result = await runVectorsCommand(
+            [ 'outliers', '--mode', 'isolated', '--format', 'json' ], makeDeps(db),
+        );
+
+        expect(JSON.parse(result.stdout)).toHaveLength(2);
+        db.close();
+    });
+
+    it('bridge mode reads --clusters from a file and prints cluster_a/cluster_b/bridge_score', async () => {
+        const db = makeTempDb();
+        const a1 = insertNote(db, 'A1.md');
+        const a2 = insertNote(db, 'A2.md');
+        const b1 = insertNote(db, 'B1.md');
+        const b2 = insertNote(db, 'B2.md');
+        insertChunk(db, a1, { seed: 0.1 });
+        insertChunk(db, a2, { seed: 0.1 });
+        insertChunk(db, b1, { seed: 0.9 });
+        insertChunk(db, b2, { seed: 0.9 });
+        const dir = mkdtempSync(join(tmpdir(), 'mnotes-cli-vectors-clusters2-'));
+        tempDirs.push(dir);
+        const clustersPath = join(dir, 'clusters.json');
+        writeFileSync(clustersPath, JSON.stringify([
+            { cluster_id: 0, note_title: 'A1' }, { cluster_id: 0, note_title: 'A2' },
+            { cluster_id: 1, note_title: 'B1' }, { cluster_id: 1, note_title: 'B2' },
+        ]));
+
+        const result = await runVectorsCommand(
+            [ 'outliers', '--mode', 'bridge', '--clusters', clustersPath ], makeDeps(db),
+        );
+
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout).toContain('bridge_score');
+        db.close();
+    });
+
+    it('requires --mode', async () => {
+        const db = makeTempDb();
+        await expect(runVectorsCommand([ 'outliers' ], makeDeps(db)))
+            .rejects.toThrow(/--mode is required/);
+        db.close();
+    });
+
+    it('rejects --threshold combined with --mode bridge', async () => {
+        const db = makeTempDb();
+        await expect(runVectorsCommand(
+            [ 'outliers', '--mode', 'bridge', '--threshold', '0.5' ], makeDeps(db),
+        )).rejects.toThrow(/not valid with --mode bridge/);
+        db.close();
+    });
+
+    it('rejects --threshold combined with --top in isolated mode', async () => {
+        const db = makeTempDb();
+        await expect(runVectorsCommand(
+            [ 'outliers', '--mode', 'isolated', '--threshold', '0.5', '--top', '3' ], makeDeps(db),
+        )).rejects.toThrow(/mutually exclusive/);
+        db.close();
+    });
+});
+
 describe('mnotes vectors: unknown subcommand', () => {
     it('returns a non-zero exit code with an error on stderr', async () => {
         const db = makeTempDb();

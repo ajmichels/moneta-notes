@@ -8,7 +8,7 @@ import {
     vectorToBuffer, bufferToVector, cosineSimilarity, cosineDistance,
     getChunkVectors, getAllChunkVectors, getNoteVector,
     noteIdForTitle, titleForNoteId, resolveNoteId, resolveScopeNoteIds, compareVectors,
-    nearestNeighbors, clusterVectors, reduceVectors, tagFit, tagRedundancy,
+    nearestNeighbors, clusterVectors, reduceVectors, tagFit, tagRedundancy, findOutliers,
 } from './vectors.js';
 
 const EMB = { embeddingModel: 'test-model', embeddingVersion: 'v1' };
@@ -825,6 +825,170 @@ describe('tagRedundancy', () => {
         const rows = tagRedundancy(db, { threshold: 0.5, ...EMB });
 
         expect(rows).toHaveLength(1);
+        db.close();
+    });
+});
+
+describe('findOutliers: isolated mode', () => {
+    it('ranks the least-similar-to-anything point first', () => {
+        const db = makeTempDb();
+        const a1 = insertNote(db, 'A1.md');
+        const a2 = insertNote(db, 'A2.md');
+        const outlier = insertNote(db, 'Outlier.md');
+        insertChunk(db, a1, { seed: 0.1 });
+        insertChunk(db, a2, { seed: 0.1 });
+        insertChunk(db, outlier, { seed: 0.9 });
+
+        const rows = findOutliers(db, { level: 'note', mode: 'isolated', ...EMB });
+
+        expect(rows[0].note_title).toBe('Outlier');
+        db.close();
+    });
+
+    it('--threshold only keeps rows below that similarity', () => {
+        const db = makeTempDb();
+        const a1 = insertNote(db, 'A1.md');
+        const a2 = insertNote(db, 'A2.md');
+        const outlier = insertNote(db, 'Outlier.md');
+        insertChunk(db, a1, { seed: 0.1 });
+        insertChunk(db, a2, { seed: 0.1 });
+        insertChunk(db, outlier, { seed: 0.9 });
+
+        const rows = findOutliers(db, { level: 'note', mode: 'isolated', threshold: 0.9, ...EMB });
+
+        expect(rows.map((r) => r.note_title)).toEqual([ 'Outlier' ]);
+        db.close();
+    });
+
+    it('--top limits the result count', () => {
+        const db = makeTempDb();
+        for (let i = 0; i < 5; i += 1) {
+            const noteId = insertNote(db, `N${i}.md`);
+            insertChunk(db, noteId, { seed: 0.1 * i });
+        }
+
+        const rows = findOutliers(db, { level: 'note', mode: 'isolated', top: 2, ...EMB });
+
+        expect(rows).toHaveLength(2);
+        db.close();
+    });
+
+    it('throws for fewer than 2 points', () => {
+        const db = makeTempDb();
+        const noteId = insertNote(db, 'A.md');
+        insertChunk(db, noteId, { seed: 0.1 });
+        expect(() => findOutliers(db, { level: 'note', mode: 'isolated', ...EMB }))
+            .toThrow(/at least 2 points/);
+        db.close();
+    });
+});
+
+describe('findOutliers: bridge mode', () => {
+    it('scores a point sitting between two clusters higher than a firmly-in-cluster point', () => {
+        const db = makeTempDb();
+        const a1 = insertNote(db, 'A1.md');
+        const a2 = insertNote(db, 'A2.md');
+        const b1 = insertNote(db, 'B1.md');
+        const b2 = insertNote(db, 'B2.md');
+        const middle = insertNote(db, 'Middle.md');
+        insertChunk(db, a1, { seed: 0.1 });
+        insertChunk(db, a2, { seed: 0.1 });
+        insertChunk(db, b1, { seed: 0.9 });
+        insertChunk(db, b2, { seed: 0.9 });
+        insertChunk(db, middle, { seed: 0.5 });
+
+        const membership = [
+            { cluster_id: 0, note_title: 'A1' }, { cluster_id: 0, note_title: 'A2' },
+            { cluster_id: 1, note_title: 'B1' }, { cluster_id: 1, note_title: 'B2' },
+            { cluster_id: 0, note_title: 'Middle' },
+        ];
+        const rows = findOutliers(db, { level: 'note', mode: 'bridge', clusters: membership, ...EMB });
+
+        expect(rows[0].note_title).toBe('Middle');
+        expect(rows[0].cluster_a).toBeDefined();
+        expect(rows[0].cluster_b).toBeDefined();
+        db.close();
+    });
+
+    it('excludes noise points (cluster_id -1) from scoring', () => {
+        const db = makeTempDb();
+        const a1 = insertNote(db, 'A1.md');
+        const a2 = insertNote(db, 'A2.md');
+        const b1 = insertNote(db, 'B1.md');
+        const b2 = insertNote(db, 'B2.md');
+        const noise = insertNote(db, 'Noise.md');
+        insertChunk(db, a1, { seed: 0.1 });
+        insertChunk(db, a2, { seed: 0.1 });
+        insertChunk(db, b1, { seed: 0.9 });
+        insertChunk(db, b2, { seed: 0.9 });
+        insertChunk(db, noise, { seed: 0.5 });
+
+        const membership = [
+            { cluster_id: 0, note_title: 'A1' }, { cluster_id: 0, note_title: 'A2' },
+            { cluster_id: 1, note_title: 'B1' }, { cluster_id: 1, note_title: 'B2' },
+            { cluster_id: -1, note_title: 'Noise' },
+        ];
+        const rows = findOutliers(db, { level: 'note', mode: 'bridge', clusters: membership, ...EMB });
+
+        expect(rows.some((r) => r.note_title === 'Noise')).toBe(false);
+        db.close();
+    });
+
+    it('--top limits the result count', () => {
+        const db = makeTempDb();
+        const a1 = insertNote(db, 'A1.md');
+        const a2 = insertNote(db, 'A2.md');
+        const b1 = insertNote(db, 'B1.md');
+        const b2 = insertNote(db, 'B2.md');
+        insertChunk(db, a1, { seed: 0.1 });
+        insertChunk(db, a2, { seed: 0.1 });
+        insertChunk(db, b1, { seed: 0.9 });
+        insertChunk(db, b2, { seed: 0.9 });
+
+        const membership = [
+            { cluster_id: 0, note_title: 'A1' }, { cluster_id: 0, note_title: 'A2' },
+            { cluster_id: 1, note_title: 'B1' }, { cluster_id: 1, note_title: 'B2' },
+        ];
+        const rows = findOutliers(db, { level: 'note', mode: 'bridge', clusters: membership, top: 1, ...EMB });
+
+        expect(rows).toHaveLength(1);
+        db.close();
+    });
+
+    it('throws when --clusters is missing', () => {
+        const db = makeTempDb();
+        const a = insertNote(db, 'A.md');
+        const b = insertNote(db, 'B.md');
+        insertChunk(db, a, { seed: 0.1 });
+        insertChunk(db, b, { seed: 0.9 });
+        expect(() => findOutliers(db, { level: 'note', mode: 'bridge', ...EMB }))
+            .toThrow(/requires --clusters/);
+        db.close();
+    });
+
+    it('throws when --clusters has fewer than 2 non-noise clusters', () => {
+        const db = makeTempDb();
+        const a = insertNote(db, 'A.md');
+        const b = insertNote(db, 'B.md');
+        insertChunk(db, a, { seed: 0.1 });
+        insertChunk(db, b, { seed: 0.9 });
+        const membership = [
+            { cluster_id: 0, note_title: 'A' }, { cluster_id: 0, note_title: 'B' },
+        ];
+        expect(() => findOutliers(db, { level: 'note', mode: 'bridge', clusters: membership, ...EMB }))
+            .toThrow(/at least 2 non-noise clusters/);
+        db.close();
+    });
+});
+
+describe('findOutliers: validation', () => {
+    it('throws for an unknown --mode', () => {
+        const db = makeTempDb();
+        const a = insertNote(db, 'A.md');
+        const b = insertNote(db, 'B.md');
+        insertChunk(db, a, { seed: 0.1 });
+        insertChunk(db, b, { seed: 0.9 });
+        expect(() => findOutliers(db, { level: 'note', mode: 'nope', ...EMB })).toThrow(/unknown --mode/);
         db.close();
     });
 });

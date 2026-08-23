@@ -344,7 +344,29 @@ Pairwise tag-centroid comparison, flagging tags that are probably duplicates of 
 `tag_a | tag_b | centroid_similarity`, sorted descending. Unlike `tag-fit`, a tag with a single member
 note still gets a centroid here (that note's own vector).
 
-`outliers` and `calibrate` land here as they're implemented.
+#### `mnotes vectors outliers`
+
+```sh
+mnotes vectors outliers --mode=isolated --threshold=0.3
+mnotes vectors outliers --mode=isolated --top=10
+mnotes vectors cluster --algo=kmeans --k=8 --format=json --output=clusters.json
+mnotes vectors outliers --mode=bridge --clusters=clusters.json --top=10
+```
+
+Flags: `--level=note|chunk` (default `note`, always centroid at note level — no `--aggregate` flag),
+`--mode=isolated|bridge` (required), `--threshold=F` (`isolated` only — below this nearest-neighbor
+similarity; mutually exclusive with `--top`), `--top=N` (either mode — the *n* most extreme results),
+`--clusters=path` (required for `--mode=bridge` — a saved `vectors cluster --format=json --output=...`
+file; bridge mode never recomputes its own clustering), `--format=table|json` (default `table`).
+Whole-vault, no `--tag`/`--folder` scoping.
+
+`isolated` reports each point's similarity to its single nearest neighbor, most isolated first.
+`bridge` reports points that sit ambiguously between two clusters from the loaded `--clusters` file
+(`cluster_a`/`cluster_b`, plus a `bridge_score` — highest when a point is equidistant between the two);
+DBSCAN noise points (`cluster_id: -1`) are excluded from bridge scoring, since a noise point isn't
+"between" clusters, it's unclustered.
+
+`calibrate` lands here as it's implemented.
 
 ## MCP server (Claude Code / Claude Desktop)
 

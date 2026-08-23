@@ -697,3 +697,123 @@ export function tagRedundancy(db, options = {}) {
     rows.sort((a, b) => b.centroid_similarity - a.centroid_similarity);
     return rows;
 }
+
+function outlierPointRef(db, level, point) {
+    if (level === 'chunk') {
+        return {
+            note_title: titleForNoteId(db, point.noteId),
+            chunk_line_start: point.lineStart,
+            chunk_line_end: point.lineEnd,
+        };
+    }
+    return { note_title: titleForNoteId(db, point.noteId) };
+}
+
+function nearestNeighborSimilarity(points, index) {
+    let best = -Infinity;
+    for (let i = 0; i < points.length; i += 1) {
+        if (i === index) {
+            continue;
+        }
+        const similarity = cosineSimilarity(points[index].vector, points[i].vector);
+        if (similarity > best) {
+            best = similarity;
+        }
+    }
+    return best;
+}
+
+function findIsolated(db, level, points, threshold, top) {
+    const rows = points.map((point, index) => ({
+        ...outlierPointRef(db, level, point),
+        nearest_neighbor_similarity: nearestNeighborSimilarity(points, index),
+    }));
+    rows.sort((a, b) => a.nearest_neighbor_similarity - b.nearest_neighbor_similarity);
+
+    if (threshold !== undefined) {
+        return rows.filter((row) => row.nearest_neighbor_similarity < threshold);
+    }
+    return top !== undefined ? rows.slice(0, top) : rows;
+}
+
+function buildClusterLabelMap(level, membership) {
+    return new Map(
+        membership.filter((row) => row.cluster_id !== -1).map((row) => [ clusterMembershipKey(level, row), row.cluster_id ]),
+    );
+}
+
+function groupVectorsByCluster(db, level, points, labelByKey) {
+    const byCluster = new Map();
+    for (const point of points) {
+        const clusterId = labelByKey.get(pointMembershipKey(db, level, point));
+        if (clusterId === undefined) {
+            continue;
+        }
+        if (!byCluster.has(clusterId)) {
+            byCluster.set(clusterId, []);
+        }
+        byCluster.get(clusterId).push(point.vector);
+    }
+    return byCluster;
+}
+
+function scoreBridgePoint(db, level, point, centroids) {
+    const ranked = centroids
+        .map((c) => ({ clusterId: c.clusterId, similarity: cosineSimilarity(point.vector, c.centroid) }))
+        .sort((a, b) => b.similarity - a.similarity);
+    const [ nearest, second ] = ranked;
+    return {
+        ...outlierPointRef(db, level, point),
+        cluster_a: nearest.clusterId,
+        cluster_b: second.clusterId,
+        bridge_score: 1 - Math.abs(nearest.similarity - second.similarity),
+    };
+}
+
+// Bridge points sit ambiguously between two clusters (S013): ranks every cluster centroid by
+// similarity to the point and scores how close together the top two are. Noise points
+// (cluster_id: -1, DBSCAN's convention) are excluded entirely — a noise point isn't "between"
+// clusters, it's unclustered, a condition `isolated` mode already covers.
+function findBridge(db, level, points, membership, top) {
+    const labelByKey = buildClusterLabelMap(level, membership);
+    const byCluster = groupVectorsByCluster(db, level, points, labelByKey);
+    if (byCluster.size < 2) {
+        throw new Error('vectors: --mode bridge needs at least 2 non-noise clusters in --clusters');
+    }
+    const centroids = [ ...byCluster.entries() ].map(([ clusterId, vectors ]) => (
+        { clusterId, centroid: centroidOf(vectors) }
+    ));
+
+    const scored = points
+        .filter((point) => labelByKey.get(pointMembershipKey(db, level, point)) !== undefined)
+        .map((point) => scoreBridgePoint(db, level, point, centroids));
+
+    scored.sort((a, b) => b.bridge_score - a.bridge_score);
+    return top !== undefined ? scored.slice(0, top) : scored;
+}
+
+// Whole-vault outlier detection (S013, no --tag/--folder scoping). `isolated`: nearest-neighbor
+// similarity, most isolated first. `bridge`: needs a `--clusters` file (a saved
+// `cluster --format json` output) rather than silently recomputing its own clustering — a bridge
+// point is only meaningful relative to a clustering that's actually been inspected.
+export function findOutliers(db, options = {}) {
+    const { level = 'note', mode, threshold, top, clusters, embeddingModel, embeddingVersion } = options;
+    const points = level === 'chunk'
+        ? getAllChunkVectors(db, { embeddingModel, embeddingVersion })
+        : getAllNoteVectors(db, { embeddingModel, embeddingVersion });
+
+    if (points.length < 2) {
+        throw new Error('vectors: outliers needs at least 2 points in the vault');
+    }
+
+    if (mode === 'isolated') {
+        return findIsolated(db, level, points, threshold, top);
+    }
+    if (mode === 'bridge') {
+        if (clusters === null || clusters === undefined) {
+            throw new Error('vectors: --mode bridge requires --clusters');
+        }
+        return findBridge(db, level, points, clusters, top);
+    }
+    throw new Error(`vectors: unknown --mode "${mode}"`);
+}

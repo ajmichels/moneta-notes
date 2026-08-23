@@ -96,6 +96,8 @@ const COMMAND_USAGE = {
         + '           [--color-by=tag|cluster|none] [--clusters=path] [--output=path] [--format=csv|json]\n'
         + '       mnotes vectors tag-fit [--tag=T] [--threshold=F] [--format=table|json]\n'
         + '       mnotes vectors tag-redundancy --threshold=F [--format=table|json]\n'
+        + '       mnotes vectors outliers --mode=isolated|bridge [--level=note|chunk]\n'
+        + '           [--threshold=F] [--top=N] [--clusters=path] [--format=table|json]\n'
         + '       (more vectors subcommands land here as they\'re implemented — see S013)',
 };
 
