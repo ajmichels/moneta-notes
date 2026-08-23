@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb } from '../core/db.js';
@@ -324,6 +324,119 @@ describe('mnotes vectors cluster', () => {
         seedTwoGroups(db);
         await expect(runVectorsCommand([ 'cluster', '--algo', 'kmeans' ], makeDeps(db)))
             .rejects.toThrow(/--k is required/);
+        db.close();
+    });
+});
+
+describe('mnotes vectors reduce', () => {
+    it('streams a header + one CSV row per point to stdout by default', async () => {
+        const db = makeTempDb();
+        seedTwoGroups(db);
+
+        const result = await runVectorsCommand([ 'reduce', '--algo', 'pca' ], makeDeps(db));
+
+        expect(result.exitCode).toBe(0);
+        const lines = result.stdout.trim().split('\n');
+        expect(lines[0]).toBe('id,title,x,y,z,label');
+        expect(lines).toHaveLength(5);
+        db.close();
+    });
+
+    it('--format json prints { points, metadata }', async () => {
+        const db = makeTempDb();
+        seedTwoGroups(db);
+
+        const result = await runVectorsCommand(
+            [ 'reduce', '--algo', 'pca', '--format', 'json' ], makeDeps(db),
+        );
+
+        const parsed = JSON.parse(result.stdout);
+        expect(parsed.points).toHaveLength(4);
+        expect(parsed.metadata).toEqual({ cluster_source: null });
+        db.close();
+    });
+
+    it('--output writes to a file instead of stdout', async () => {
+        const db = makeTempDb();
+        seedTwoGroups(db);
+        const dir = mkdtempSync(join(tmpdir(), 'mnotes-cli-vectors-out-'));
+        tempDirs.push(dir);
+        const outPath = join(dir, 'out.csv');
+
+        const result = await runVectorsCommand(
+            [ 'reduce', '--algo', 'pca', '--output', outPath ], makeDeps(db),
+        );
+
+        expect(result.stdout).toContain(`wrote 4 points to ${outPath}`);
+        expect(readFileSync(outPath, 'utf8')).toContain('id,title,x,y,z,label');
+        db.close();
+    });
+
+    it('--level chunk adds chunk_line_start/chunk_line_end CSV columns', async () => {
+        const db = makeTempDb();
+        seedTwoGroups(db);
+
+        const result = await runVectorsCommand(
+            [ 'reduce', '--algo', 'pca', '--level', 'chunk' ], makeDeps(db),
+        );
+
+        expect(result.stdout.split('\n')[0]).toBe('id,title,chunk_line_start,chunk_line_end,x,y,z,label');
+        db.close();
+    });
+
+    it('--color-by cluster runs an internal kmeans by default (cluster_source: internal)', async () => {
+        const db = makeTempDb();
+        seedTwoGroups(db);
+
+        const result = await runVectorsCommand(
+            [ 'reduce', '--algo', 'pca', '--color-by', 'cluster', '--format', 'json' ], makeDeps(db),
+        );
+
+        expect(JSON.parse(result.stdout).metadata.cluster_source).toBe('internal');
+        db.close();
+    });
+
+    it('--clusters points at a saved cluster membership file (cluster_source: external)', async () => {
+        const db = makeTempDb();
+        seedTwoGroups(db);
+        const dir = mkdtempSync(join(tmpdir(), 'mnotes-cli-vectors-clusters-'));
+        tempDirs.push(dir);
+        const clustersPath = join(dir, 'clusters.json');
+        writeFileSync(clustersPath, JSON.stringify([
+            { cluster_id: 0, note_title: 'A1' }, { cluster_id: 0, note_title: 'A2' },
+            { cluster_id: 1, note_title: 'B1' }, { cluster_id: 1, note_title: 'B2' },
+        ]));
+
+        const result = await runVectorsCommand(
+            [ 'reduce', '--algo', 'pca', '--color-by', 'cluster', '--clusters', clustersPath, '--format', 'json' ],
+            makeDeps(db),
+        );
+
+        expect(JSON.parse(result.stdout).metadata.cluster_source).toBe('external');
+        db.close();
+    });
+
+    it('requires --algo', async () => {
+        const db = makeTempDb();
+        await expect(runVectorsCommand([ 'reduce' ], makeDeps(db))).rejects.toThrow(/--algo is required/);
+        db.close();
+    });
+
+    it('rejects --neighbors/--min-dist combined with --algo pca', async () => {
+        const db = makeTempDb();
+        seedTwoGroups(db);
+        await expect(runVectorsCommand(
+            [ 'reduce', '--algo', 'pca', '--neighbors', '5' ], makeDeps(db),
+        )).rejects.toThrow(/not valid with --algo pca/);
+        db.close();
+    });
+
+    it('rejects an invalid --dims', async () => {
+        const db = makeTempDb();
+        seedTwoGroups(db);
+        await expect(runVectorsCommand(
+            [ 'reduce', '--algo', 'pca', '--dims', '4' ], makeDeps(db),
+        )).rejects.toThrow(/--dims must be 2 or 3/);
         db.close();
     });
 });

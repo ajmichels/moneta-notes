@@ -1,6 +1,9 @@
 import { parseArgs } from 'node:util';
-import { compareVectors, nearestNeighbors, clusterVectors } from '../core/vectors.js';
-import { formatCompareResult, formatNearestTable, formatClusterTable, formatJson } from '../format.js';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { compareVectors, nearestNeighbors, clusterVectors, reduceVectors } from '../core/vectors.js';
+import {
+    formatCompareResult, formatNearestTable, formatClusterTable, formatReduceCsv, formatJson,
+} from '../format.js';
 import { resolveConfig } from '../config.js';
 
 // Detects an explicitly-passed `--name`/`--name=value` flag, as opposed to a parseArgs default —
@@ -132,10 +135,77 @@ async function runCluster(args, deps) {
     return { stdout: formatClusterTable(clusters), stderr: '', exitCode: 0 };
 }
 
+function readClustersFile(path) {
+    if (path === undefined) {
+        return null;
+    }
+    return JSON.parse(readFileSync(path, 'utf8'));
+}
+
+function validateReduceFlags(args, values) {
+    if (values.algo === 'pca' && (hasFlag(args, 'neighbors') || hasFlag(args, 'min-dist'))) {
+        throw new Error('mnotes vectors reduce: --neighbors/--min-dist are not valid with --algo pca');
+    }
+    if (![ '2', '3' ].includes(values.dims)) {
+        throw new Error('mnotes vectors reduce: --dims must be 2 or 3');
+    }
+    if (![ 'csv', 'json' ].includes(values.format)) {
+        throw new Error('mnotes vectors reduce: --format must be csv or json');
+    }
+}
+
+async function runReduce(args, deps) {
+    const { values } = parseArgs({
+        args,
+        options: {
+            level: { type: 'string', default: 'note' },
+            algo: { type: 'string' },
+            dims: { type: 'string', default: '2' },
+            neighbors: { type: 'string' },
+            'min-dist': { type: 'string' },
+            tag: { type: 'string' },
+            folder: { type: 'string' },
+            'color-by': { type: 'string', default: 'none' },
+            clusters: { type: 'string' },
+            output: { type: 'string' },
+            format: { type: 'string', default: 'csv' },
+        },
+    });
+
+    if (!values.algo) {
+        throw new Error('mnotes vectors reduce: --algo is required (pca|umap)');
+    }
+    validateReduceFlags(args, values);
+
+    const { points, metadata } = reduceVectors(deps.db, {
+        level: values.level,
+        algo: values.algo,
+        dims: Number(values.dims),
+        neighbors: toIntOrUndefined(values.neighbors),
+        minDist: toFloatOrUndefined(values['min-dist']),
+        tag: values.tag,
+        folder: values.folder,
+        colorBy: values['color-by'],
+        clusters: readClustersFile(values.clusters),
+        ...embeddingOptions(deps),
+    });
+
+    const body = values.format === 'json'
+        ? formatJson({ points, metadata })
+        : formatReduceCsv(points, { level: values.level });
+
+    if (values.output !== undefined) {
+        writeFileSync(values.output, body);
+        return { stdout: `wrote ${points.length} points to ${values.output}\n`, stderr: '', exitCode: 0 };
+    }
+    return { stdout: body, stderr: '', exitCode: 0 };
+}
+
 const VECTORS_SUBCOMMANDS = {
     compare: runCompare,
     nearest: runNearest,
     cluster: runCluster,
+    reduce: runReduce,
 };
 
 export async function runVectorsCommand(args, deps) {

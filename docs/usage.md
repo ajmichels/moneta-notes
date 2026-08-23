@@ -294,8 +294,30 @@ centroid); `json` gives full membership. DBSCAN noise points get `cluster_id: -1
 scope than requested (`--k` too large, too few points for a `--cut-height` cut) is a hard error, not a
 silently smaller cluster count.
 
-More `vectors` subcommands (`reduce`, `tag-fit`, `tag-redundancy`, `outliers`, `calibrate`) land here
-as they're implemented.
+#### `mnotes vectors reduce`
+
+```sh
+mnotes vectors reduce --algo=pca | uplot scatter -H -d,
+mnotes vectors reduce --algo=umap --neighbors=15 --min-dist=0.1 --color-by=cluster
+mnotes vectors reduce --algo=pca --dims=3 --format=json --output=points.json
+```
+
+Flags: `--level=note|chunk` (default `note`, always centroid at note level — no `--aggregate` flag),
+`--algo=pca|umap` (required), `--dims=2|3` (default `2`), `--neighbors=N`/`--min-dist=F` (umap only —
+a usage error combined with `--algo=pca`), `--tag=T`/`--folder=P` (scope filter), `--color-by=tag|
+cluster|none` (default `none`), `--clusters=path` (reuse an already-saved
+`vectors cluster --format=json --output=...` file instead of `--color-by=cluster` computing its own,
+differently-parameterized clustering internally), `--output=path` (write to a file instead of
+stdout), `--format=csv|json` (default `csv`).
+
+Dimensionality reduction for visualization. **Streams to stdout by default** — the point is piping
+straight into a plotting tool that reads delimited data from stdin (`uplot`, gnuplot's `plot '-'`), not
+reading the output directly. `csv` is a bare header row (`id,title,x,y,z,label`, plus
+`chunk_line_start`/`chunk_line_end` at `--level=chunk`) followed by one row per point, nothing else;
+`json` gives `{ points: [...], metadata: { cluster_source } }`, where `cluster_source` is `"internal"`
+or the `--clusters` path used, present only when `--color-by=cluster`.
+
+`tag-fit`, `tag-redundancy`, `outliers`, and `calibrate` land here as they're implemented.
 
 ## MCP server (Claude Code / Claude Desktop)
 

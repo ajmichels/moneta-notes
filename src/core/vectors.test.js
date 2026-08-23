@@ -8,7 +8,7 @@ import {
     vectorToBuffer, bufferToVector, cosineSimilarity, cosineDistance,
     getChunkVectors, getAllChunkVectors, getNoteVector,
     noteIdForTitle, titleForNoteId, resolveNoteId, resolveScopeNoteIds, compareVectors,
-    nearestNeighbors, clusterVectors,
+    nearestNeighbors, clusterVectors, reduceVectors,
 } from './vectors.js';
 
 const EMB = { embeddingModel: 'test-model', embeddingVersion: 'v1' };
@@ -584,6 +584,129 @@ describe('clusterVectors: scoping and errors', () => {
         const db = makeTempDb();
         expect(() => clusterVectors(db, { level: 'note', algo: 'kmeans', k: 1, ...EMB }))
             .toThrow(/no vectors in scope/);
+        db.close();
+    });
+});
+
+describe('reduceVectors: pca', () => {
+    it('projects each point to --dims coordinates', () => {
+        const db = makeTempDb();
+        const { groupA, groupB } = seedTwoGroups(db, insertChunk);
+
+        const { points, metadata } = reduceVectors(db, { level: 'note', algo: 'pca', dims: 2, ...EMB });
+
+        expect(points).toHaveLength(groupA.length + groupB.length);
+        for (const p of points) {
+            expect(typeof p.x).toBe('number');
+            expect(typeof p.y).toBe('number');
+            expect(p.z).toBeNull();
+            expect(p.label).toBeNull();
+        }
+        expect(metadata.cluster_source).toBeNull();
+        db.close();
+    });
+
+    it('--dims 3 includes a numeric z', () => {
+        const db = makeTempDb();
+        seedTwoGroups(db, insertChunk);
+        const { points } = reduceVectors(db, { level: 'note', algo: 'pca', dims: 3, ...EMB });
+        expect(typeof points[0].z).toBe('number');
+        db.close();
+    });
+
+    it('--level chunk includes chunk_line_start/chunk_line_end', () => {
+        const db = makeTempDb();
+        seedTwoGroups(db, insertChunk);
+        const { points } = reduceVectors(db, { level: 'chunk', algo: 'pca', dims: 2, ...EMB });
+        expect(points[0]).toHaveProperty('chunk_line_start');
+        expect(points[0]).toHaveProperty('chunk_line_end');
+        db.close();
+    });
+
+    it('--color-by tag labels each point with its first tag alphabetically', () => {
+        const db = makeTempDb();
+        const noteA = insertNote(db, 'A.md');
+        insertChunk(db, noteA, { seed: 0.1 });
+        insertNote(db, 'B.md');
+        db.prepare('INSERT INTO tags (name) VALUES (?)').run('zeta');
+        db.prepare('INSERT INTO tags (name) VALUES (?)').run('alpha');
+        const zeta = db.prepare('SELECT id FROM tags WHERE name = ?').get('zeta').id;
+        const alpha = db.prepare('SELECT id FROM tags WHERE name = ?').get('alpha').id;
+        db.prepare('INSERT INTO note_tags (note_id, tag_id) VALUES (?, ?)').run(noteA, zeta);
+        db.prepare('INSERT INTO note_tags (note_id, tag_id) VALUES (?, ?)').run(noteA, alpha);
+        const noteB = insertNote(db, 'C.md');
+        insertChunk(db, noteB, { seed: 0.9 });
+
+        const { points } = reduceVectors(db, { level: 'note', algo: 'pca', colorBy: 'tag', ...EMB });
+
+        const a = points.find((p) => p.title === 'A');
+        expect(a.label).toBe('alpha');
+        db.close();
+    });
+
+    it('--color-by cluster runs an internal kmeans and reports cluster_source: internal', () => {
+        const db = makeTempDb();
+        seedTwoGroups(db, insertChunk);
+
+        const { points, metadata } = reduceVectors(
+            db, { level: 'note', algo: 'pca', colorBy: 'cluster', ...EMB },
+        );
+
+        expect(metadata.cluster_source).toBe('internal');
+        const byTitle = Object.fromEntries(points.map((p) => [ p.title, p.label ]));
+        expect(byTitle.A1).toBe(byTitle.A2);
+        expect(byTitle.B1).toBe(byTitle.B2);
+        expect(byTitle.A1).not.toBe(byTitle.B1);
+        db.close();
+    });
+
+    it('--color-by cluster with a caller-supplied membership reports cluster_source: external', () => {
+        const db = makeTempDb();
+        seedTwoGroups(db, insertChunk);
+        const providedClusters = [
+            { cluster_id: 0, note_title: 'A1' }, { cluster_id: 0, note_title: 'A2' },
+            { cluster_id: 1, note_title: 'B1' }, { cluster_id: 1, note_title: 'B2' },
+        ];
+
+        const { points, metadata } = reduceVectors(db, {
+            level: 'note', algo: 'pca', colorBy: 'cluster', clusters: providedClusters, ...EMB,
+        });
+
+        expect(metadata.cluster_source).toBe('external');
+        expect(points.find((p) => p.title === 'A1').label).toBe(0);
+        db.close();
+    });
+
+    it('throws for an unknown --color-by', () => {
+        const db = makeTempDb();
+        seedTwoGroups(db, insertChunk);
+        expect(() => reduceVectors(db, { level: 'note', algo: 'pca', colorBy: 'nope', ...EMB }))
+            .toThrow(/unknown --color-by/);
+        db.close();
+    });
+
+    it('throws for an unknown --algo', () => {
+        const db = makeTempDb();
+        seedTwoGroups(db, insertChunk);
+        expect(() => reduceVectors(db, { level: 'note', algo: 'nope', ...EMB })).toThrow(/unknown --algo/);
+        db.close();
+    });
+});
+
+describe('reduceVectors: umap', () => {
+    it('projects each point to --dims coordinates', () => {
+        const db = makeTempDb();
+        seedTwoGroups(db, insertChunk);
+
+        const { points } = reduceVectors(
+            db, { level: 'note', algo: 'umap', dims: 2, neighbors: 2, ...EMB },
+        );
+
+        expect(points).toHaveLength(4);
+        for (const p of points) {
+            expect(typeof p.x).toBe('number');
+            expect(typeof p.y).toBe('number');
+        }
         db.close();
     });
 });

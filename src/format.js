@@ -145,6 +145,24 @@ export function formatClusterTable(clusters, { align = true } = {}) {
     return formatTable([ 'cluster_id', 'size', 'example_titles' ], rows, { align });
 }
 
+function csvCell(value) {
+    if (value === null || value === undefined) {
+        return '';
+    }
+    const cell = String(value);
+    return /[",\n]/.test(cell) ? `"${cell.replace(/"/g, '""')}"` : cell;
+}
+
+// A bare header row + one data row per point, nothing else — the point is a clean stdin stream
+// for a plotting tool (`uplot`, gnuplot), not a table for a human to read directly (S013).
+export function formatReduceCsv(points, { level = 'note' } = {}) {
+    const columns = level === 'chunk'
+        ? [ 'id', 'title', 'chunk_line_start', 'chunk_line_end', 'x', 'y', 'z', 'label' ]
+        : [ 'id', 'title', 'x', 'y', 'z', 'label' ];
+    const rows = [ columns, ...points.map((p) => columns.map((c) => csvCell(p[c]))) ];
+    return `${rows.map((row) => row.join(',')).join('\n')}\n`;
+}
+
 export function formatExplain({ results, pipeline }) {
     const header = `mode=${pipeline.mode} limit=${pipeline.limit} overfetch=${pipeline.overfetchLimit} `
         + `fts5_expression=${JSON.stringify(pipeline.fulltextExpression)}`;

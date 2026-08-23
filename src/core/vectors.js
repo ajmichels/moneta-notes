@@ -1,6 +1,8 @@
 import { kmeans } from 'ml-kmeans';
 import { agnes } from 'ml-hclust';
 import { DBSCAN } from 'density-clustering';
+import { PCA } from 'ml-pca';
+import { UMAP } from 'umap-js';
 import { resolveTitle, stripMdExtension } from './note-fs.js';
 
 export function vectorToBuffer(vector) {
@@ -486,4 +488,121 @@ export function clusterVectors(db, options = {}) {
         membership: buildMembership(db, level, points, assignments),
         clusters: buildClusterSummary(db, level, points, assignments),
     };
+}
+
+function runPca(data, dims) {
+    const pca = new PCA(data);
+    return pca.predict(data, { nComponents: dims }).to2DArray();
+}
+
+function runUmap(data, dims, neighbors, minDist) {
+    const umap = new UMAP({
+        nComponents: dims,
+        distanceFn: cosineDistance,
+        ...(neighbors !== undefined ? { nNeighbors: neighbors } : {}),
+        ...(minDist !== undefined ? { minDist } : {}),
+    });
+    return umap.fit(data);
+}
+
+function runReduction(algo, points, { dims, neighbors, minDist }) {
+    const data = points.map((p) => Array.from(p.vector));
+    if (algo === 'pca') {
+        return runPca(data, dims);
+    }
+    if (algo === 'umap') {
+        return runUmap(data, dims, neighbors, minDist);
+    }
+    throw new Error(`vectors: unknown --algo "${algo}"`);
+}
+
+function reducePointFields(db, level, point) {
+    const base = { id: level === 'chunk' ? point.chunkId : point.noteId, title: titleForNoteId(db, point.noteId) };
+    if (level === 'chunk') {
+        return { ...base, chunk_line_start: point.lineStart, chunk_line_end: point.lineEnd };
+    }
+    return base;
+}
+
+function firstTagForNote(db, noteId) {
+    const row = db.prepare(`
+        SELECT t.name AS name FROM tags t
+        JOIN note_tags nt ON nt.tag_id = t.id
+        WHERE nt.note_id = ?
+        ORDER BY t.name COLLATE NOCASE
+        LIMIT 1
+    `).get(noteId);
+    return row ? row.name : null;
+}
+
+// `min(10, floor(sqrt(n/2)))`, floored at 2 — a convenience default for `--color-by cluster` when
+// the caller hasn't pointed at an already-inspected `--clusters` file (S013).
+function internalClusterHeuristicK(n) {
+    return Math.max(2, Math.min(10, Math.floor(Math.sqrt(n / 2))));
+}
+
+function resolveClusterMembership(db, level, scope, providedClusters) {
+    if (providedClusters !== null) {
+        return { membership: providedClusters, source: 'external' };
+    }
+    const points = scopedPoints(db, level, scope);
+    const k = internalClusterHeuristicK(points.length);
+    const { membership } = clusterVectors(db, { level, algo: 'kmeans', k, ...scope });
+    return { membership, source: 'internal' };
+}
+
+function clusterMembershipKey(level, row) {
+    return level === 'chunk' ? row.chunk_id : row.note_title;
+}
+
+function pointMembershipKey(db, level, point) {
+    return level === 'chunk' ? point.chunkId : titleForNoteId(db, point.noteId);
+}
+
+function labelsFromClusterMembership(db, level, points, membership) {
+    const labelByKey = new Map(membership.map((row) => [ clusterMembershipKey(level, row), row.cluster_id ]));
+    return points.map((point) => labelByKey.get(pointMembershipKey(db, level, point)) ?? null);
+}
+
+function resolveLabels(db, level, points, options) {
+    const { colorBy, scope, providedClusters } = options;
+    if (colorBy === 'none') {
+        return { labels: points.map(() => null), clusterSource: null };
+    }
+    if (colorBy === 'tag') {
+        return { labels: points.map((p) => firstTagForNote(db, p.noteId)), clusterSource: null };
+    }
+    if (colorBy === 'cluster') {
+        const { membership, source } = resolveClusterMembership(db, level, scope, providedClusters);
+        return { labels: labelsFromClusterMembership(db, level, points, membership), clusterSource: source };
+    }
+    throw new Error(`vectors: unknown --color-by "${colorBy}"`);
+}
+
+// Dimensionality reduction for visualization (S013) — streams to stdout by default at the CLI
+// layer, this function just returns plain point data regardless of destination. `--color-by
+// cluster` without an externally-supplied `clusters` membership (parsed from a saved
+// `cluster --format json` file) runs a convenience internal kmeans with a fixed heuristic `k` —
+// `metadata.cluster_source` tells the caller which happened.
+export function reduceVectors(db, options = {}) {
+    const {
+        level = 'note', algo, dims = 2, neighbors, minDist,
+        tag, folder, colorBy = 'none', clusters: providedClusters = null,
+        embeddingModel, embeddingVersion,
+    } = options;
+
+    const points = scopedPoints(db, level, options);
+    const coords = runReduction(algo, points, { dims, neighbors, minDist });
+    const scope = { tag, folder, embeddingModel, embeddingVersion };
+    const { labels, clusterSource } = resolveLabels(db, level, points, { colorBy, scope, providedClusters });
+
+    const outPoints = points.map((point, index) => ({
+        ...reducePointFields(db, level, point),
+        x: coords[index][0],
+        y: coords[index][1],
+        z: dims === 3 ? coords[index][2] : null,
+        label: labels[index],
+    }));
+
+    return { points: outPoints, metadata: { cluster_source: clusterSource } };
 }
