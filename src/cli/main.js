@@ -86,6 +86,8 @@ const COMMAND_USAGE = {
     daemon: 'mnotes daemon <start|stop|restart>',
     stats: 'mnotes stats [--json]',
     vectors: 'mnotes vectors compare <a> <b> [--level=note|chunk] [--aggregate=centroid|best-chunk|all-pairs] [--json]\n'
+        + '       mnotes vectors nearest <note-title|chunk-id> [--level=note|chunk] [--against=note|chunk]\n'
+        + '           [--aggregate=centroid|best-chunk] [--k=N] [--score] [--json]\n'
         + '       (more vectors subcommands land here as they\'re implemented — see S013)',
 };
 

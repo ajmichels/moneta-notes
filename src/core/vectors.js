@@ -266,3 +266,84 @@ export function compareVectors(db, a, b, options = {}) {
     }
     return aggregator(db, resolveNoteId(db, a), resolveNoteId(db, b), embeddingModel, embeddingVersion);
 }
+
+function chunkParentNoteId(db, chunkId) {
+    const row = db.prepare('SELECT note_id FROM chunks WHERE id = ?').get(chunkId);
+    if (!row) {
+        throw new Error(`vectors: no chunk found with id ${chunkId}`);
+    }
+    return row.note_id;
+}
+
+// Query-side vectors for `nearestNeighbors`. `centroid` collapses to the note's single centroid;
+// `best-chunk` keeps every one of the note's raw chunk vectors so the scorer below can take the
+// max similarity across all of them, per-candidate — the k-NN analogue of `compare`'s "best pair
+// wins" semantics, generalized from a single comparison to a corpus scan.
+function resolveQueryVectors(db, query, level, aggregate, embeddingOptions) {
+    if (level === 'chunk') {
+        const chunkId = Number(query);
+        const vectors = getChunkVectors(db, [ chunkId ]);
+        return {
+            vectors: [ requireChunkVector(vectors, chunkId) ],
+            noteId: chunkParentNoteId(db, chunkId),
+            chunkId,
+        };
+    }
+
+    const noteId = resolveNoteId(db, query);
+    if (aggregate === 'best-chunk') {
+        const chunks = requireChunks(
+            getAllChunkVectors(db, { noteIds: [ noteId ], ...embeddingOptions }), noteId,
+        );
+        return { vectors: chunks.map((c) => c.vector), noteId, chunkId: null };
+    }
+    return {
+        vectors: [ requireNoteVector(db, noteId, embeddingOptions.embeddingModel, embeddingOptions.embeddingVersion) ],
+        noteId,
+        chunkId: null,
+    };
+}
+
+// Excludes the query's own note (every mode) or, when both query and corpus are at chunk level,
+// just the exact queried chunk rather than its whole sibling note — see S013's "nearest" section.
+function isSelfMatch(entry, against, queryLevel, noteId, chunkId) {
+    if (against === 'chunk' && queryLevel === 'chunk') {
+        return entry.chunkId === chunkId;
+    }
+    return entry.noteId === noteId;
+}
+
+function toNeighborResult(db, entry, against, similarity, rank) {
+    const base = { rank, similarity, note_title: titleForNoteId(db, entry.noteId) };
+    if (against === 'chunk') {
+        return { ...base, chunk_line_start: entry.lineStart, chunk_line_end: entry.lineEnd };
+    }
+    return base;
+}
+
+// Nearest-neighbor lookup using an existing note's/chunk's own stored embedding as the query
+// vector — never re-embeds text (that's `search --mode semantic`'s job, not this one).
+export function nearestNeighbors(db, query, options = {}) {
+    const {
+        level = 'note', against = level, aggregate = 'centroid', k = 10,
+        embeddingModel, embeddingVersion,
+    } = options;
+
+    const embeddingOptions = { embeddingModel, embeddingVersion };
+    const { vectors: queryVectors, noteId, chunkId } =
+        resolveQueryVectors(db, query, level, aggregate, embeddingOptions);
+    const score = (candidate) => Math.max(...queryVectors.map((qv) => cosineSimilarity(qv, candidate)));
+
+    const corpus = against === 'chunk'
+        ? getAllChunkVectors(db, { embeddingModel, embeddingVersion })
+        : getAllNoteVectors(db, { embeddingModel, embeddingVersion });
+
+    const scored = corpus
+        .filter((entry) => !isSelfMatch(entry, against, level, noteId, chunkId))
+        .map((entry) => ({ entry, similarity: score(entry.vector) }));
+
+    scored.sort((a, b) => b.similarity - a.similarity);
+    return scored.slice(0, k).map(({ entry, similarity }, index) => (
+        toNeighborResult(db, entry, against, similarity, index + 1)
+    ));
+}

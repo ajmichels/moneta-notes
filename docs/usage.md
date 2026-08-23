@@ -254,7 +254,27 @@ match, then unique-basename fallback); `chunk`-level `<a>`/`<b>` are raw `chunks
 the winning `chunk_a`/`chunk_b` line spans); `all-pairs` always prints the full chunk × chunk
 similarity matrix as JSON, regardless of `--json`.
 
-More `vectors` subcommands (`nearest`, `cluster`, `reduce`, `tag-fit`, `tag-redundancy`, `outliers`,
+#### `mnotes vectors nearest <note-title|chunk-id>`
+
+```sh
+mnotes vectors nearest "Weekly Notes/2026-W32"
+mnotes vectors nearest "Weekly Notes/2026-W32" --score
+mnotes vectors nearest "Projects/Moneta" --against=chunk --k=5
+mnotes vectors nearest 42 --level=chunk
+```
+
+Flags: `--level=note|chunk` (default `note`, query-side granularity), `--against=note|chunk` (default
+matches `--level`, corpus-side granularity), `--aggregate=centroid|best-chunk` (note-level query only —
+a usage error combined with `--level=chunk`), `--k=N` (default from `[vectors].nearest_k_default`,
+see [Configuration](configuration.md#vectors)), `--score` (include the raw similarity in output —
+rank-only by default), `--json`.
+
+Nearest-neighbor lookup using an existing note's or chunk's **own stored embedding** as the query —
+distinct from `search --mode=semantic`, which re-embeds typed query text. The query itself is always
+excluded from its own results. `--against=chunk` output includes each hit's `chunk_line_start`/
+`chunk_line_end`.
+
+More `vectors` subcommands (`cluster`, `reduce`, `tag-fit`, `tag-redundancy`, `outliers`,
 `calibrate`) land here as they're implemented.
 
 ## MCP server (Claude Code / Claude Desktop)

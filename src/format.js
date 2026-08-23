@@ -131,6 +131,13 @@ export function formatCompareResult(result, { aggregate = 'centroid', json = fal
     return `${lines.join('\n')}\n`;
 }
 
+export function formatNearestTable(results, { against = 'note', score = false } = {}) {
+    const columns = against === 'chunk'
+        ? [ 'rank', 'note_title', 'chunk_line_start', 'chunk_line_end' ]
+        : [ 'rank', 'note_title' ];
+    return formatTable(score ? [ ...columns, 'similarity' ] : columns, results, { align: true });
+}
+
 export function formatExplain({ results, pipeline }) {
     const header = `mode=${pipeline.mode} limit=${pipeline.limit} overfetch=${pipeline.overfetchLimit} `
         + `fts5_expression=${JSON.stringify(pipeline.fulltextExpression)}`;

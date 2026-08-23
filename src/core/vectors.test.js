@@ -8,6 +8,7 @@ import {
     vectorToBuffer, bufferToVector, cosineSimilarity, cosineDistance,
     getChunkVectors, getAllChunkVectors, getNoteVector,
     noteIdForTitle, titleForNoteId, resolveNoteId, resolveScopeNoteIds, compareVectors,
+    nearestNeighbors,
 } from './vectors.js';
 
 const EMB = { embeddingModel: 'test-model', embeddingVersion: 'v1' };
@@ -330,6 +331,104 @@ describe('compareVectors: level=note', () => {
         insertChunk(db, noteB, { seed: 0.2 });
         expect(() => compareVectors(db, 'A', 'B', { level: 'note', aggregate: 'nope', ...EMB }))
             .toThrow(/unknown aggregate/);
+        db.close();
+    });
+});
+
+describe('nearestNeighbors', () => {
+    it('ranks notes by similarity to the query note\'s centroid, excluding itself', () => {
+        const db = makeTempDb();
+        const query = insertNote(db, 'Query.md');
+        const close = insertNote(db, 'Close.md');
+        const far = insertNote(db, 'Far.md');
+        insertChunk(db, query, { seed: 0.5 });
+        insertChunk(db, close, { seed: 0.5 });
+        insertChunk(db, far, { seed: 0.99 });
+
+        const results = nearestNeighbors(db, 'Query', { ...EMB });
+
+        expect(results.map((r) => r.note_title)).toEqual([ 'Close', 'Far' ]);
+        expect(results[0].rank).toBe(1);
+        expect(results[0].similarity).toBeGreaterThan(results[1].similarity);
+        db.close();
+    });
+
+    it('respects --k', () => {
+        const db = makeTempDb();
+        const query = insertNote(db, 'Query.md');
+        insertChunk(db, query, { seed: 0.5 });
+        for (let i = 0; i < 5; i += 1) {
+            const noteId = insertNote(db, `N${i}.md`);
+            insertChunk(db, noteId, { seed: 0.1 * i });
+        }
+
+        const results = nearestNeighbors(db, 'Query', { k: 2, ...EMB });
+
+        expect(results).toHaveLength(2);
+        db.close();
+    });
+
+    it('--against chunk returns chunk-level neighbors with line spans, excluding the whole query note', () => {
+        const db = makeTempDb();
+        const query = insertNote(db, 'Query.md');
+        const other = insertNote(db, 'Other.md');
+        insertChunk(db, query, { chunkIndex: 0, seed: 0.5 });
+        insertChunk(db, query, { chunkIndex: 1, seed: 0.5 });
+        insertChunk(db, other, { seed: 0.5, lineStart: 10, lineEnd: 15 });
+
+        const results = nearestNeighbors(db, 'Query', { level: 'note', against: 'chunk', ...EMB });
+
+        expect(results).toHaveLength(1);
+        expect(results[0].note_title).toBe('Other');
+        expect(results[0].chunk_line_start).toBe(10);
+        expect(results[0].chunk_line_end).toBe(15);
+        db.close();
+    });
+
+    it('--level chunk queries with a raw chunk id and excludes only that exact chunk', () => {
+        const db = makeTempDb();
+        const noteId = insertNote(db, 'A.md');
+        const chunkA = insertChunk(db, noteId, { chunkIndex: 0, seed: 0.5 });
+        insertChunk(db, noteId, { chunkIndex: 1, seed: 0.5, lineStart: 6, lineEnd: 10 });
+
+        const results = nearestNeighbors(db, String(chunkA), { level: 'chunk', against: 'chunk', ...EMB });
+
+        expect(results).toHaveLength(1);
+        expect(results[0].chunk_line_start).toBe(6);
+        db.close();
+    });
+
+    it('--level chunk against note excludes the chunk\'s own parent note', () => {
+        const db = makeTempDb();
+        const noteId = insertNote(db, 'A.md');
+        const chunkA = insertChunk(db, noteId, { seed: 0.5 });
+        const otherNote = insertNote(db, 'B.md');
+        insertChunk(db, otherNote, { seed: 0.5 });
+
+        const results = nearestNeighbors(db, String(chunkA), { level: 'chunk', against: 'note', ...EMB });
+
+        expect(results.map((r) => r.note_title)).toEqual([ 'B' ]);
+        db.close();
+    });
+
+    it('aggregate=best-chunk scores by the max similarity across the query note\'s chunks', () => {
+        const db = makeTempDb();
+        const query = insertNote(db, 'Query.md');
+        insertChunk(db, query, { chunkIndex: 0, seed: 0.1 });
+        insertChunk(db, query, { chunkIndex: 1, seed: 0.9 });
+        const target = insertNote(db, 'Target.md');
+        insertChunk(db, target, { seed: 0.9 });
+
+        const results = nearestNeighbors(db, 'Query', { aggregate: 'best-chunk', ...EMB });
+
+        expect(results[0].note_title).toBe('Target');
+        expect(results[0].similarity).toBeCloseTo(1, 5);
+        db.close();
+    });
+
+    it('throws for an unresolvable query title', () => {
+        const db = makeTempDb();
+        expect(() => nearestNeighbors(db, 'Nope', { ...EMB })).toThrow(/no note found/);
         db.close();
     });
 });

@@ -147,6 +147,117 @@ describe('mnotes vectors compare', () => {
     });
 });
 
+describe('mnotes vectors nearest', () => {
+    it('ranks by similarity, rank-only by default (no similarity column)', async () => {
+        const db = makeTempDb();
+        const query = insertNote(db, 'Query.md');
+        const close = insertNote(db, 'Close.md');
+        insertChunk(db, query, { seed: 0.5 });
+        insertChunk(db, close, { seed: 0.5 });
+
+        const result = await runVectorsCommand([ 'nearest', 'Query' ], makeDeps(db));
+
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout).toContain('Close');
+        expect(result.stdout).not.toMatch(/similarity/);
+        db.close();
+    });
+
+    it('--score includes a similarity column', async () => {
+        const db = makeTempDb();
+        const query = insertNote(db, 'Query.md');
+        const close = insertNote(db, 'Close.md');
+        insertChunk(db, query, { seed: 0.5 });
+        insertChunk(db, close, { seed: 0.5 });
+
+        const result = await runVectorsCommand([ 'nearest', 'Query', '--score' ], makeDeps(db));
+
+        expect(result.stdout).toMatch(/similarity/);
+        db.close();
+    });
+
+    it('--json prints structured JSON', async () => {
+        const db = makeTempDb();
+        const query = insertNote(db, 'Query.md');
+        const close = insertNote(db, 'Close.md');
+        insertChunk(db, query, { seed: 0.5 });
+        insertChunk(db, close, { seed: 0.5 });
+
+        const result = await runVectorsCommand([ 'nearest', 'Query', '--json' ], makeDeps(db));
+
+        const parsed = JSON.parse(result.stdout);
+        expect(parsed).toEqual([ { rank: 1, similarity: expect.any(Number), note_title: 'Close' } ]);
+        db.close();
+    });
+
+    it('--k limits the result count', async () => {
+        const db = makeTempDb();
+        const query = insertNote(db, 'Query.md');
+        insertChunk(db, query, { seed: 0.5 });
+        for (let i = 0; i < 5; i += 1) {
+            const noteId = insertNote(db, `N${i}.md`);
+            insertChunk(db, noteId, { seed: 0.1 * i });
+        }
+
+        const result = await runVectorsCommand([ 'nearest', 'Query', '--k', '2', '--json' ], makeDeps(db));
+
+        expect(JSON.parse(result.stdout)).toHaveLength(2);
+        db.close();
+    });
+
+    it('defaults --k from config.vectors.nearest_k_default', async () => {
+        const db = makeTempDb();
+        const query = insertNote(db, 'Query.md');
+        insertChunk(db, query, { seed: 0.5 });
+        for (let i = 0; i < 3; i += 1) {
+            const noteId = insertNote(db, `N${i}.md`);
+            insertChunk(db, noteId, { seed: 0.1 * i });
+        }
+
+        const deps = { ...makeDeps(db), config: { vectors: { nearest_k_default: 1 } } };
+        const result = await runVectorsCommand([ 'nearest', 'Query', '--json' ], deps);
+
+        expect(JSON.parse(result.stdout)).toHaveLength(1);
+        db.close();
+    });
+
+    it('--against chunk includes chunk line span columns', async () => {
+        const db = makeTempDb();
+        const query = insertNote(db, 'Query.md');
+        const other = insertNote(db, 'Other.md');
+        insertChunk(db, query, { seed: 0.5 });
+        insertChunk(db, other, { seed: 0.5, lineStart: 3, lineEnd: 9 });
+
+        const result = await runVectorsCommand([ 'nearest', 'Query', '--against', 'chunk' ], makeDeps(db));
+
+        expect(result.stdout).toContain('3');
+        expect(result.stdout).toContain('9');
+        db.close();
+    });
+
+    it('rejects --aggregate combined with --level chunk', async () => {
+        const db = makeTempDb();
+        const noteId = insertNote(db, 'A.md');
+        const chunkA = insertChunk(db, noteId, { seed: 0.5 });
+
+        await expect(runVectorsCommand(
+            [ 'nearest', String(chunkA), '--level', 'chunk', '--aggregate', 'best-chunk' ], makeDeps(db),
+        )).rejects.toThrow(/not valid with --level chunk/);
+        db.close();
+    });
+
+    it('rejects an unsupported --aggregate value', async () => {
+        const db = makeTempDb();
+        const query = insertNote(db, 'Query.md');
+        insertChunk(db, query, { seed: 0.5 });
+
+        await expect(runVectorsCommand(
+            [ 'nearest', 'Query', '--aggregate', 'all-pairs' ], makeDeps(db),
+        )).rejects.toThrow(/--aggregate must be one of/);
+        db.close();
+    });
+});
+
 describe('mnotes vectors: unknown subcommand', () => {
     it('returns a non-zero exit code with an error on stderr', async () => {
         const db = makeTempDb();
