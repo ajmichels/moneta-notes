@@ -15,7 +15,7 @@ import { getLogger, defaultLogDir, runWithLogger, getContextLogger } from '../lo
 import { loadConfig } from '../config.js';
 import {
     chunkText as realChunkText, loadTokenizer, tokenizeWithOffsets as realTokenizeWithOffsets,
-    embed as realEmbed, embedQuery as realEmbedQuery, configureEmbedder,
+    embed as realEmbed, embedQuery as realEmbedQuery, configureEmbedder, buildChunkPrompt,
 } from './embed.js';
 
 // Re-exported for existing callers (this file's own tests, IPC/queue-drain code below) — the
@@ -195,11 +195,11 @@ function readNoteOrNull(vaultRoot, title) {
     }
 }
 
-async function embedChunks(content, chunkText, embed) {
+async function embedChunks(title, content, chunkText, embed) {
     const embeddedChunks = [];
     for (const descriptor of chunkText(content)) {
         const chunkBody = content.slice(descriptor.charStart, descriptor.charEnd);
-        const vector = await embed(chunkBody);
+        const vector = await embed(buildChunkPrompt(title, chunkBody));
         embeddedChunks.push({ ...descriptor, vector });
     }
     return embeddedChunks;
@@ -238,7 +238,7 @@ export async function processPath(vaultRoot, db, path, deps) {
         return { status: 'unchanged' };
     }
 
-    const embeddedChunks = await embedChunks(read.content, chunkText, embed);
+    const embeddedChunks = await embedChunks(title, read.content, chunkText, embed);
 
     const noteId = upsertNoteRow(
         db, path, read.content_hash, read.total_lines, currentMtime, Math.floor(now / 1000),
@@ -464,7 +464,7 @@ export function createIpcServer(socketPath, vaultRoot, db, deps, gate = createSe
 }
 
 export const DEFAULT_EMBEDDING_MODEL = 'Qwen3-Embedding-0.6B';
-export const DEFAULT_EMBEDDING_VERSION = 'q8-v2';
+export const DEFAULT_EMBEDDING_VERSION = 'q8-v3';
 const DEFAULT_DRAIN_INTERVAL_MS = 2000;
 
 async function resolveChunkText(providedChunkText) {

@@ -6,7 +6,7 @@ import { createServer } from 'node:net';
 import { getLogger, runWithLogger } from '../logger.js';
 import {
     chunkText, loadTokenizer, tokenizeWithOffsets, createEmbedder, embed, embedQuery,
-    buildQueryPrompt, defaultPipelineFactory, embedQueryOverSocket,
+    buildQueryPrompt, buildChunkPrompt, defaultPipelineFactory, embedQueryOverSocket,
 } from './embed.js';
 import { cleanupTempDir } from '../../vitest.helpers.js';
 
@@ -308,6 +308,14 @@ describe('buildQueryPrompt', () => {
         expect(buildQueryPrompt('book recommendations')).toBe(
             'Instruct: Given a query, retrieve relevant notes from a notes vault that answer or '
             + 'relate to the query\nQuery: book recommendations',
+        );
+    });
+});
+
+describe('buildChunkPrompt', () => {
+    it('prepends the note title, blank-line separated, ahead of the chunk body', () => {
+        expect(buildChunkPrompt('Weekly Notes/2026-W32', 'Shipped the reindex fix.')).toBe(
+            'Weekly Notes/2026-W32\n\nShipped the reindex fix.',
         );
     });
 });

@@ -191,7 +191,15 @@ excluded — matches S001's `chunks.char_start`/`char_end` being offsets into th
   `"Instruct: {task_description}\nQuery: {query}"` format before embedding, per the model's trained
   query/document asymmetry. The task description (`embed.js`'s `QUERY_INSTRUCTION`): "Given a query,
   retrieve relevant notes from a notes vault that answer or relate to the query." Chunk/document text
-  (`embed()`, no query prefix) is always embedded plain.
+  gets no such instruction wrapper — asymmetric to the query side.
+- **Chunk-side title prefix**: `embed.js`'s `buildChunkPrompt(title, chunkBody)` prepends the note's
+  title, blank-line separated, ahead of each chunk's body before embedding (`daemon.js`'s
+  `embedChunks`) — `${title}\n\n${chunkBody}`. A mid-note chunk's own text often lacks the topic
+  words that made the note findable in the first place; the title restores that context for every
+  chunk, not just the first. `char_start`/`char_end`/`line_start`/`line_end` are unaffected — they're
+  computed from `chunkText`'s windowing over the body alone (per Chunking above), before the title is
+  added for the embed call, so stored chunk spans still index directly into the vault file's body.
+  Applies to document/chunk text only, never the query side.
 - **Lazy load**: the pipeline isn't loaded at daemon startup — it loads on first actual use (the first
   chunk that needs embedding after startup, whether from catch-up or a live event).
 - **Idle unload**: after **10 minutes** with no embedding calls, the daemon dereferences the loaded

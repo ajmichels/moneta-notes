@@ -230,6 +230,15 @@ export async function embedQuery(text) {
     return getSharedEmbedder().embed(buildQueryPrompt(text));
 }
 
+// A mid-note chunk's text alone often lacks the topic words that made the note findable in the
+// first place (an overlap window deep in "Weekly Notes/2026-W32" reads as generic status prose
+// without the date/section context the title carries) — prepending the title gives every chunk's
+// embedding that context back, still with no query-side instruction wrapper (S005: document text
+// is embedded plain, asymmetric to the query side's "Instruct: ...\nQuery: ..." format).
+export function buildChunkPrompt(title, chunkBody) {
+    return `${title}\n\n${chunkBody}`;
+}
+
 // CLI/MCP-side counterpart to embedQuery — instead of loading the pipeline in this process, asks
 // the daemon (the only process that ever loads it, S005) to embed the query over its IPC socket.
 // Request/response, not a stream: one `{ action: "embed", text }` line out, one `{ vector }` or
