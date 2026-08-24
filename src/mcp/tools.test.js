@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
+import { PDFDocument } from 'pdf-lib';
 import { openDb } from '../core/db.js';
 import { syncNoteTags } from '../core/tags.js';
 import { getAuditLogger, getLogger, getContextLogger } from '../logger.js';
@@ -710,6 +711,49 @@ describe('attachmentReadTool', () => {
 
         expect(result.isError).toBe(true);
         expect(result.content[0].text).toMatch(/not found/i);
+    });
+
+    it('returns a page-range slice of a real PDF, with total_pages naming the full document', async () => {
+        const vaultRoot = makeTempVault({});
+        mkdirSync(join(vaultRoot, 'Attachments'), { recursive: true });
+        const doc = await PDFDocument.create();
+        for (let i = 0; i < 6; i += 1) {
+            doc.addPage([ 200, 200 ]);
+        }
+        writeFileSync(join(vaultRoot, 'Attachments/doc.pdf'), Buffer.from(await doc.save()));
+
+        const result = await attachmentReadTool(
+            makeDeps({ vaultRoot }),
+            {
+                attachment_path: 'Attachments/doc.pdf', start_page: 2, end_page: 3,
+                reason: 'testing page-range read',
+            },
+        );
+
+        expect(result.isError).toBeFalsy();
+        const parsed = JSON.parse(result.content[0].text);
+        expect(parsed.total_pages).toBe(6);
+        const sliced = await PDFDocument.load(Buffer.from(parsed.content_base64, 'base64'));
+        expect(sliced.getPageCount()).toBe(2);
+    });
+
+    it('maps an out-of-range start_page/end_page to isError: true, naming total_pages', async () => {
+        const vaultRoot = makeTempVault({});
+        mkdirSync(join(vaultRoot, 'Attachments'), { recursive: true });
+        const doc = await PDFDocument.create();
+        doc.addPage([ 200, 200 ]);
+        writeFileSync(join(vaultRoot, 'Attachments/doc.pdf'), Buffer.from(await doc.save()));
+
+        const result = await attachmentReadTool(
+            makeDeps({ vaultRoot }),
+            {
+                attachment_path: 'Attachments/doc.pdf', start_page: 1, end_page: 5,
+                reason: 'testing out-of-range page',
+            },
+        );
+
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toMatch(/total_pages/);
     });
 });
 

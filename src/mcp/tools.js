@@ -171,11 +171,14 @@ export async function noteRenameTool(deps, input) {
 export async function attachmentReadTool(deps, input) {
     const { vaultRoot } = deps;
     const { attachments: attachmentsConfig } = resolveConfig(deps);
-    const { attachment_path: attachmentPath, include_content: includeContent = true } = input;
+    const {
+        attachment_path: attachmentPath, include_content: includeContent = true,
+        start_page: startPage, end_page: endPage,
+    } = input;
 
     return callTool(deps.auditLogger, deps.mcpLogger, 'attachment_read', input, async () => {
-        const result = readAttachment(vaultRoot, attachmentPath, {
-            includeContent, maxReadBytes: attachmentsConfig.max_read_bytes,
+        const result = await readAttachment(vaultRoot, attachmentPath, {
+            includeContent, maxReadBytes: attachmentsConfig.max_read_bytes, startPage, endPage,
         });
         const { content, ...meta } = result;
         return formatJson(content ? { ...meta, content_base64: content.toString('base64') } : meta);

@@ -113,6 +113,18 @@ describe('createServer', () => {
         ]);
     });
 
+    it('registers attachment_read with a raised maxResultSizeChars, so large base64 reads are not '
+        + 'silently truncated by Claude Code\'s default MCP output limit', async () => {
+        const dbPath = makeTempDbPath();
+        openDb(dbPath).db.close();
+
+        const client = await connectedClient({ dbPath, ...baseDeps() });
+        const { tools } = await client.listTools();
+
+        const { _meta } = tools.find((t) => t.name === 'attachment_read');
+        expect(_meta).toEqual({ 'anthropic/maxResultSizeChars': 500_000 });
+    });
+
     it('round-trips a real search tool call end-to-end through the client', async () => {
         const dbPath = makeTempDbPath();
         const { db } = openDb(dbPath);

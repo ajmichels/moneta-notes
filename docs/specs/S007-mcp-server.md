@@ -197,7 +197,24 @@ is no short-form or basename resolution for attachments, unlike note_title."*
 
 `content_base64` is capped by a config-backed size limit (S009's `[attachments].max_read_bytes`) — a
 file over the cap with `include_content: true` (the default) is a hard error naming the cap and
-directing the caller to retry with `include_content: false` for metadata only.
+directing the caller to retry with `include_content: false` for metadata only, or (PDFs) with
+`start_page`/`end_page` (S012) for a page-range slice instead of the whole file.
+
+**`attachment_read`'s `tools/list` registration carries `_meta: { 'anthropic/maxResultSizeChars':
+500000 }`** — a Claude-Code-specific annotation (documented at
+`code.claude.com/docs/en/mcp#mcp-output-limits-and-warnings`, not part of the MCP spec itself) that
+raises this one tool's text-content output threshold to the annotation's hard ceiling, independent of
+whatever `MAX_MCP_OUTPUT_TOKENS` the client has configured globally. Without it, a base64-encoded
+attachment easily trips Claude Code's default 25,000-token MCP-output limit and gets silently persisted
+to disk with a file-reference stub in its place — a client-side behavior this project has no control
+over otherwise, since `attachment_read`'s response is (and stays) a `text` content block, not `image`:
+the same Claude Code docs note that `image`-typed content has no equivalent per-tool override and
+remains subject to the global token limit regardless, which is why this project doesn't represent
+attachment bytes as MCP's native `image` content type even though the SDK supports it. This is a flat
+constant, not derived from `[attachments].max_read_bytes` (S009) — the two caps bound different things
+(one what's read off disk, the other what a specific client will forward inline) and conflating them
+would just reintroduce the same silent-truncation failure mode for any `max_read_bytes` configured
+above 500,000 characters' worth of base64.
 
 ### `attachment_write` (new — S012)
 

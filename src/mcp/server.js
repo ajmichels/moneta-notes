@@ -172,12 +172,20 @@ const TOOL_DEFS = [
             + 'always returned; content_base64 is included when include_content is true (the '
             + 'default) and the file is under the configured size cap — otherwise omitted, or (if '
             + 'include_content was left true and the file is over the cap) a hard error directing '
-            + 'you to retry with include_content: false.',
+            + 'you to retry with include_content: false, or (PDFs) with start_page/end_page. For '
+            + 'PDFs, total_pages is also returned (metadata-only reads included) whenever the file '
+            + 'parses as a valid PDF. start_page/end_page (1-indexed, inclusive, PDF only) fetch just '
+            + 'that page range as a standalone PDF instead of the whole file — both are required '
+            + 'together, must fall within 1..total_pages, and cannot be combined with '
+            + 'include_content: false.',
         inputSchema: {
             attachment_path: z.string(),
             include_content: z.boolean().optional(),
+            start_page: z.number().int().positive().optional(),
+            end_page: z.number().int().positive().optional(),
             reason: z.string(),
         },
+        _meta: { 'anthropic/maxResultSizeChars': 500_000 },
         handler: attachmentReadTool,
     },
     {
@@ -199,8 +207,12 @@ const TOOL_DEFS = [
 export function createServer(deps) {
     const server = new McpServer({ name: 'mnotes-mcp', version: '0.1.0' });
 
-    for (const { name, description, inputSchema, handler } of TOOL_DEFS) {
-        server.registerTool(name, { description, inputSchema }, (input) => handler(deps, input));
+    for (const { name, description, inputSchema, _meta, handler } of TOOL_DEFS) {
+        server.registerTool(
+            name,
+            { description, inputSchema, ...(_meta ? { _meta } : {}) },
+            (input) => handler(deps, input),
+        );
     }
 
     registerPrompts(server);

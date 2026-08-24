@@ -41,6 +41,7 @@
     "ml-hclust": "^4.0.0",
     "ml-kmeans": "^7.0.1",
     "ml-pca": "^4.1.1",
+    "pdf-lib": "^1.17.1",
     "smol-toml": "^1",
     "sqlite-vec": "^0.1.9",
     "umap-js": "^1.4.0",

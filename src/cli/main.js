@@ -502,12 +502,12 @@ export async function runAttachmentRead(args, deps) {
     const { attachments: attachmentsConfig } = resolveConfig(deps);
 
     if (values.metadata || values.json) {
-        const result = readAttachment(deps.vaultRoot, path, { includeContent: false });
+        const result = await readAttachment(deps.vaultRoot, path, { includeContent: false });
         return { stdout: formatJson(result), stderr: '', exitCode: 0 };
     }
 
     if (values.raw) {
-        const result = readAttachment(deps.vaultRoot, path, {
+        const result = await readAttachment(deps.vaultRoot, path, {
             includeContent: true, maxReadBytes: attachmentsConfig.max_read_bytes,
         });
         return { stdout: result.content, stderr: '', exitCode: 0 };

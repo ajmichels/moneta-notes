@@ -71,27 +71,76 @@ in wording/behavior from a caller's perspective.
 
 ### `attachment_read`
 
-`attachment_path<string>`, `?include_content<bool>=true`, `reason<string>`.
+`attachment_path<string>`, `?include_content<bool>=true`, `?start_page<int>`, `?end_page<int>`,
+`reason<string>`.
 
-Returns `{ path, size_bytes, mime_type, content_base64 }`. `path` echoes the resolved vault-relative
-path (never an absolute filesystem path — same "never leak the vault's real location" boundary every
-other tool response already respects). `mime_type` is derived from the file extension via a small
-built-in extension→MIME lookup table (implementation detail, not a spec-level concern beyond: unknown
-extensions fall back to `application/octet-stream`, never an error — an unrecognized extension is not
-a reason to fail a read).
+Returns `{ path, size_bytes, mime_type, content_base64 }`, plus `total_pages` when `mime_type` is
+`application/pdf`. `path` echoes the resolved vault-relative path (never an absolute filesystem path —
+same "never leak the vault's real location" boundary every other tool response already respects).
+`mime_type` is derived from the file extension via a small built-in extension→MIME lookup table
+(implementation detail, not a spec-level concern beyond: unknown extensions fall back to
+`application/octet-stream`, never an error — an unrecognized extension is not a reason to fail a read).
 
 - **`content_base64` is included whenever `include_content` is `true`** (the default) — the file's raw
   bytes, base64-encoded, so a caller can actually see/use an image or document, not just confirm it
   exists. **Gated by a config-backed size cap** (`[attachments].max_read_bytes`, S009) — if
   `include_content` is `true` and the file exceeds the cap, this is a hard error (fail loudly, per
   CLAUDE.md — never a silent downgrade to metadata-only) naming the file's actual size, the configured
-  cap, and directing the caller to retry with `include_content: false` if it only needs metadata.
+  cap, and directing the caller to retry with `include_content: false` for metadata only, or — when
+  `mime_type` is `application/pdf` — with `start_page`/`end_page` to fetch a slice instead of the whole
+  file (see below).
 - **`include_content: false`** returns `{ path, size_bytes, mime_type }` with no `content_base64` key
   at all (omitted, not `null`) — an explicit metadata-only mode, useful when Claude only needs to
   confirm an attachment exists or check its size/type before deciding whether to fetch it, without
   worrying about the size cap.
 - Throws if `attachment_path` doesn't resolve to a real file (`"Attachment not found: <path>"`) or
   resolves to a directory rather than a file.
+
+**`start_page`/`end_page` (PDF only)** — 1-indexed, inclusive, mirroring `note_read`'s
+`start_line`/`end_line` convention rather than any external tool's own range-string syntax, for
+consistency with the rest of this project's own tool surface. Given either, `readAttachment` uses
+`pdf-lib` to load the source PDF, copy just that page range into a freshly-created `PDFDocument`, and
+return *that* smaller document's bytes as `content_base64` — a real, independently-openable PDF
+containing only the requested pages, not a text/image extraction. `total_pages` (the source document's
+full page count) is always included on a PDF response, sliced or not, so a caller that hits the size
+cap on a whole-file read knows what range is even worth asking for next.
+
+- **Not a hard requirement.** Unlike some external tools' "large PDFs *must* specify a page range"
+  behavior, a PDF under the size cap still reads whole-file with no range needed — page count is a poor
+  proxy for byte size (a handful of scanned-image pages can dwarf a hundred pages of text), so the
+  existing byte-based cap stays the single trigger for when a range becomes necessary, surfaced via the
+  cap-exceeded error's retry guidance (above), not a separate page-count gate.
+- **No separate page-span cap.** The sliced document's bytes are checked against the same
+  `max_read_bytes` cap as any other read — asking for too wide a range fails the same "retry narrower"
+  way asking for too large a whole file already does, rather than introducing a second, independent
+  limit (e.g. "20 pages max") a caller would have to learn.
+- `start_page`/`end_page` on a non-PDF `attachment_path` is a hard error — there's no page concept to
+  slice for any other MIME type this tool serves.
+- `start_page`/`end_page` without the other, or with `start_page > end_page`, or a page number outside
+  `1..total_pages`, is a hard error naming the problem and the document's actual `total_pages` (fail
+  loudly, no clamping to the nearest valid value).
+- `start_page`/`end_page` together with `include_content: false` is also a hard error, not a silent
+  ignore of the page range — the two arguments express contradictory intent (a slice of content vs. no
+  content at all), and per CLAUDE.md a nonsensical combination fails loudly rather than one argument
+  quietly winning.
+
+`total_pages` is computed via a `pdf-lib` load whenever `mime_type` is `application/pdf`, **independent
+of `include_content`** — a metadata-only read reports it too, and the cap-exceeded error message (above)
+names it, so a caller always has enough information to pick a sensible `start_page`/`end_page` on the
+next call without a wasted round trip.
+
+**This computation is best-effort, not a requirement, except when a page range is actually
+requested.** A `.pdf`-extension file that fails to parse as an actual PDF (corrupt, mislabeled,
+whatever) doesn't fail a plain byte or metadata read over it — `total_pages` is simply omitted from the
+response (same "omitted, not null/error" precedent `content_base64` already sets for
+`include_content: false`), and the cap-exceeded error falls back to its plain `include_content: false`
+retry hint with no page-range mention. This matches the file extension→MIME lookup's own existing
+stance one paragraph up ("an unrecognized extension is not a reason to fail a read") applied to a
+mismatched/corrupt one instead: `attachment_read`'s baseline contract — return whatever bytes exist at
+`attachment_path`, or confirm they exist — never depends on those bytes actually being well-formed for
+their apparent type. **Only when `start_page`/`end_page` is explicitly given** does a parse failure
+become a hard error (naming the underlying parse problem) — that's the one case where the file
+genuinely being a valid, page-addressable PDF is load-bearing for fulfilling the request at all.
 
 ### `attachment_write`
 
