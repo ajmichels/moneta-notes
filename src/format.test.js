@@ -68,13 +68,13 @@ describe('formatTable', () => {
 });
 
 describe('formatSearchTable', () => {
-    it('omits rank columns for a non-hybrid mode', () => {
+    it('omits rank columns for a non-hybrid mode, includes bm25_score for fulltext', () => {
         const text = formatSearchTable(
-            [ { note_title: 'A', file_line_count: 5 } ],
+            [ { note_title: 'A', file_line_count: 5, bm25_score: -1.5 } ],
             'fulltext',
         );
 
-        expect(text).toBe('note_title|file_line_count\nA|5\n');
+        expect(text).toBe('note_title|file_line_count|bm25_score\nA|5|-1.5\n');
     });
 
     it('includes fulltext_rank/semantic_rank/chunk_line columns for hybrid mode, even with null values', () => {
@@ -91,23 +91,32 @@ describe('formatSearchTable', () => {
         );
     });
 
-    it('includes chunk_line_start/chunk_line_end columns for semantic mode', () => {
+    it('includes chunk_line_start/chunk_line_end/cosine_distance columns for semantic mode', () => {
         const text = formatSearchTable(
-            [ { note_title: 'A', file_line_count: 5, chunk_line_start: 12, chunk_line_end: 18 } ],
+            [ {
+                note_title: 'A', file_line_count: 5, chunk_line_start: 12, chunk_line_end: 18,
+                cosine_distance: 0.42,
+            } ],
             'semantic',
         );
 
-        expect(text).toBe('note_title|file_line_count|chunk_line_start|chunk_line_end\nA|5|12|18\n');
+        expect(text).toBe(
+            'note_title|file_line_count|chunk_line_start|chunk_line_end|cosine_distance\nA|5|12|18|0.42\n',
+        );
     });
 
     it('aligns columns when align is true', () => {
         const text = formatSearchTable(
-            [ { note_title: 'A', file_line_count: 5 } ],
+            [ { note_title: 'A', file_line_count: 5, bm25_score: -1.5 } ],
             'fulltext',
             { align: true },
         );
 
-        expect(text).toBe('note_title | file_line_count\n---------- | ---------------\nA          | 5\n');
+        expect(text).toBe(
+            'note_title | file_line_count | bm25_score\n'
+            + '---------- | --------------- | ----------\n'
+            + 'A          | 5               | -1.5\n',
+        );
     });
 });
 

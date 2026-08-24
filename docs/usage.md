@@ -18,8 +18,11 @@ padded). Mutating commands (`write`/`edit`/`append`/`rename`) are always structu
 `mnotes read` is the one exception: its default output is the raw note body (not JSON), so it pipes
 naturally into `$EDITOR`, `less`, etc. See the table under [`mnotes read`](#mnotes-read-title) below.
 
-Raw relevance scores (BM25, cosine distance, RRF) are never shown in normal output — only rank
-position. Use `--explain` on `search` if you need the underlying numbers for debugging.
+The raw RRF score is never shown in `hybrid`-mode search output — only rank position, since a fused
+score isn't independently meaningful. `fulltext` and `semantic` mode are single-signal, though: their
+native score (`bm25_score` / `cosine_distance`, respectively) is meaningful on its own and appears
+alongside rank in normal output for those modes. Use `--explain` on `search` if you need the RRF
+formula breakdown or per-side ranks together for debugging.
 
 Any JSON that lands on stderr (currently just `read`'s metadata) is pretty-printed for readability,
 unlike the compact single-line JSON `--json` produces on stdout for scripting. When a command writes to

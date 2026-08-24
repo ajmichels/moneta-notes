@@ -50,7 +50,10 @@ const SEARCH_DESCRIPTION = 'Full-text, semantic, or hybrid search over the vault
     + 'mode for results that matched via the semantic side, results also include chunk_line_start/ '
     + 'chunk_line_end — the line span (within the note body) of the specific passage that matched, '
     + 'not the whole note. Pass these straight through as note_read\'s start_line/end_line to fetch '
-    + 'just that slice of a large note instead of reading it in full.';
+    + 'just that slice of a large note instead of reading it in full. fulltext mode results include '
+    + 'bm25_score (lower is more relevant); semantic mode results include cosine_distance (lower is '
+    + 'more similar). hybrid mode has neither — it reports fulltext_rank/semantic_rank position only, '
+    + 'since its fused RRF score isn\'t independently meaningful.';
 
 const TOOL_DEFS = [
     {

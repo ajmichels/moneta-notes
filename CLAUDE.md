@@ -90,7 +90,10 @@ separate namespace entirely (vault content, not code).
 - **Fail loudly.** Prefer throwing a specific, descriptive error over returning a partial or
   best-effort result. This applies to hash mismatches, ambiguous `note_edit` matches (zero or
   multiple), size-drop guard trips, and index/vault inconsistencies.
-- **Don't show raw RRF/BM25/cosine scores anywhere in tool output** — rank position only.
+- **Don't show a raw RRF score anywhere in `hybrid`-mode tool output** — rank position only. RRF's
+  fused score isn't independently meaningful to a caller. `fulltext` and `semantic` mode are single-
+  signal, though: their raw BM25 score / cosine distance *is* meaningful on its own and is included
+  alongside rank in those modes' output.
 - **Don't add MCP resources.** This was deliberately decided against; if it comes up again, that's a
   discussion to have with AJ, not a default to reach for.
 - **Every MCP tool takes a required `reason<string>` argument**, mirroring `description` on Claude

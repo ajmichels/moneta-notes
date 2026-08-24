@@ -56,6 +56,7 @@ function toFulltextOutput(results, limit) {
     return results.slice(0, limit).map((r) => ({
         note_title: r.noteTitle,
         file_line_count: r.fileLineCount,
+        bm25_score: r.score,
     }));
 }
 
@@ -164,6 +165,7 @@ function toSemanticOutput(results, limit) {
         file_line_count: r.fileLineCount,
         chunk_line_start: r.lineStart,
         chunk_line_end: r.lineEnd,
+        cosine_distance: r.distance,
     }));
 }
 

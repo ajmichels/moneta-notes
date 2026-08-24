@@ -32,8 +32,8 @@ export function formatTable(columns, rows, { align = false } = {}) {
 }
 
 const SEARCH_COLUMNS = {
-    fulltext: [ 'note_title', 'file_line_count' ],
-    semantic: [ 'note_title', 'file_line_count', 'chunk_line_start', 'chunk_line_end' ],
+    fulltext: [ 'note_title', 'file_line_count', 'bm25_score' ],
+    semantic: [ 'note_title', 'file_line_count', 'chunk_line_start', 'chunk_line_end', 'cosine_distance' ],
     hybrid: [
         'note_title', 'file_line_count', 'fulltext_rank', 'semantic_rank',
         'chunk_line_start', 'chunk_line_end',

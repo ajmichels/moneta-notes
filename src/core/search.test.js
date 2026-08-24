@@ -65,7 +65,7 @@ function fakeEmbed(seed) {
 }
 
 describe('search: fulltext mode', () => {
-    it('returns note_title (derived from path) and file_line_count for a MATCH hit', async () => {
+    it('returns note_title (derived from path), file_line_count, and bm25_score for a MATCH hit', async () => {
         const { db } = openDb(':memory:');
         const noteId = insertNote(db, { path: 'Projects/Moneta.md', lineCount: 42 });
         insertFtsRow(db, noteId, 'Moneta', 'notes about a personal knowledge graph');
@@ -73,7 +73,7 @@ describe('search: fulltext mode', () => {
         const results = await search(db, { query: 'knowledge graph', mode: 'fulltext', limit: 20 });
 
         expect(results).toEqual([
-            { note_title: 'Projects/Moneta', file_line_count: 42 },
+            { note_title: 'Projects/Moneta', file_line_count: 42, bm25_score: expect.any(Number) },
         ]);
         db.close();
     });
@@ -129,6 +129,7 @@ describe('search: semantic mode', () => {
         });
 
         expect(results[0].note_title).toBe('Close');
+        expect(typeof results[0].cosine_distance).toBe('number');
         db.close();
     });
 

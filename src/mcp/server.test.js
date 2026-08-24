@@ -141,7 +141,7 @@ describe('createServer', () => {
         });
 
         expect(result.isError).toBeFalsy();
-        expect(result.content[0].text).toBe('note_title|file_line_count\nA|3\n');
+        expect(result.content[0].text).toMatch(/^note_title\|file_line_count\|bm25_score\nA\|3\|-?\d+(\.\d+)?\n$/);
     });
 
     it('round-trips attachment_write then attachment_read, decoding back to the original bytes', async () => {

@@ -142,8 +142,8 @@ describe('runSearch', () => {
         );
 
         expect(result.exitCode).toBe(0);
-        expect(result.stdout).toBe(
-            'note_title | file_line_count\n---------- | ---------------\nA          | 10\n',
+        expect(result.stdout).toMatch(
+            /^note_title \| file_line_count \| bm25_score\n-+ \| -+ \| -+\nA\s+\| 10\s+\| -?\d+(\.\d+)?\n$/,
         );
         db.close();
     });
@@ -158,7 +158,9 @@ describe('runSearch', () => {
             { db, embed: async () => new Float32Array(1024), embeddingModel: 'm', embeddingVersion: 'v1' },
         );
 
-        expect(JSON.parse(result.stdout)).toEqual([ { note_title: 'A', file_line_count: 10 } ]);
+        expect(JSON.parse(result.stdout)).toEqual([
+            { note_title: 'A', file_line_count: 10, bm25_score: expect.any(Number) },
+        ]);
         db.close();
     });
 
@@ -198,7 +200,7 @@ describe('runSearch', () => {
 });
 
 describe('runSearch: --explain', () => {
-    it('shows raw bm25 scores that never appear in default output', async () => {
+    it('shows a rank/bm25-formula breakdown table not present in default output', async () => {
         const { db } = openDb(':memory:');
         const noteId = insertTestNote(db, 'A.md', 10);
         db.prepare('INSERT INTO notes_fts (rowid, title, body) VALUES (?, ?, ?)').run(noteId, 'A', 'graph graph graph');

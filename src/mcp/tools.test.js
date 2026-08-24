@@ -214,7 +214,7 @@ describe('searchTool', () => {
         );
 
         expect(result.isError).toBeUndefined();
-        expect(result.content[0].text).toBe('note_title|file_line_count\nRecipe|5\n');
+        expect(result.content[0].text).toMatch(/^note_title\|file_line_count\|bm25_score\nRecipe\|5\|-?\d+(\.\d+)?\n$/);
     });
 
     it('maps a thrown search() error (malformed FTS5 syntax) to isError: true', async () => {

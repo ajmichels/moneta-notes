@@ -65,7 +65,9 @@ Every tool takes `reason<string>` (required) — logged per S008, not used to ga
 **Input**: `query<string>`, `?mode<fulltext|semantic|hybrid>=hybrid`, `?limit<int>=20` (max `100`,
 both config-backed per S002), `reason<string>`.
 **Output**: `note_title`, `file_line_count`, `?fulltext_rank`, `?semantic_rank`, `?chunk_line_start`,
-`?chunk_line_end` (rank position only, never raw scores — CLAUDE.md).
+`?chunk_line_end`, `?bm25_score` (`fulltext` mode only), `?cosine_distance` (`semantic` mode only) —
+`hybrid` mode is rank position only, never a raw RRF score; `fulltext`/`semantic` mode also carries its
+native single-signal score (CLAUDE.md, S002).
 
 `chunk_line_start`/`chunk_line_end` (S001/S002) are present only when the result has a semantic-side
 match — always in `semantic` mode, and in `hybrid` mode only for notes that matched (at least partly)

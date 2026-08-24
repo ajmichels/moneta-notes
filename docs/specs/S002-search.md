@@ -8,8 +8,10 @@ Consumed by: `S006-cli`, `S007-mcp-server`
 ## Purpose
 
 Defines how `core/search.js` answers `fulltext`, `semantic`, and `hybrid` queries over the tables
-defined in S001, and how results collapse and merge into the note-level, rank-only output shape the
-README commits to (no raw BM25/cosine/RRF scores ever surface — rank position only).
+defined in S001, and how results collapse and merge into the note-level output shape the README
+commits to. `hybrid` mode is rank-only (no raw RRF score — it's a fused signal, not independently
+meaningful); `fulltext` and `semantic` mode also surface their native single-signal score (raw BM25 /
+cosine distance) alongside rank, since that number is meaningful on its own in those modes.
 
 ## Input
 
@@ -100,9 +102,15 @@ native ranking (BM25 ascending / cosine distance ascending after chunk collapse)
 ## Output
 
 `note_title`, `file_line_count`, and (in `hybrid` mode) `fulltext_rank` / `semantic_rank` — rank
-position only, never raw scores. `file_line_count` and `note_title` are read from the `notes` row
+position only, never a raw RRF score. `file_line_count` and `note_title` are read from the `notes` row
 (`line_count` column, `path` → title derivation per S010); no additional query needed beyond what's
 already fetched during ranking.
+
+**`bm25_score`** (`fulltext` mode) / **`cosine_distance`** (`semantic` mode): the note's native
+single-signal score, alongside rank — unlike RRF's fused score, a raw BM25 or cosine number is
+meaningful on its own when there's only one ranking signal in play, so single-mode output isn't
+rank-only the way `hybrid` mode's `fulltext_rank`/`semantic_rank` are. Neither field appears in
+`hybrid` mode; `hybrid`'s per-side rank fields carry no accompanying raw score.
 
 **`chunk_line_start` / `chunk_line_end`** (added by this change): the winning chunk's `line_start`/
 `line_end` (S001), present on a result row whenever that note has a semantic side to its match —
@@ -152,7 +160,8 @@ the moment it happens, nowhere durable.
 - **Chunking algorithm** (token counting, ~512/~15% overlap window construction) — S005.
 - **Embedding pipeline invocation details** — S005 (`indexer/embed.js`); this spec assumes an
   `embed(text) -> float[1024]` function exists and calls it for the query text.
-- **`--explain` CLI flag** (surfacing raw BM25/cosine/RRF numbers for debugging) — S006. This spec's
-  "no raw scores in output" rule applies to the tool-facing `search` output; a CLI debug flag is a
-  distinct, explicitly-opted-into surface and may show whatever's useful for debugging.
+- **`--explain` CLI flag** (surfacing the RRF score/formula and per-side ranks together, plus the
+  winning chunk, for debugging) — S006. This is a distinct, explicitly-opted-into debug surface;
+  `bm25_score`/`cosine_distance` on single-mode `search` output above already covers non-`--explain`
+  access to the native scores.
 - **MCP tool description text** documenting the mode-dependent FTS5 DSL availability — S007.
