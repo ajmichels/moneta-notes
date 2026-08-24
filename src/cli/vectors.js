@@ -173,6 +173,7 @@ async function runReduce(args, deps) {
             clusters: { type: 'string' },
             output: { type: 'string' },
             format: { type: 'string', default: 'csv' },
+            metadata: { type: 'boolean', default: false },
         },
     });
 
@@ -181,7 +182,7 @@ async function runReduce(args, deps) {
     }
     validateReduceFlags(args, values);
 
-    const { points, metadata } = reduceVectors(deps.db, {
+    const { points, metadata: reduceMetadata } = reduceVectors(deps.db, {
         level: values.level,
         algo: values.algo,
         dims: Number(values.dims),
@@ -195,8 +196,10 @@ async function runReduce(args, deps) {
     });
 
     const body = values.format === 'json'
-        ? formatJson({ points, metadata })
-        : formatReduceCsv(points, { level: values.level });
+        ? formatJson({ points, metadata: reduceMetadata })
+        : formatReduceCsv(points, {
+            level: values.level, dims: Number(values.dims), metadata: values.metadata,
+        });
 
     if (values.output !== undefined) {
         writeFileSync(values.output, body);
@@ -528,16 +531,28 @@ Flags:
       destination changes.
 
   --format=csv|json
-      Default: csv — a bare header row (id,title,x,y,z,label, plus
-      chunk_line_start/chunk_line_end at --level=chunk) plus one row per point,
-      nothing else, so it pipes cleanly into a plotting tool. json gives
-      { points, metadata } where metadata.cluster_source is "internal" or the
-      --clusters path used (present only for --color-by=cluster).
+      Default: csv — coordinates only (x,y at --dims=2; x,y,z at --dims=3), one
+      row per point, nothing else. This is deliberately minimal: a scatter tool
+      that reads columns positionally (uplot, gnuplot) can't ignore extra
+      columns — uplot's scatter in particular plots every column past the first
+      as its own additional y-series, so tacking on id/title/label would render
+      as bogus extra series, not just get skipped. Use --metadata to include
+      them anyway (e.g. for a spreadsheet or a custom script). json always
+      includes everything regardless of --metadata: { points, metadata } where
+      metadata.cluster_source is "internal" or the --clusters path used (present
+      only for --color-by=cluster).
+
+  --metadata
+      csv only — append id,title[,chunk_line_start,chunk_line_end at
+      --level=chunk],label after the coordinate columns. Off by default so the
+      plain \`| uplot scatter\` pipeline in the first example below works
+      unmodified.
 
 Examples:
   mnotes vectors reduce --algo=pca | uplot scatter -H -d,
   mnotes vectors reduce --algo=umap --neighbors=15 --min-dist=0.1 --color-by=cluster
   mnotes vectors reduce --algo=pca --dims=3 --format=json --output=points.json
+  mnotes vectors reduce --algo=pca --metadata --output=points.csv
 `,
 
     'tag-fit': `Usage: mnotes vectors tag-fit [flags]

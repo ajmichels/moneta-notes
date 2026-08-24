@@ -339,7 +339,7 @@ describe('mnotes vectors cluster', () => {
 });
 
 describe('mnotes vectors reduce', () => {
-    it('streams a header + one CSV row per point to stdout by default', async () => {
+    it('streams a coordinates-only header + one CSV row per point to stdout by default', async () => {
         const db = makeTempDb();
         seedTwoGroups(db);
 
@@ -347,8 +347,58 @@ describe('mnotes vectors reduce', () => {
 
         expect(result.exitCode).toBe(0);
         const lines = result.stdout.trim().split('\n');
-        expect(lines[0]).toBe('id,title,x,y,z,label');
+        expect(lines[0]).toBe('x,y');
         expect(lines).toHaveLength(5);
+        db.close();
+    });
+
+    it('default output has no extra columns, so a positional scatter tool plots one clean series', async () => {
+        const db = makeTempDb();
+        seedTwoGroups(db);
+
+        const result = await runVectorsCommand([ 'reduce', '--algo', 'pca' ], makeDeps(db));
+
+        const [ header, firstRow ] = result.stdout.trim().split('\n');
+        expect(header.split(',')).toEqual([ 'x', 'y' ]);
+        const cells = firstRow.split(',');
+        expect(cells).toHaveLength(2);
+        expect(cells.every((c) => !Number.isNaN(Number(c)))).toBe(true);
+        db.close();
+    });
+
+    it('--dims=3 adds a z column — --dims=2 omits it entirely', async () => {
+        const db = makeTempDb();
+        seedTwoGroups(db);
+
+        const dims2 = await runVectorsCommand([ 'reduce', '--algo', 'pca', '--dims', '2' ], makeDeps(db));
+        const dims3 = await runVectorsCommand([ 'reduce', '--algo', 'pca', '--dims', '3' ], makeDeps(db));
+
+        expect(dims2.stdout.split('\n')[0]).toBe('x,y');
+        expect(dims3.stdout.split('\n')[0]).toBe('x,y,z');
+        db.close();
+    });
+
+    it('--metadata appends id,title,label after the coordinate columns', async () => {
+        const db = makeTempDb();
+        seedTwoGroups(db);
+
+        const result = await runVectorsCommand(
+            [ 'reduce', '--algo', 'pca', '--metadata' ], makeDeps(db),
+        );
+
+        expect(result.stdout.split('\n')[0]).toBe('x,y,id,title,label');
+        db.close();
+    });
+
+    it('--metadata --level=chunk adds chunk_line_start/chunk_line_end too', async () => {
+        const db = makeTempDb();
+        seedTwoGroups(db);
+
+        const result = await runVectorsCommand(
+            [ 'reduce', '--algo', 'pca', '--level', 'chunk', '--metadata' ], makeDeps(db),
+        );
+
+        expect(result.stdout.split('\n')[0]).toBe('x,y,id,title,chunk_line_start,chunk_line_end,label');
         db.close();
     });
 
@@ -378,11 +428,11 @@ describe('mnotes vectors reduce', () => {
         );
 
         expect(result.stdout).toContain(`wrote 4 points to ${outPath}`);
-        expect(readFileSync(outPath, 'utf8')).toContain('id,title,x,y,z,label');
+        expect(readFileSync(outPath, 'utf8')).toContain('x,y');
         db.close();
     });
 
-    it('--level chunk adds chunk_line_start/chunk_line_end CSV columns', async () => {
+    it('--level chunk still reduces at chunk granularity (coords-only output, same as note level)', async () => {
         const db = makeTempDb();
         seedTwoGroups(db);
 
@@ -390,7 +440,7 @@ describe('mnotes vectors reduce', () => {
             [ 'reduce', '--algo', 'pca', '--level', 'chunk' ], makeDeps(db),
         );
 
-        expect(result.stdout.split('\n')[0]).toBe('id,title,chunk_line_start,chunk_line_end,x,y,z,label');
+        expect(result.stdout.split('\n')[0]).toBe('x,y');
         db.close();
     });
 

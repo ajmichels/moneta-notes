@@ -155,10 +155,21 @@ function csvCell(value) {
 
 // A bare header row + one data row per point, nothing else — the point is a clean stdin stream
 // for a plotting tool (`uplot`, gnuplot), not a table for a human to read directly (S013).
-export function formatReduceCsv(points, { level = 'note' } = {}) {
-    const columns = level === 'chunk'
-        ? [ 'id', 'title', 'chunk_line_start', 'chunk_line_end', 'x', 'y', 'z', 'label' ]
-        : [ 'id', 'title', 'x', 'y', 'z', 'label' ];
+//
+// Coordinate-only by default (x,y[,z], `z` present only at --dims=3): a scatter tool that reads
+// plot columns positionally has no way to *ignore* extra columns, not just misread their
+// position — `uplot scatter` in particular treats column 1 as x and plots every remaining column
+// as its own additional y-series overlaid on the same axes, so an id/title/label column tacked on
+// (in any position) doesn't just get skipped, it renders as bogus extra series cluttering the
+// plot. `--metadata` (CLI-level opt-in, see cli/vectors.js) appends id,title[,chunk_line_start,
+// chunk_line_end at --level=chunk],label after the coordinates for callers who want a CSV to
+// import into something that *does* handle extra columns (a spreadsheet, pandas, a custom script).
+export function formatReduceCsv(points, { level = 'note', dims = 2, metadata = false } = {}) {
+    const coordColumns = dims === 3 ? [ 'x', 'y', 'z' ] : [ 'x', 'y' ];
+    const metaColumns = level === 'chunk'
+        ? [ 'id', 'title', 'chunk_line_start', 'chunk_line_end', 'label' ]
+        : [ 'id', 'title', 'label' ];
+    const columns = metadata ? [ ...coordColumns, ...metaColumns ] : coordColumns;
     const rows = [ columns, ...points.map((p) => columns.map((c) => csvCell(p[c]))) ];
     return `${rows.map((row) => row.join(',')).join('\n')}\n`;
 }

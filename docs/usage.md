@@ -306,6 +306,7 @@ silently smaller cluster count.
 mnotes vectors reduce --algo=pca | uplot scatter -H -d,
 mnotes vectors reduce --algo=umap --neighbors=15 --min-dist=0.1 --color-by=cluster
 mnotes vectors reduce --algo=pca --dims=3 --format=json --output=points.json
+mnotes vectors reduce --algo=pca --metadata --output=points.csv
 ```
 
 Flags: `--level=note|chunk` (default `note`, always centroid at note level — no `--aggregate` flag),
@@ -314,14 +315,20 @@ a usage error combined with `--algo=pca`), `--tag=T`/`--folder=P` (scope filter)
 cluster|none` (default `none`), `--clusters=path` (reuse an already-saved
 `vectors cluster --format=json --output=...` file instead of `--color-by=cluster` computing its own,
 differently-parameterized clustering internally), `--output=path` (write to a file instead of
-stdout), `--format=csv|json` (default `csv`).
+stdout), `--format=csv|json` (default `csv`), `--metadata` (`csv` only — see below).
 
 Dimensionality reduction for visualization. **Streams to stdout by default** — the point is piping
 straight into a plotting tool that reads delimited data from stdin (`uplot`, gnuplot's `plot '-'`), not
-reading the output directly. `csv` is a bare header row (`id,title,x,y,z,label`, plus
-`chunk_line_start`/`chunk_line_end` at `--level=chunk`) followed by one row per point, nothing else;
-`json` gives `{ points: [...], metadata: { cluster_source } }`, where `cluster_source` is `"internal"`
-or the `--clusters` path used, present only when `--color-by=cluster`.
+reading the output directly. `csv` is **coordinates only by default** — `x,y` at `--dims=2`, `x,y,z` at
+`--dims=3`, nothing else — because a scatter tool that reads columns positionally can't just ignore
+extra columns: `uplot scatter` in particular treats column 1 as `x` and plots *every remaining column*
+as its own additional y-series, so an `id`/`title`/`label` column tacked on anywhere would render as
+bogus extra series, not get silently skipped. Pass `--metadata` to append
+`id,title[,chunk_line_start,chunk_line_end at --level=chunk],label` after the coordinates when you want
+them — e.g. importing into a spreadsheet or a custom script that handles extra columns fine. `json`
+always includes everything regardless of `--metadata`: `{ points: [...], metadata: { cluster_source }
+}`, where `cluster_source` is `"internal"` or the `--clusters` path used, present only when
+`--color-by=cluster`.
 
 #### `mnotes vectors tag-fit`
 

@@ -193,7 +193,7 @@ smaller `k` would misrepresent what was actually asked for.
 
 Dimensionality reduction for visualization. Streams to **stdout by default** — the primary intended
 use is piping straight into a plotting tool that reads delimited data from stdin (`mnotes vectors
-reduce --algo pca | uplot scatter -H -d,`, or gnuplot's `plot '-' using 3:4 with points`), not reading
+reduce --algo pca | uplot scatter -H -d,`, or gnuplot's `plot '-' using 1:2 with points`), not reading
 the output directly in a terminal or saving it first.
 
 | Flag | Values | Notes |
@@ -205,7 +205,8 @@ the output directly in a terminal or saving it first.
 | `--tag` / `--folder` | string | Scope filter, same as `cluster`. |
 | `--color-by` | `tag\|cluster\|none`, default `none` | `tag`: each point's `label` is its note's first tag alphabetically (a note can carry several; picking one deterministically beats an arbitrary list in a single `label` field — full tag list is available separately via `tag_list`/`tag_notes` if needed). `cluster`: runs `cluster` internally with `--algo kmeans --k` chosen by a fixed heuristic (`min(10, floor(sqrt(n_points / 2)))`, floored at `2`) unless the caller already has cluster output they'd rather point at — see below. |
 | `--output` | path, optional | Write to a file instead of stdout — same content either way, only the destination changes. Omitted (the default) streams to stdout. |
-| `--format` | `csv\|json`, default `csv` | `csv` is the default because the primary consumer is a stdout-piped plotting tool, not a script parsing JSON — a bare header row (`id,title,x,y,z,label`, `z` empty at `--dims 2`) plus one data row per point, nothing else on stdout, so no output-mode flag is needed to keep other tools' stdin clean. `json` remains available for programmatic consumption (`{ points: [...], metadata: {...} }`, see below) and is unaffected by `--output`. |
+| `--format` | `csv\|json`, default `csv` | `csv` is the default because the primary consumer is a stdout-piped plotting tool, not a script parsing JSON — a bare header row (coordinate columns only by default: `x,y` at `--dims 2`, `x,y,z` at `--dims 3`) plus one data row per point, nothing else on stdout. `json` remains available for programmatic consumption (`{ points: [...], metadata: {...} }`, see below), always includes every field regardless of `--metadata`, and is unaffected by `--output`. |
+| `--metadata` | flag, default off | `csv` only (a no-op — not an error — combined with `--format json`, which already includes everything). Appends `id, title[, chunk_line_start, chunk_line_end at --level chunk], label` after the coordinate columns. Off by default: see "Output shape" below for why extra columns break the default `\| uplot scatter` pipeline this command is designed around. |
 
 If `--color-by cluster` and the caller wants to reuse an already-inspected clustering rather than a
 freshly (and differently-parameterized) computed one, they run `cluster --format json --output
@@ -214,17 +215,40 @@ rationale `outliers --mode bridge` uses its own `--clusters` flag for (see below
 `--clusters`, the internal fixed-heuristic run is exactly that: a convenience default, not
 reproducible against a specific clustering decision. At `--format json`, the output's `metadata`
 records `{ cluster_source: "internal" | "<path>" }` so a later reader can tell which happened; at
-`--format csv` there is no metadata home (stdout must stay a clean, tool-parseable data table with
-nothing else mixed in) — provenance tracking here means using `--format json`, not a `#`-comment
-smuggled into the CSV.
+`--format csv` there is no metadata home for this specifically (stdout must stay a clean,
+tool-parseable data table with nothing but point data mixed in, even with `--metadata`, which adds
+per-point columns, not run-level provenance) — tracking `cluster_source` means using `--format json`,
+not a `#`-comment smuggled into the CSV.
 
-Output shape, per point: `id, title, x, y, z, label` (`z` empty/omitted at `--dims 2`). At `--format
-json`: `{ points: [{id, title, x, y, z?, label}], metadata: {...} }`. At `--format csv` (the default):
-the same fields as a bare header row followed by one row per point, nothing else — no metadata, no
-surrounding object, so the stream is directly consumable by a plotting tool's stdin with no unwrapping
-step. `id` is `note_id`/`chunk_id` depending on `--level`; `title` is the note title (`--level chunk`
-still reports the parent note's title alongside the chunk, plus `chunk_line_start`/`chunk_line_end`
-columns, since a bare chunk id is meaningless on a plot's hover tooltip without it).
+Output shape, per point: `id, title, x, y, z, label` (`z` present only at `--dims 3`, `null` in
+`--format json` and omitted as a column entirely in `--format csv` at `--dims 2`). At `--format json`:
+`{ points: [{id, title, x, y, z?, label}], metadata: {...} }` — field order is irrelevant, a JSON
+consumer reads by key, and every field is always present regardless of `--metadata` (that flag only
+affects `--format csv`).
+
+At `--format csv` (the default), the columns present and their order matter a great deal, and it's
+**coordinates-only by default** — `x, y` (or `x, y, z` at `--dims 3`), nothing else — not merely
+coordinates-first. The reason isn't just "a scatter tool reads columns positionally, so put x/y up
+front" (an earlier draft of this spec assumed reordering alone was sufficient, which turned out to be
+wrong in practice): `uplot scatter` has no way to *ignore* extra columns at all — it treats column 1 as
+`x` and plots **every remaining column** as its own additional y-series overlaid on the same axes.
+Tacking `id`/`title`/`label` onto the end (or anywhere) doesn't get silently skipped, it renders as
+bogus extra series cluttering the plot, which is a real, observed failure of `mnotes vectors reduce
+--algo pca | uplot scatter -H -d,` when the CSV carried metadata columns. Coordinates-only by default
+is what makes that exact pipeline work with zero column-selection flags. Pass `--metadata` to append
+`id, title[, chunk_line_start, chunk_line_end at --level chunk], label` after the coordinate columns
+when that's actually wanted — importing into a spreadsheet or a script (pandas, etc.) that handles
+extra columns fine, rather than piping into a positional scatter tool.
+
+For the `--metadata` case, the coordinate columns still come first, ahead of every other column — a
+scatter tool that reads plot columns positionally (`uplot scatter -H -d,`, gnuplot's `using 1:2`) needs
+the coordinates at the front with nothing non-numeric ahead of them, or it silently plots the wrong
+columns (e.g. treating a leading `id` column as `x`) on top of the already-extra-series problem
+`--metadata` opts into knowingly. No surrounding object either way — the stream is
+directly consumable by a plotting tool's stdin with no unwrapping step. `id` is `note_id`/`chunk_id`
+depending on `--level`; `title` is the note title (`--level chunk` still reports the parent note's
+title alongside the chunk, plus `chunk_line_start`/`chunk_line_end` columns, since a bare chunk id is
+meaningless on a plot's hover tooltip without it).
 
 ### `mnotes vectors tag-fit [--tag <tag>]`
 
