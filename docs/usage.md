@@ -419,13 +419,16 @@ resolution — each tool's own description states this.
 
 `attachment_read`/`attachment_write` ([S012](specs/S012-attachments.md)) are unindexed, so
 `attachment_path` always requires the exact vault-relative path, on both tools — no short-form
-resolution even on the read side, unlike every note tool above. `attachment_read` returns file bytes as
-base64 (`content_base64`, gated by `[attachments].max_read_bytes`) plus `size_bytes`/`mime_type`; for
-PDFs, `total_pages` is also returned, and `start_page`/`end_page` (1-indexed, inclusive) fetch just that
-page range as a standalone PDF instead of the whole file — useful once a PDF is too large for a
-whole-file read, per the cap-exceeded error's own guidance. `attachment_write` is always
-create-or-overwrite with no hash guard, since binary attachments have no diffable text content for that
-guard to protect.
+resolution even on the read side, unlike every note tool above. `attachment_read` returns a JSON text
+block with `size_bytes`/`mime_type` (plus `total_pages` for PDFs), gated by `[attachments].max_read_bytes`,
+plus — when content is included — a second MCP content block carrying the actual bytes: an `image`
+block for PNG/JPEG/GIF/WebP, or a `resource` block (base64 blob) for everything else, including PDFs.
+Bytes are never inlined as base64 text inside the JSON metadata (an earlier version did this and caused
+Claude to try to manually decode large attachments itself instead of treating them as opaque binary).
+`start_page`/`end_page` (1-indexed, inclusive, PDF only) fetch just that page range as a standalone PDF
+instead of the whole file — useful once a PDF is too large for a whole-file read, per the cap-exceeded
+error's own guidance. `attachment_write` is always create-or-overwrite with no hash guard, since binary
+attachments have no diffable text content for that guard to protect.
 
 Two differences from the CLI:
 

@@ -26,10 +26,10 @@ async function withDb(dbPath, fn) {
 export async function callTool(auditLogger, mcpLogger, toolName, input, fn) {
     const noteTitle = input.note_title ?? input.old_title ?? null;
     const attachmentPath = input.attachment_path ?? null;
-    let text;
+    let result;
 
     try {
-        text = await runWithLogger(mcpLogger, fn);
+        result = await runWithLogger(mcpLogger, fn);
     } catch (err) {
         logAudit(auditLogger, {
             tool: toolName,
@@ -52,7 +52,7 @@ export async function callTool(auditLogger, mcpLogger, toolName, input, fn) {
         outcome: 'success',
         errorMessage: null,
     });
-    return { content: [ { type: 'text', text } ] };
+    return { content: Array.isArray(result) ? result : [ { type: 'text', text: result } ] };
 }
 
 export async function searchTool(deps, input) {
@@ -168,6 +168,11 @@ export async function noteRenameTool(deps, input) {
     });
 }
 
+// The Claude API's vision input only accepts these four raster formats — anything else (SVG, HEIC,
+// PDF, docx, ...) can't be rendered as an `image` content block even though MCP's schema would
+// allow it, so those fall through to `resource` (blob) instead.
+const RENDERABLE_IMAGE_MIME_TYPES = new Set([ 'image/png', 'image/jpeg', 'image/gif', 'image/webp' ]);
+
 export async function attachmentReadTool(deps, input) {
     const { vaultRoot } = deps;
     const { attachments: attachmentsConfig } = resolveConfig(deps);
@@ -181,7 +186,15 @@ export async function attachmentReadTool(deps, input) {
             includeContent, maxReadBytes: attachmentsConfig.max_read_bytes, startPage, endPage,
         });
         const { content, ...meta } = result;
-        return formatJson(content ? { ...meta, content_base64: content.toString('base64') } : meta);
+        const metaBlock = { type: 'text', text: formatJson(meta) };
+        if (!content) {
+            return [ metaBlock ];
+        }
+        const data = content.toString('base64');
+        const binaryBlock = RENDERABLE_IMAGE_MIME_TYPES.has(meta.mime_type)
+            ? { type: 'image', data, mimeType: meta.mime_type }
+            : { type: 'resource', resource: { uri: `attachment://${meta.path}`, mimeType: meta.mime_type, blob: data } };
+        return [ metaBlock, binaryBlock ];
     });
 }
 

@@ -187,8 +187,10 @@ tool, no resolution fallback (S003/S010).
 ### `attachment_read` (new — S012)
 
 **Input**: `attachment_path<string>`, `?include_content<bool>=true`, `reason<string>`.
-**Output**: `{ path, size_bytes, mime_type, content_base64 }` (`content_base64` omitted when
-`include_content: false`).
+**Output**: two MCP content blocks when content is included — a `text` block with
+`{ path, size_bytes, mime_type, total_pages? }` as JSON, plus a second block carrying the actual
+bytes (see below). `include_content: false`, or an over-cap file, returns only the `text` metadata
+block.
 
 Reads a binary vault file that isn't a note — an image, PDF, or other attachment a note references via
 `![[...]]`/a markdown link. **No index backs this tool** (S012), so `attachment_path` requires the
@@ -197,26 +199,50 @@ there's no fallback here at all, not even on the read side. The tool description
 *"attachment_path must be the exact vault-relative path, as it appears in the note's reference — there
 is no short-form or basename resolution for attachments, unlike note_title."*
 
-`content_base64` is capped by a config-backed size limit (S009's `[attachments].max_read_bytes`) — a
+The file's bytes are capped by a config-backed size limit (S009's `[attachments].max_read_bytes`) — a
 file over the cap with `include_content: true` (the default) is a hard error naming the cap and
 directing the caller to retry with `include_content: false` for metadata only, or (PDFs) with
 `start_page`/`end_page` (S012) for a page-range slice instead of the whole file.
 
+**Bytes are never inlined as a base64 string inside the JSON metadata block.** An earlier version of
+this tool did exactly that — one `text` content block containing
+`{ path, size_bytes, mime_type, content_base64 }` as a single JSON string — which put the entire
+base64 payload in front of the model as literal text with no structural signal that it was opaque,
+already-decoded binary data rather than something to reason over. In practice this caused the model
+to try to manually "decode" large attachments itself mid-turn, ballooning output tokens until the
+turn timed out — worse than the truncation problem the `text`-only design was chosen to avoid (below).
+The fix: `content` (when included) is now its own content block, split by whether the Claude API can
+render it as vision input —
+- **`image/png`, `image/jpeg`, `image/gif`, `image/webp`** → an `image` content block
+  (`{ type: 'image', data, mimeType }`) — the exact four raster formats the Claude API's vision input
+  accepts; nothing else qualifies even if MCP's own schema would technically allow representing it as
+  `image` (SVG, HEIC and anything non-raster stay in the bucket below).
+- **Everything else that isn't metadata-only** (PDF, docx, zip, `application/octet-stream`, ...) → a
+  `resource` content block (`EmbeddedResource`: `{ type: 'resource', resource: { uri, mimeType, blob } }`).
+  `uri` is a synthetic `attachment://<path>` label the schema requires but that is never dereferenced —
+  `blob` already carries the full base64 payload inline, in the same response, unlike a `resource_link`
+  block (which *would* require a `resources/read` round trip against a registered resource). Per
+  CLAUDE.md, this project does not register any `resources/list`/`resources/read` capability, and
+  doesn't need to for this to work.
+
 **`attachment_read`'s `tools/list` registration carries `_meta: { 'anthropic/maxResultSizeChars':
 500000 }`** — a Claude-Code-specific annotation (documented at
 `code.claude.com/docs/en/mcp#mcp-output-limits-and-warnings`, not part of the MCP spec itself) that
-raises this one tool's text-content output threshold to the annotation's hard ceiling, independent of
-whatever `MAX_MCP_OUTPUT_TOKENS` the client has configured globally. Without it, a base64-encoded
-attachment easily trips Claude Code's default 25,000-token MCP-output limit and gets silently persisted
-to disk with a file-reference stub in its place — a client-side behavior this project has no control
-over otherwise, since `attachment_read`'s response is (and stays) a `text` content block, not `image`:
-the same Claude Code docs note that `image`-typed content has no equivalent per-tool override and
-remains subject to the global token limit regardless, which is why this project doesn't represent
-attachment bytes as MCP's native `image` content type even though the SDK supports it. This is a flat
-constant, not derived from `[attachments].max_read_bytes` (S009) — the two caps bound different things
-(one what's read off disk, the other what a specific client will forward inline) and conflating them
-would just reintroduce the same silent-truncation failure mode for any `max_read_bytes` configured
-above 500,000 characters' worth of base64.
+raises a tool's `text`-content output threshold to the annotation's hard ceiling, independent of
+whatever `MAX_MCP_OUTPUT_TOKENS` the client has configured globally — without it, the `text` metadata
+block plus a base64-inlined `image` block together (as this tool used to return) easily tripped Claude
+Code's default 25,000-token MCP-output limit and got silently persisted to disk with a file-reference
+stub in its place. The docs are explicit that this annotation **has no effect on `image`-typed
+content** — an `image` block stays subject to `MAX_MCP_OUTPUT_TOKENS` regardless, so a large raster
+image read through this tool can still hit that global cap and get silently truncated to a disk
+reference. The docs are silent on `resource`-typed content either way (neither confirmed to inherit
+the `text` override nor confirmed to be excluded like `image`) — this is unverified, closed-source
+client behavior, not a settled guarantee, and worth confirming empirically against a real oversized
+PDF before leaning on it. The annotation itself stays a flat constant, not derived from
+`[attachments].max_read_bytes` (S009) — the two caps bound different things (one what's read off disk,
+the other what a specific client will forward for `text` content) and conflating them would just
+reintroduce the same silent-truncation failure mode for any `max_read_bytes` configured above 500,000
+characters' worth of base64.
 
 ### `attachment_write` (new — S012)
 

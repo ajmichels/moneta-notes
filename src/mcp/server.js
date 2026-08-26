@@ -171,16 +171,19 @@ const TOOL_DEFS = [
         description: 'Read a binary vault file that is not a note (image, PDF, etc.), referenced '
             + 'from a note via a [[wikilink]]/![[embed]]/markdown-link. attachment_path must be the '
             + 'exact vault-relative path as it appears in that reference — there is no short-form or '
-            + 'basename resolution for attachments, unlike note_title. size_bytes/mime_type are '
-            + 'always returned; content_base64 is included when include_content is true (the '
-            + 'default) and the file is under the configured size cap — otherwise omitted, or (if '
-            + 'include_content was left true and the file is over the cap) a hard error directing '
-            + 'you to retry with include_content: false, or (PDFs) with start_page/end_page. For '
-            + 'PDFs, total_pages is also returned (metadata-only reads included) whenever the file '
-            + 'parses as a valid PDF. start_page/end_page (1-indexed, inclusive, PDF only) fetch just '
-            + 'that page range as a standalone PDF instead of the whole file — both are required '
-            + 'together, must fall within 1..total_pages, and cannot be combined with '
-            + 'include_content: false.',
+            + 'basename resolution for attachments, unlike note_title. Returns two content blocks '
+            + 'when include_content is true (the default) and the file is under the configured size '
+            + 'cap: a text block with { path, size_bytes, mime_type, total_pages? } as JSON, plus a '
+            + 'second block carrying the actual bytes — an image block for PNG/JPEG/GIF/WebP, or a '
+            + 'resource block (base64 blob) for everything else, including PDFs — never inlined as a '
+            + 'base64 string inside the JSON metadata. include_content: false (or an over-cap file) '
+            + 'returns only the metadata text block, no second block; an over-cap file with '
+            + 'include_content left true is a hard error directing you to retry with '
+            + 'include_content: false, or (PDFs) with start_page/end_page. For PDFs, total_pages is '
+            + 'also returned (metadata-only reads included) whenever the file parses as a valid PDF. '
+            + 'start_page/end_page (1-indexed, inclusive, PDF only) fetch just that page range as a '
+            + 'standalone PDF instead of the whole file — both are required together, must fall '
+            + 'within 1..total_pages, and cannot be combined with include_content: false.',
         inputSchema: {
             attachment_path: z.string(),
             include_content: z.boolean().optional(),

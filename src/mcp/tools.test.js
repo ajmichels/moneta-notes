@@ -651,7 +651,7 @@ describe('noteRenameTool', () => {
 });
 
 describe('attachmentReadTool', () => {
-    it('returns size_bytes/mime_type/content_base64, decodable back to the original bytes', async () => {
+    it('returns a text metadata block plus a resource block for a PDF, blob decodable to the original bytes', async () => {
         const vaultRoot = makeTempVault({});
         const content = Buffer.from('pdf bytes here');
         mkdirSync(join(vaultRoot, 'Attachments'), { recursive: true });
@@ -662,14 +662,39 @@ describe('attachmentReadTool', () => {
             { attachment_path: 'Attachments/receipt.pdf', reason: 'testing attachment read' },
         );
 
-        const parsed = JSON.parse(result.content[0].text);
-        expect(parsed.path).toBe('Attachments/receipt.pdf');
-        expect(parsed.size_bytes).toBe(content.length);
-        expect(parsed.mime_type).toBe('application/pdf');
-        expect(Buffer.from(parsed.content_base64, 'base64').equals(content)).toBe(true);
+        expect(result.content).toHaveLength(2);
+        const meta = JSON.parse(result.content[0].text);
+        expect(meta.path).toBe('Attachments/receipt.pdf');
+        expect(meta.size_bytes).toBe(content.length);
+        expect(meta.mime_type).toBe('application/pdf');
+        expect(meta.content_base64).toBeUndefined();
+
+        const [ , resourceBlock ] = result.content;
+        expect(resourceBlock.type).toBe('resource');
+        expect(resourceBlock.resource.mimeType).toBe('application/pdf');
+        expect(Buffer.from(resourceBlock.resource.blob, 'base64').equals(content)).toBe(true);
     });
 
-    it('omits content_base64 when include_content is false', async () => {
+    it('returns a text metadata block plus an image block for a PNG', async () => {
+        const vaultRoot = makeTempVault({});
+        const content = Buffer.from('fake png bytes');
+        mkdirSync(join(vaultRoot, 'Attachments'), { recursive: true });
+        writeFileSync(join(vaultRoot, 'Attachments/logo.png'), content);
+
+        const result = await attachmentReadTool(
+            makeDeps({ vaultRoot }),
+            { attachment_path: 'Attachments/logo.png', reason: 'testing image attachment read' },
+        );
+
+        expect(result.content).toHaveLength(2);
+        const [ metaBlock, imageBlock ] = result.content;
+        expect(JSON.parse(metaBlock.text).content_base64).toBeUndefined();
+        expect(imageBlock.type).toBe('image');
+        expect(imageBlock.mimeType).toBe('image/png');
+        expect(Buffer.from(imageBlock.data, 'base64').equals(content)).toBe(true);
+    });
+
+    it('omits content_base64 and returns only the metadata block when include_content is false', async () => {
         const vaultRoot = makeTempVault({});
         mkdirSync(join(vaultRoot, 'Attachments'), { recursive: true });
         writeFileSync(join(vaultRoot, 'Attachments/receipt.pdf'), 'bytes');
@@ -682,6 +707,7 @@ describe('attachmentReadTool', () => {
             },
         );
 
+        expect(result.content).toHaveLength(1);
         const parsed = JSON.parse(result.content[0].text);
         expect(parsed.content_base64).toBeUndefined();
         expect(parsed.size_bytes).toBe(5);
@@ -731,9 +757,10 @@ describe('attachmentReadTool', () => {
         );
 
         expect(result.isError).toBeFalsy();
-        const parsed = JSON.parse(result.content[0].text);
-        expect(parsed.total_pages).toBe(6);
-        const sliced = await PDFDocument.load(Buffer.from(parsed.content_base64, 'base64'));
+        const meta = JSON.parse(result.content[0].text);
+        expect(meta.total_pages).toBe(6);
+        expect(meta.content_base64).toBeUndefined();
+        const sliced = await PDFDocument.load(Buffer.from(result.content[1].resource.blob, 'base64'));
         expect(sliced.getPageCount()).toBe(2);
     });
 

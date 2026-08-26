@@ -74,22 +74,26 @@ in wording/behavior from a caller's perspective.
 `attachment_path<string>`, `?include_content<bool>=true`, `?start_page<int>`, `?end_page<int>`,
 `reason<string>`.
 
-Returns `{ path, size_bytes, mime_type, content_base64 }`, plus `total_pages` when `mime_type` is
-`application/pdf`. `path` echoes the resolved vault-relative path (never an absolute filesystem path —
-same "never leak the vault's real location" boundary every other tool response already respects).
-`mime_type` is derived from the file extension via a small built-in extension→MIME lookup table
-(implementation detail, not a spec-level concern beyond: unknown extensions fall back to
-`application/octet-stream`, never an error — an unrecognized extension is not a reason to fail a read).
+`readAttachment` (the `core/attachments.js` function this tool wraps) returns
+`{ path, size_bytes, mime_type, content }`, plus `total_pages` when `mime_type` is `application/pdf` —
+`content` is a raw `Buffer`, not a base64 string; base64-encoding it, and deciding how to represent it
+on the wire (a single JSON blob vs. separate MCP content blocks), is caller territory, not this core
+function's concern (S007 owns that decision for the MCP surface). `path` echoes the resolved
+vault-relative path (never an absolute filesystem path — same "never leak the vault's real location"
+boundary every other tool response already respects). `mime_type` is derived from the file extension
+via a small built-in extension→MIME lookup table (implementation detail, not a spec-level concern
+beyond: unknown extensions fall back to `application/octet-stream`, never an error — an unrecognized
+extension is not a reason to fail a read).
 
-- **`content_base64` is included whenever `include_content` is `true`** (the default) — the file's raw
-  bytes, base64-encoded, so a caller can actually see/use an image or document, not just confirm it
+- **`content` is included whenever `include_content` is `true`** (the default) — the file's raw
+  bytes as a `Buffer`, so a caller can actually see/use an image or document, not just confirm it
   exists. **Gated by a config-backed size cap** (`[attachments].max_read_bytes`, S009) — if
   `include_content` is `true` and the file exceeds the cap, this is a hard error (fail loudly, per
   CLAUDE.md — never a silent downgrade to metadata-only) naming the file's actual size, the configured
   cap, and directing the caller to retry with `include_content: false` for metadata only, or — when
   `mime_type` is `application/pdf` — with `start_page`/`end_page` to fetch a slice instead of the whole
   file (see below).
-- **`include_content: false`** returns `{ path, size_bytes, mime_type }` with no `content_base64` key
+- **`include_content: false`** returns `{ path, size_bytes, mime_type }` with no `content` key
   at all (omitted, not `null`) — an explicit metadata-only mode, useful when Claude only needs to
   confirm an attachment exists or check its size/type before deciding whether to fetch it, without
   worrying about the size cap.
@@ -100,7 +104,7 @@ same "never leak the vault's real location" boundary every other tool response a
 `start_line`/`end_line` convention rather than any external tool's own range-string syntax, for
 consistency with the rest of this project's own tool surface. Given either, `readAttachment` uses
 `pdf-lib` to load the source PDF, copy just that page range into a freshly-created `PDFDocument`, and
-return *that* smaller document's bytes as `content_base64` — a real, independently-openable PDF
+return *that* smaller document's bytes as `content` — a real, independently-openable PDF
 containing only the requested pages, not a text/image extraction. `total_pages` (the source document's
 full page count) is always included on a PDF response, sliced or not, so a caller that hits the size
 cap on a whole-file read knows what range is even worth asking for next.
@@ -132,7 +136,7 @@ next call without a wasted round trip.
 **This computation is best-effort, not a requirement, except when a page range is actually
 requested.** A `.pdf`-extension file that fails to parse as an actual PDF (corrupt, mislabeled,
 whatever) doesn't fail a plain byte or metadata read over it — `total_pages` is simply omitted from the
-response (same "omitted, not null/error" precedent `content_base64` already sets for
+response (same "omitted, not null/error" precedent `content` already sets for
 `include_content: false`), and the cap-exceeded error falls back to its plain `include_content: false`
 retry hint with no page-range mention. This matches the file extension→MIME lookup's own existing
 stance one paragraph up ("an unrecognized extension is not a reason to fail a read") applied to a
@@ -219,9 +223,13 @@ just note tools). `mnotes attachment write` is logged to `audit.log` (`source: c
 ## MCP (amends S007)
 
 Two new tools, `attachment_read` and `attachment_write`, added to the tool set documented in S007.
-Both take `reason<string>` like every other tool. Output is structured JSON for both (matching
-`note_read`/the mutating note tools' shape, not the pipe-delimited columnar format — a single-object
-response, not a list of rows, so there's no tabular format to gain from here).
+Both take `reason<string>` like every other tool. `attachment_write`'s output is a single structured
+JSON object (matching `note_read`/the mutating note tools' shape, not the pipe-delimited columnar
+format — a single-object response, not a list of rows, so there's no tabular format to gain from
+here). `attachment_read`'s output is JSON metadata plus, when content is included, a second MCP
+content block carrying the raw bytes rather than a base64 string embedded in that JSON — see S007's
+`attachment_read` entry for the exact content-block split and why (a prior single-JSON-blob design
+caused the model to try to manually decode large inlined base64 payloads itself).
 
 Every MCP tool call is audited regardless of read/write (S007's existing "every tool call, not just
 mutations" rule, the asymmetry with the CLI already documented there) — `attachment_read` and

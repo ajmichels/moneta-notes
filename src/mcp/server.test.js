@@ -167,7 +167,8 @@ describe('createServer', () => {
 
         expect(readResult.isError).toBeFalsy();
         const parsed = JSON.parse(readResult.content[0].text);
-        expect(Buffer.from(parsed.content_base64, 'base64').equals(content)).toBe(true);
+        expect(parsed.content_base64).toBeUndefined();
+        expect(Buffer.from(readResult.content[1].resource.blob, 'base64').equals(content)).toBe(true);
     });
 
     it('rejects a tool call missing the required reason argument', async () => {
