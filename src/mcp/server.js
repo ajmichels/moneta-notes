@@ -65,6 +65,11 @@ const TOOL_DEFS = [
             limit: z.number().int().min(1).max(100).optional(),
             reason: z.string(),
         },
+        annotations: {
+            readOnlyHint: true,
+            destructiveHint: false,
+            idempotentHint: true,
+        },
         handler: searchTool,
     },
     {
@@ -79,18 +84,33 @@ const TOOL_DEFS = [
             note_title: z.string().optional(),
             reason: z.string(),
         },
+        annotations: {
+            readOnlyHint: true,
+            destructiveHint: false,
+            idempotentHint: true,
+        },
         handler: grepTool,
     },
     {
         name: 'tag_list',
         description: 'List every tag currently in use, with an exact-match note count per tag.',
         inputSchema: { reason: z.string() },
+        annotations: {
+            readOnlyHint: true,
+            destructiveHint: false,
+            idempotentHint: true,
+        },
         handler: tagListTool,
     },
     {
         name: 'tag_notes',
         description: 'List notes carrying a tag, including nested child tags (parent-includes-child).',
         inputSchema: { tag: z.string(), reason: z.string() },
+        annotations: {
+            readOnlyHint: true,
+            destructiveHint: false,
+            idempotentHint: true,
+        },
         handler: tagNotesTool,
     },
     {
@@ -105,6 +125,11 @@ const TOOL_DEFS = [
             start_line: z.number().int().optional(),
             end_line: z.number().int().optional(),
             reason: z.string(),
+        },
+        annotations: {
+            readOnlyHint: true,
+            destructiveHint: false,
+            idempotentHint: true,
         },
         handler: noteReadTool,
     },
@@ -123,6 +148,11 @@ const TOOL_DEFS = [
             force: z.boolean().optional(),
             reason: z.string(),
         },
+        annotations: {
+            readOnlyHint: false,
+            destructiveHint: true,
+            idempotentHint: false,
+        },
         handler: noteWriteTool,
     },
     {
@@ -138,6 +168,11 @@ const TOOL_DEFS = [
             metadata: z.record(z.string(), z.any()).nullable().optional(),
             reason: z.string(),
         },
+        annotations: {
+            readOnlyHint: false,
+            destructiveHint: true,
+            idempotentHint: false,
+        },
         handler: noteEditTool,
     },
     {
@@ -149,6 +184,11 @@ const TOOL_DEFS = [
             hash: z.string(),
             content: z.string(),
             reason: z.string(),
+        },
+        annotations: {
+            readOnlyHint: false,
+            destructiveHint: false,
+            idempotentHint: false,
         },
         handler: noteAppendTool,
     },
@@ -163,6 +203,11 @@ const TOOL_DEFS = [
             new_title: z.string(),
             hash: z.string(),
             reason: z.string(),
+        },
+        annotations: {
+            readOnlyHint: false,
+            destructiveHint: true,
+            idempotentHint: false,
         },
         handler: noteRenameTool,
     },
@@ -192,6 +237,11 @@ const TOOL_DEFS = [
             reason: z.string(),
         },
         _meta: { 'anthropic/maxResultSizeChars': 500_000 },
+        annotations: {
+            readOnlyHint: true,
+            destructiveHint: false,
+            idempotentHint: true,
+        },
         handler: attachmentReadTool,
     },
     {
@@ -206,6 +256,11 @@ const TOOL_DEFS = [
             content_base64: z.string(),
             reason: z.string(),
         },
+        annotations: {
+            readOnlyHint: false,
+            destructiveHint: true,
+            idempotentHint: true,
+        },
         handler: attachmentWriteTool,
     },
 ];
@@ -213,10 +268,15 @@ const TOOL_DEFS = [
 export function createServer(deps) {
     const server = new McpServer({ name: 'mnotes-mcp', version: '0.1.0' });
 
-    for (const { name, description, inputSchema, _meta, handler } of TOOL_DEFS) {
+    for (const { name, description, inputSchema, _meta, annotations, handler } of TOOL_DEFS) {
         server.registerTool(
             name,
-            { description, inputSchema, ...(_meta ? { _meta } : {}) },
+            {
+                description,
+                inputSchema,
+                ...(_meta ? { _meta } : {}),
+                ...(annotations ? { annotations } : {}),
+            },
             (input) => handler(deps, input),
         );
     }

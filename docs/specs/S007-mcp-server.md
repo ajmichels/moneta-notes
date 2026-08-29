@@ -60,6 +60,23 @@ Two response shapes, chosen per tool for token efficiency (per the README's desi
 
 Every tool takes `reason<string>` (required) — logged per S008, not used to gate behavior (CLAUDE.md).
 
+Every tool's `tools/list` registration also carries a standard MCP `annotations` block
+(`readOnlyHint`/`destructiveHint`/`idempotentHint`) so a client can reason about a tool's effects
+before calling it, independent of the tool description's prose. Read-only tools (`search`, `grep`,
+`tag_list`, `tag_notes`, `note_read`, `attachment_read`) all get `{ readOnlyHint: true,
+destructiveHint: false, idempotentHint: true }`. Mutating tools get `readOnlyHint: false` and set the
+other two per their actual semantics rather than a blanket "any mutation is destructive":
+
+- `destructiveHint` is `false` only for `note_append` — it's the one mutating tool that is purely
+  additive (content-only, no overwrite, per below). Every other mutating tool (`note_write`,
+  `note_edit`, `note_rename`, `attachment_write`) can overwrite or remove existing content, so
+  `destructiveHint: true`.
+- `idempotentHint` is `true` only for `attachment_write` — an unconditional create-or-overwrite with
+  no hash guard (per below), so calling it twice with the same input leaves the same end state. Every
+  other mutating tool requires a fresh `hash` that matches current content (or, for `note_rename`, a
+  `new_title` that must not already exist) on each call, so a second identical call fails rather than
+  being a no-op — `idempotentHint: false`.
+
 ### `search`
 
 **Input**: `query<string>`, `?mode<fulltext|semantic|hybrid>=hybrid`, `?limit<int>=20` (max `100`,
