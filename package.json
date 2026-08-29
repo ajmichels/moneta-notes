@@ -13,6 +13,9 @@
   "license": "Apache-2.0",
   "main": "./src/mcp/server.js",
   "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "bin": {
     "mnotes": "./src/cli/main.js",
     "mnotes-mcp": "./src/mcp/server.js",
@@ -24,14 +27,14 @@
     "test": "vitest"
   },
   "devDependencies": {
-    "@commitlint/cli": "^20.4.3",
-    "@commitlint/config-conventional": "^20.4.3",
+    "@commitlint/cli": "^21.2.2",
+    "@commitlint/config-conventional": "^21.2.2",
     "@eslint/js": "^10.0.1",
-    "eslint": "^10.0.3",
-    "globals": "^17.4.0",
+    "eslint": "^10.9.1",
+    "globals": "^17.11.0",
     "husky": "^9.1.7",
     "jest-extended": "^7.0.0",
-    "vitest": "^4.0.18"
+    "vitest": "^4.1.11"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
@@ -45,7 +48,7 @@
     "smol-toml": "^1",
     "sqlite-vec": "^0.1.9",
     "umap-js": "^1.4.0",
-    "zod": "^3.25"
+    "zod": "^4.5.4"
   },
   "pnpm": {
     "overrides": {
