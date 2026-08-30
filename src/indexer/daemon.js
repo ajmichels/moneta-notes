@@ -256,10 +256,23 @@ function toVaultRelativePath(vaultRoot, absPath) {
     return relative(vaultRoot, absPath).split(sep).join('/');
 }
 
+// Dotfiles/dot-directories (.obsidian/, .trash/, .git/, .DS_Store, ...) are never notes — skip them
+// everywhere the vault tree is walked or watched, rather than letting them churn the index queue.
+function isDotEntryName(name) {
+    return name.startsWith('.');
+}
+
+export function isDotPath(relativePath) {
+    return relativePath.split(sep).some(isDotEntryName);
+}
+
 function walkVaultForMarkdown(vaultRoot) {
     const results = [];
     function walk(dir) {
         for (const entry of readdirSync(dir, { withFileTypes: true })) {
+            if (isDotEntryName(entry.name)) {
+                continue;
+            }
             const full = join(dir, entry.name);
             if (entry.isDirectory()) {
                 walk(full);
@@ -494,8 +507,12 @@ function defaultCreateWatcher(vaultRoot, db, { debounceMs } = {}) {
     }, { debounceMs });
 
     const child = spawnFswatch(vaultRoot, (absPath) => {
-        if (!stopped) {
-            debouncer.notify(toVaultRelativePath(vaultRoot, absPath));
+        if (stopped) {
+            return;
+        }
+        const relativePath = toVaultRelativePath(vaultRoot, absPath);
+        if (!isDotPath(relativePath)) {
+            debouncer.notify(relativePath);
         }
     });
 

@@ -8,7 +8,7 @@ import { getLogger, runWithLogger } from '../logger.js';
 import {
     enqueuePath, dequeueNextPath, processPath, deleteNoteByPath, recordFailure, drainQueueOnce,
     watermarkCatchup, existenceCheck, createDebouncer, assertFswatchAvailable, spawnFswatch, runReindex,
-    createIpcServer, defaultSocketPath, startDaemon, createSerialGate,
+    createIpcServer, defaultSocketPath, startDaemon, createSerialGate, isDotPath,
 } from './daemon.js';
 import { cleanupTempDir } from '../../vitest.helpers.js';
 
@@ -505,6 +505,40 @@ describe('watermarkCatchup', () => {
         const db = makeTestDb();
 
         expect(watermarkCatchup(db, vaultRoot, 2000)).toBe(0);
+    });
+
+    it('ignores dotfiles and never descends into dot-directories', () => {
+        const vaultRoot = makeTempVault();
+        writeNote(vaultRoot, '.hidden.md', 'hidden', 1000);
+        mkdirSync(join(vaultRoot, '.obsidian'));
+        writeNote(vaultRoot, '.obsidian/workspace.md', 'workspace', 1000);
+        mkdirSync(join(vaultRoot, '.git'));
+        writeNote(vaultRoot, '.git/COMMIT_EDITMSG.md', 'commit', 1000);
+        writeNote(vaultRoot, 'Visible.md', 'visible', 1000);
+        const db = makeTestDb();
+
+        const count = watermarkCatchup(db, vaultRoot, 2000);
+
+        expect(count).toBe(1);
+        expect(db.prepare('SELECT path FROM index_queue').get().path).toBe('Visible.md');
+    });
+});
+
+describe('isDotPath', () => {
+    it('flags a dotfile at the vault root', () => {
+        expect(isDotPath('.DS_Store')).toBe(true);
+    });
+
+    it('flags a path nested under a dot-directory', () => {
+        expect(isDotPath('.obsidian/workspace.json')).toBe(true);
+    });
+
+    it('flags a deeply nested dot-directory regardless of position', () => {
+        expect(isDotPath('Weekly Notes/.trash/2026-W32.md')).toBe(true);
+    });
+
+    it('does not flag an ordinary vault-relative path', () => {
+        expect(isDotPath('Weekly Notes/2026-W32.md')).toBe(false);
     });
 });
 
