@@ -202,7 +202,16 @@ export function openDb(dbPath) {
         writeSchemaVersion(db, SCHEMA_VERSION);
         reindexRequired = true;
         getContextLogger().info('schema created', { schema_version: SCHEMA_VERSION });
-    } else if (currentVersion !== SCHEMA_VERSION) {
+    } else if (currentVersion > SCHEMA_VERSION) {
+        // The on-disk schema is newer than this process's code expects — this process is running
+        // stale code (e.g. a long-lived mcp-server that predates a SCHEMA_VERSION bump elsewhere)
+        // rather than the DB being outdated. Rebuilding here would silently destroy an index a
+        // newer process already migrated. Fail loudly instead so the stale process gets restarted.
+        throw new Error(
+            `mnotes: on-disk schema version (${currentVersion}) is newer than this process's `
+            + `schema version (${SCHEMA_VERSION}). This process is running stale code — restart it.`,
+        );
+    } else if (currentVersion < SCHEMA_VERSION) {
         dropAllTables(db);
         createSchema(db);
         writeSchemaVersion(db, SCHEMA_VERSION);

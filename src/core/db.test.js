@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -512,5 +513,28 @@ describe('schema rebuild on version mismatch', () => {
         }
 
         second.db.close();
+    });
+});
+
+describe('schema versioning: stale code guard', () => {
+    it('throws and leaves data intact when the on-disk schema is newer than this process expects', () => {
+        const dbPath = makeTempDbPath();
+
+        const first = openDb(dbPath);
+        first.db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('Test.md', 'abc123', 10, 1000, 1000);
+        first.db.prepare("UPDATE meta SET value = ? WHERE key = 'schema_version'")
+            .run(String(SCHEMA_VERSION + 1));
+        first.db.close();
+
+        expect(() => openDb(dbPath)).toThrow(/stale code/);
+
+        const verify = new DatabaseSync(dbPath);
+        const noteCount = verify.prepare('SELECT COUNT(*) AS count FROM notes').get().count;
+        expect(noteCount).toBe(1);
+        const version = verify.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();
+        expect(version.value).toBe(String(SCHEMA_VERSION + 1));
+        verify.close();
     });
 });
