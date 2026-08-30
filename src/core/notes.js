@@ -112,8 +112,18 @@ function withComputedId(baseMetadata, callerMetadata, title) {
     return { ...(baseMetadata ?? {}), id: computedId };
 }
 
+function withCreatedTimestamp(baseMetadata, callerMetadata, title) {
+    if (callerMetadata && Object.prototype.hasOwnProperty.call(callerMetadata, 'created')) {
+        getContextLogger().debug('overwrote caller-supplied created', {
+            note_title: title,
+            supplied_created: callerMetadata.created,
+        });
+    }
+    return { ...baseMetadata, created: new Date().toISOString() };
+}
+
 function createNote(filePath, title, metadata, content) {
-    const data = withComputedId(metadata, metadata, title);
+    const data = withCreatedTimestamp(withComputedId(metadata, metadata, title), metadata, title);
     const raw = matter.stringify(content, data);
 
     mkdirSync(dirname(filePath), { recursive: true });

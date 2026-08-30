@@ -69,7 +69,7 @@ Husky hooks enforce.
 |---|---|
 | [S001 — Data Model](docs/specs/S001-data-model.md) | SQLite schema: notes, FTS5, chunks/vectors, tags, links, index queue, migrations |
 | [S002 — Search](docs/specs/S002-search.md) | Fulltext/semantic/hybrid ranking, RRF merge, chunk collapse |
-| [S003 — Notes](docs/specs/S003-notes.md) | Note CRUD, hashing, frontmatter/metadata, the `id` field, rename (incl. link cascade), backlinks |
+| [S003 — Notes](docs/specs/S003-notes.md) | Note CRUD, hashing, frontmatter/metadata, the `id`/`created` fields, rename (incl. link cascade), backlinks |
 | [S004 — Grep & Tags](docs/specs/S004-grep-tags.md) | Ripgrep wrapper, tag extraction and listing |
 | [S005 — Indexing Daemon](docs/specs/S005-indexing-daemon.md) | fswatch loop, embedding pipeline, queue/retry, daemon↔CLI IPC |
 | [S006 — CLI](docs/specs/S006-cli.md) | `mnotes` command surface and output formats |

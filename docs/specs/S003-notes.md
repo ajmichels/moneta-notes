@@ -33,6 +33,35 @@ through it), `id` here is the **bare filename without extension** — no folder 
 - `id` only ever changes as a side effect of `note_rename` (see below) — no other tool changes a
   note's path, so no other tool can cause `id` to change.
 
+## The `created` frontmatter field
+
+Every note also gets a `created` key in its YAML frontmatter: an ISO 8601 UTC timestamp (e.g.
+`2026-08-29T14:03:11.482Z`, `Date.prototype.toISOString()`'s format) capturing when the note was
+first written. This exists because there's otherwise no reliable way to answer "when was this note
+created" — filesystem mtime/birthtime don't survive a vault sync/backup restore, and the index is
+ephemeral (rebuildable from scratch, not a system of record).
+
+- `created` is **entirely system-managed**, same posture as `id`: computed by `core/notes.js` at
+  creation time only — never read from or settable by a caller.
+- If a caller includes a `created` key in a `metadata` object passed to `note_write` on creation,
+  it's silently dropped and replaced with the actual creation timestamp, logged the same way as an
+  overwritten caller-supplied `id` (`getContextLogger().debug('overwrote caller-supplied created', …)`
+  — see "Logging" below).
+- Unlike `id`, `created` is **never recomputed after creation**. `note_write` (update), `note_edit`,
+  `note_append`, and `note_rename` all carry the existing `created` value forward untouched — it isn't
+  part of any of their metadata-merge logic, just existing frontmatter that survives the shallow merge
+  like any other caller-set key.
+- A note that predates this field (created before this behavior existed) simply has no `created` key
+  — nothing back-fills it retroactively, and its absence isn't treated as an error.
+- `obsidian.nvim` (see `CLAUDE.local.md`) is configured with a matching `note_frontmatter_func` so
+  notes created directly through Neovim get the same `created` field, in the same format, without
+  going through `core/notes.js` at all. That function runs on *every* save, not just the first, so it
+  can't use "is `created` already present" as its create-vs-update signal — plenty of pre-existing
+  notes have no `created` key at all, and stamping one in on their next ordinary edit would fabricate
+  a false creation time. It instead checks whether the note's file exists on disk yet (same signal
+  `obsidian.nvim` itself uses internally to log "Created" vs "Updated"), only ever stamping `created`
+  on the save where the file doesn't exist yet.
+
 ## Tools
 
 ### `note_read`
@@ -120,8 +149,8 @@ the tool surface correctly, not an implementation detail to leave undocumented.
 `note_title<string>`, `hash<null|string>`, `?metadata<json>`, `content<string>`, `reason<string>`.
 
 - **No `hash` + new title** → create. `metadata` (if provided) becomes the note's frontmatter, with
-  `id` computed and injected (or overwritten if the caller included one). No `metadata` provided on
-  create → frontmatter contains only the computed `id`.
+  `id` and `created` computed and injected (each overwritten if the caller included one). No
+  `metadata` provided on create → frontmatter contains only the computed `id` and `created`.
 - **No `hash` + existing title** → error, directing the caller to read first (per CLAUDE.md).
 - **`hash` matching current content_hash** → full replace of `content`. `metadata` **merges** into
   existing frontmatter (shallow merge): each key in the passed object overwrites the corresponding
@@ -318,7 +347,10 @@ passes an `id` key in `metadata` and it's silently dropped/overwritten with the 
 caller-supplied id', { note_title, supplied_id, computed_id })`. This is information `audit.log`
 wouldn't otherwise carry (it records the mutation's outcome, not what happened to an individual
 input field), and unlike a hash-mismatch or guard trip it isn't an error — there's genuinely nothing
-else to log it as.
+else to log it as. The same pattern applies to a caller-supplied `created` key on creation (see "The
+`created` frontmatter field" above): `getContextLogger().debug('overwrote caller-supplied created',
+{ note_title, supplied_created })` — no `computed_created` field, since unlike `id` the computed value
+is just "now" at the moment of the call, not a derived value worth echoing back.
 
 A second exception, new here: when `note_rename`'s link cascade skips a candidate because reading or
 writing it failed, `core/notes.js` calls `getContextLogger().warn('link cascade: failed to update

@@ -5,10 +5,6 @@
 - Seems like there should be some kind of "re-install" mechanism to pick up changes that might occur
   as a result of pulling the latest changes from the repo
 
-## Issues
-
-- ran into issues getting the new attachment read behavior to work correctly.
-
 ## Future Features
 
 - additional tooling that can take advantage of Git if the vault is being tracked in a Git repo
@@ -23,7 +19,6 @@
 - search results weighting
   - I think weighting results by recency could be really useful
   - having the ability to filter results by a date range could also be really useful
-  - but how to reliably establish the created-at date for notes is tricky. the file system meta data
-    can't be relied on, the index is ephemeral, and even if the vault is stored in Git there are
-    notes older than the repo and my intention was to decouple from a versioning solution
+  - notes created after the `created` frontmatter field landed (S003) have a reliable created-at date;
+    notes from before that still don't, so this can't assume full coverage yet
 - support for linux

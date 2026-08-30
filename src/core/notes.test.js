@@ -268,9 +268,34 @@ describe('noteWrite (create)', () => {
         expect(result.line_count).toBe(1);
 
         const onDisk = noteRead(vaultRoot, 'New Note');
-        expect(onDisk.metadata).toEqual({ id: 'New Note' });
+        expect(onDisk.metadata).toEqual({ id: 'New Note', created: expect.any(String) });
         expect(onDisk.content).toBe('hello world');
         expect(result.hash).toBe(onDisk.content_hash);
+    });
+
+    it('stamps created with the current time as an ISO 8601 string', () => {
+        const vaultRoot = makeTempVault();
+        const before = new Date();
+
+        noteWrite(vaultRoot, 'Timestamped', { content: 'body' });
+
+        const after = new Date();
+        const { created } = noteRead(vaultRoot, 'Timestamped').metadata;
+        expect(created).toBe(new Date(created).toISOString());
+        expect(new Date(created).getTime()).toBeGreaterThanOrEqual(before.getTime());
+        expect(new Date(created).getTime()).toBeLessThanOrEqual(after.getTime());
+    });
+
+    it('overwrites a caller-supplied created with the computed timestamp', () => {
+        const vaultRoot = makeTempVault();
+
+        noteWrite(vaultRoot, 'Bogus Created', {
+            metadata: { created: '1999-01-01T00:00:00.000Z' },
+            content: 'body',
+        });
+
+        const { created } = noteRead(vaultRoot, 'Bogus Created').metadata;
+        expect(created).not.toBe('1999-01-01T00:00:00.000Z');
     });
 
     it('merges caller metadata and overwrites any caller-supplied id with the computed one', () => {
@@ -282,7 +307,9 @@ describe('noteWrite (create)', () => {
         });
 
         const onDisk = noteRead(vaultRoot, 'Weekly Notes/2026-W32');
-        expect(onDisk.metadata).toEqual({ id: '2026-W32', tags: [ 'weekly' ] });
+        expect(onDisk.metadata).toEqual({
+            id: '2026-W32', tags: [ 'weekly' ], created: expect.any(String),
+        });
     });
 
     it('serializes array metadata in expanded block form, never collapsed flow form', () => {
@@ -328,6 +355,26 @@ describe('noteWrite (create)', () => {
         await cleanupTempDir(logDir);
     });
 
+    it('logs a debug line via the context logger when a caller-supplied created is overwritten',
+        async () => {
+            const vaultRoot = makeTempVault();
+            const logDir = mkdtempSync(join(tmpdir(), 'mnotes-notes-test-log-'));
+            const logger = getLogger('mcp-server', logDir);
+
+            runWithLogger(logger, () => noteWrite(vaultRoot, 'Logged Created', {
+                metadata: { created: '1999-01-01T00:00:00.000Z' },
+                content: 'body',
+            }));
+
+            await vi.waitFor(() => {
+                const line = readFileSync(join(logDir, 'mcp-server.log'), 'utf8').trim();
+                expect(line).toContain('DEBUG [mcp-server] overwrote caller-supplied created');
+                expect(line).toContain('note_title="Logged Created"');
+                expect(line).toContain('supplied_created="1999-01-01T00:00:00.000Z"');
+            });
+            await cleanupTempDir(logDir);
+        });
+
     it('creates parent folders for a folder-prefixed title', () => {
         const vaultRoot = makeTempVault();
         noteWrite(vaultRoot, 'Daily Notes/2026-08-05', { content: 'daily body' });
@@ -361,7 +408,9 @@ describe('noteWrite (update)', () => {
 
         const onDisk = noteRead(vaultRoot, 'Update Me');
         expect(onDisk.content).toBe('replaced body');
-        expect(onDisk.metadata).toEqual({ id: 'Update Me', tags: [ 'a' ] });
+        expect(onDisk.metadata).toEqual({
+            id: 'Update Me', tags: [ 'a' ], created: expect.any(String),
+        });
         expect(result.hash).toBe(onDisk.content_hash);
         expect(result.line_count).toBe(1);
     });
@@ -383,6 +432,7 @@ describe('noteWrite (update)', () => {
             id: 'Merge Me',
             tags: [ 'a' ],
             status: 'final',
+            created: expect.any(String),
         });
     });
 
@@ -399,7 +449,9 @@ describe('noteWrite (update)', () => {
             content: 'body',
         });
 
-        expect(noteRead(vaultRoot, 'Delete Key').metadata).toEqual({ id: 'Delete Key', tags: [ 'a' ] });
+        expect(noteRead(vaultRoot, 'Delete Key').metadata).toEqual({
+            id: 'Delete Key', tags: [ 'a' ], created: expect.any(String),
+        });
     });
 
     it('ignores a caller-supplied id even on update', () => {
@@ -521,7 +573,9 @@ describe('noteEdit', () => {
             metadata: { status: null },
         });
 
-        expect(noteRead(vaultRoot, 'Edit Meta').metadata).toEqual({ id: 'Edit Meta', tags: [ 'a' ] });
+        expect(noteRead(vaultRoot, 'Edit Meta').metadata).toEqual({
+            id: 'Edit Meta', tags: [ 'a' ], created: expect.any(String),
+        });
     });
 
     it('throws when old_txt is not found', () => {
@@ -597,12 +651,14 @@ describe('noteAppend', () => {
     it('appends content to the end of the body, joined by a newline', () => {
         const vaultRoot = makeTempVault();
         const created = noteWrite(vaultRoot, 'Appendable', { content: 'first line' });
+        const createdAt = noteRead(vaultRoot, 'Appendable').metadata.created;
 
         const result = noteAppend(vaultRoot, 'Appendable', created.hash, 'second line');
 
         expect(noteRead(vaultRoot, 'Appendable').content).toBe('first line\nsecond line');
         expect(result.line_count).toBe(2);
         expect(result.hash).toBe(noteRead(vaultRoot, 'Appendable').content_hash);
+        expect(noteRead(vaultRoot, 'Appendable').metadata.created).toBe(createdAt);
     });
 
     it('appends to an empty body without leaving a leading blank line', () => {
@@ -635,6 +691,7 @@ describe('noteRename', () => {
     it('moves the note and rewrites id to match the new title', () => {
         const vaultRoot = makeTempVault();
         const created = noteWrite(vaultRoot, 'Old Name', { content: 'body unchanged' });
+        const createdAt = noteRead(vaultRoot, 'Old Name').metadata.created;
 
         const result = noteRename(vaultRoot, 'Old Name', 'New Name', created.hash);
 
@@ -643,6 +700,7 @@ describe('noteRename', () => {
 
         const onDisk = noteRead(vaultRoot, 'New Name');
         expect(onDisk.metadata.id).toBe('New Name');
+        expect(onDisk.metadata.created).toBe(createdAt);
         expect(onDisk.content).toBe('body unchanged');
     });
 
