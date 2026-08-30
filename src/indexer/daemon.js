@@ -205,7 +205,23 @@ async function embedChunks(title, content, chunkText, embed) {
     return embeddedChunks;
 }
 
+// Guards the consumer side too, not just the walk/watch producers above: a dot path can still
+// reach processPath via a leftover index_queue row enqueued before this filtering existed (or an
+// explicit `mnotes reindex <title>` naming one), and this is what actually purges any note row
+// already indexed for it.
+function purgeDotPath(db, path) {
+    if (!isDotPath(path)) {
+        return false;
+    }
+    deleteNoteByPath(db, path);
+    return true;
+}
+
 export async function processPath(vaultRoot, db, path, deps) {
+    if (purgeDotPath(db, path)) {
+        return { status: 'deleted' };
+    }
+
     const { chunkText, embed, embeddingModel, embeddingVersion, now = Date.now() } = deps;
     const absPath = join(vaultRoot, path);
     const title = stripMdExtension(path);

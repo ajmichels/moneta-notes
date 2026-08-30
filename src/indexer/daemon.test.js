@@ -330,6 +330,32 @@ describe('processPath: missing file', () => {
     });
 });
 
+describe('processPath: dot paths', () => {
+    it('purges an already-indexed dot-path note without touching the filesystem', async () => {
+        const vaultRoot = makeTempVault();
+        const db = makeTestDb();
+        mkdirSync(join(vaultRoot, '.obsidian'));
+        writeNote(vaultRoot, '.obsidian/workspace.md', 'workspace', 1000);
+        db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('.obsidian/workspace.md', 'hash', 1, 1000, 1000);
+
+        const result = await processPath(vaultRoot, db, '.obsidian/workspace.md', baseDeps());
+
+        expect(result).toEqual({ status: 'deleted' });
+        expect(db.prepare('SELECT id FROM notes WHERE path = ?').get('.obsidian/workspace.md')).toBeUndefined();
+    });
+
+    it('is a no-op for a dot path with no matching notes row', async () => {
+        const vaultRoot = makeTempVault();
+        const db = makeTestDb();
+
+        const result = await processPath(vaultRoot, db, '.git/COMMIT_EDITMSG.md', baseDeps());
+
+        expect(result).toEqual({ status: 'deleted' });
+    });
+});
+
 describe('deleteNoteByPath', () => {
     it('removes chunks, chunk_vectors, notes_fts, note_tags, and note_links for the note', async () => {
         const vaultRoot = makeTempVault();
