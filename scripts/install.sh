@@ -4,35 +4,28 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NODE_BIN="$(command -v node)"
 
-DEFAULT_VAULT_PATH="$HOME/Documents/Notes"
-DEFAULT_DB_PATH="$HOME/Library/Application Support/mnotes/index.db"
+# shellcheck source=lib/common.sh
+source "$REPO_ROOT/scripts/lib/common.sh"
+case "$(uname -s)" in
+    Darwin) source "$REPO_ROOT/scripts/lib/os-macos.sh" ;;
+    Linux)  source "$REPO_ROOT/scripts/lib/os-linux.sh" ;;
+    *) echo "unsupported OS: $(uname -s)" >&2; exit 1 ;;
+esac
 
-# --- Step 1: preflight check -------------------------------------------------
+DEFAULT_VAULT_PATH="$HOME/Documents/Notes"
+DEFAULT_DB_PATH="$(os_app_support_dir)/index.db"
+
+# --- Step 1: preflight checks -------------------------------------------------
 
 if ! command -v rg >/dev/null 2>&1; then
-    echo "WARNING: ripgrep not found — install via \`brew install ripgrep\` before using \`mnotes grep\`."
+    echo "WARNING: ripgrep not found — install via \`$(os_ripgrep_install_hint)\` before using \`mnotes grep\`."
 fi
 
 if ! command -v fswatch >/dev/null 2>&1; then
-    echo "WARNING: fswatch not found — install via \`brew install fswatch\` before starting the indexing daemon (it will crash-loop without it)."
+    echo "WARNING: fswatch not found — install via \`$(os_watcher_install_hint)\` before starting the indexing daemon (it will crash-loop without it)."
 fi
 
 # --- Step 2: prompt for vault_path / db_path, resolve to absolute paths -----
-
-resolve_path() {
-    local raw="$1"
-    # Strip a single matching pair of enclosing quotes — typing a quoted path (natural instinct for
-    # a path containing spaces) would otherwise leave literal quote characters embedded in the
-    # resolved path, since `read` takes the whole line verbatim with no shell-style word splitting.
-    case "$raw" in
-        \"*\") raw="${raw#\"}"; raw="${raw%\"}" ;;
-        \'*\') raw="${raw#\'}"; raw="${raw%\'}" ;;
-    esac
-    case "$raw" in
-        "~"*) raw="$HOME${raw#\~}" ;;
-    esac
-    "$NODE_BIN" -e 'console.log(require("node:path").resolve(process.argv[1]))' "$raw"
-}
 
 # -e enables GNU Readline for these prompts: arrow-key/Home/End cursor movement, working backspace,
 # and (readline's default completer) Tab-completion of file paths — typing a wrong character no
@@ -49,10 +42,6 @@ CONFIG_DIR="$HOME/.config/mnotes"
 CONFIG_PATH="$CONFIG_DIR/config.toml"
 
 # --- Step 3: create config.toml only if missing AND something differs -------
-
-escape_toml_string() {
-    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
-}
 
 if [ -e "$CONFIG_PATH" ]; then
     echo "Config file already exists at $CONFIG_PATH — leaving it untouched."
@@ -74,87 +63,44 @@ else
     fi
 fi
 
-APP_SUPPORT_DIR="$HOME/Library/Application Support/mnotes"
-LOG_DIR="$HOME/Library/Logs/com.ajmichels.mnotes"
+APP_SUPPORT_DIR="$(os_app_support_dir)"
+LOG_DIR="$(os_log_dir)"
 
-# --- Step 4: Application Support directory -----------------------------------
+# --- Step 4: app-support directory --------------------------------------------
 
 mkdir -p "$APP_SUPPORT_DIR"
 
-# --- Step 5: Logs directory ---------------------------------------------------
+# --- Step 5: logs directory ----------------------------------------------------
 
 mkdir -p "$LOG_DIR"
 
 DAEMON_SCRIPT="$REPO_ROOT/src/indexer/daemon.js"
 LOG_ROTATOR_SCRIPT="$REPO_ROOT/src/log-rotator.js"
-LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
-DAEMON_PLIST="$LAUNCH_AGENTS_DIR/com.ajmichels.mnotes.plist"
-LOGROTATE_PLIST="$LAUNCH_AGENTS_DIR/com.ajmichels.mnotes.logrotate.plist"
+SERVICE_DIR="$(os_service_dir)"
 
-# --- Step 6: build the native launcher app bundle ------------------------------
+# --- Step 6: prepare the launch executable ------------------------------------
+
+os_prepare_launch_executable "$APP_SUPPORT_DIR" "$NODE_BIN" "$REPO_ROOT"
+
+# --- Step 7: write the service definition file(s) -----------------------------
 #
-# launchd attributes a background item's "Software from X" identity to the code signature of the
-# executable it launches — pointing ProgramArguments at $NODE_BIN directly gets both LaunchAgents
-# attributed to Node.js Foundation's signing identity in macOS's Background Task Management UI/
-# notifications, not to this tool. Compiling a thin launcher and wrapping it in a minimal .app bundle
-# (so Launch Services can resolve CFBundleName) gives each agent its own identity instead.
-
-APP_BUNDLE_DIR="$APP_SUPPORT_DIR/MonetaNotes.app"
-LAUNCHER_BIN="$APP_BUNDLE_DIR/Contents/MacOS/moneta-notes-launcher"
-FALLBACK_WRAPPER="$APP_SUPPORT_DIR/mnotes-node-wrapper.sh"
-
-if command -v clang >/dev/null 2>&1; then
-    mkdir -p "$APP_BUNDLE_DIR/Contents/MacOS"
-    cp "$REPO_ROOT/launchd/Info.plist" "$APP_BUNDLE_DIR/Contents/Info.plist"
-    clang -O2 -DNODE_BIN_PATH="\"$NODE_BIN\"" -o "$LAUNCHER_BIN" "$REPO_ROOT/launchd/launcher.c"
-    codesign --force --sign - "$APP_BUNDLE_DIR"
-    rm -f "$FALLBACK_WRAPPER"
-    LAUNCH_EXECUTABLE="$LAUNCHER_BIN"
-    echo "Built and signed the Moneta Notes launcher app bundle at $APP_BUNDLE_DIR."
-else
-    echo "WARNING: \`clang\` not found — install Xcode Command Line Tools (\`xcode-select --install\`) for background LaunchAgents to be identified as \"Moneta Notes\" instead of \"Node.js Foundation\". Falling back to a plain wrapper script for now."
-    cat > "$FALLBACK_WRAPPER" << EOF
-#!/bin/sh
-exec "$NODE_BIN" --disable-warning=ExperimentalWarning "\$@"
-EOF
-    chmod +x "$FALLBACK_WRAPPER"
-    LAUNCH_EXECUTABLE="$FALLBACK_WRAPPER"
-fi
-
-# --- Step 7: render both plists from templates --------------------------------
-#
-# launchd runs LaunchAgents with a minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin) that omits Homebrew's
-# install prefix — the daemon's own `fswatch` child-process spawn (S005) fails to find it there even
-# when it's on PATH in every interactive shell, so the daemon's plist gets an explicit
-# EnvironmentVariables/PATH prepending fswatch's resolved directory (falls back to the standard
-# Homebrew prefixes if fswatch isn't installed yet, so a later `brew install fswatch` — no reinstall —
-# is still found without editing the plist by hand).
+# Services run with a minimal PATH that omits wherever fswatch was installed — the daemon's own
+# fswatch child-process spawn (S005) would fail to find it there even when it's on PATH in every
+# interactive shell, so the daemon's service definition gets an explicit PATH prepending fswatch's
+# resolved directory (falls back to a per-OS guessed prefix if fswatch isn't installed yet, so a
+# later install — no reinstall — is still found without editing the service file by hand).
 if command -v fswatch >/dev/null 2>&1; then
     FSWATCH_DIR="$(dirname "$(command -v fswatch)")"
 else
-    FSWATCH_DIR="/opt/homebrew/bin:/usr/local/bin"
+    FSWATCH_DIR="$(os_fswatch_fallback_dir)"
 fi
 DAEMON_PATH_ENV="$FSWATCH_DIR:/usr/bin:/bin:/usr/sbin:/sbin"
 
-render_plist() {
-    local template="$1" dest="$2"
-    sed \
-        -e "s#__LAUNCH_EXECUTABLE__#$LAUNCH_EXECUTABLE#g" \
-        -e "s#__DAEMON_SCRIPT_PATH__#$DAEMON_SCRIPT#g" \
-        -e "s#__LOG_ROTATOR_SCRIPT_PATH__#$LOG_ROTATOR_SCRIPT#g" \
-        -e "s#__LOG_DIR__#$LOG_DIR#g" \
-        -e "s#__DAEMON_PATH_ENV__#$DAEMON_PATH_ENV#g" \
-        "$template" > "$dest"
-}
+os_write_service_files "$SERVICE_DIR"
 
-mkdir -p "$LAUNCH_AGENTS_DIR"
-render_plist "$REPO_ROOT/launchd/com.ajmichels.mnotes.plist.template" "$DAEMON_PLIST"
-render_plist "$REPO_ROOT/launchd/com.ajmichels.mnotes.logrotate.plist.template" "$LOGROTATE_PLIST"
+# --- Step 8: activate both services --------------------------------------------
 
-# --- Step 8: bootstrap both launchd jobs --------------------------------------
-
-launchctl bootstrap "gui/$(id -u)" "$DAEMON_PLIST"
-launchctl bootstrap "gui/$(id -u)" "$LOGROTATE_PLIST"
+os_enable_services
 
 # --- Step 9: pre-download the embedding model ---------------------------------
 

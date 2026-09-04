@@ -3,13 +3,14 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'smol-toml';
 import { getContextLogger } from './logger.js';
+import { appSupportDir } from './platform/index.js';
 
 export function defaultVaultPath() {
     return join(homedir(), 'Documents', 'Notes');
 }
 
 export function defaultDbPath() {
-    return join(homedir(), 'Library', 'Application Support', 'mnotes', 'index.db');
+    return join(appSupportDir(), 'index.db');
 }
 
 export function defaultConfigPath() {

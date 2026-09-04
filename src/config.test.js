@@ -6,6 +6,7 @@ import {
     buildDefaultConfig, defaultVaultPath, defaultDbPath, defaultConfigPath, loadConfig, resolveConfig,
 } from './config.js';
 import { getLogger, runWithLogger } from './logger.js';
+import { appSupportDir } from './platform/index.js';
 import { cleanupTempDir } from '../vitest.helpers.js';
 
 const tempDirs = [];
@@ -27,10 +28,8 @@ describe('defaultVaultPath / defaultDbPath', () => {
         expect(defaultVaultPath()).toBe(join(homedir(), 'Documents', 'Notes'));
     });
 
-    it('computes db_path under ~/Library/Application Support/mnotes', () => {
-        expect(defaultDbPath()).toBe(
-            join(homedir(), 'Library', 'Application Support', 'mnotes', 'index.db'),
-        );
+    it('computes db_path under the platform module\'s app-support directory (S009)', () => {
+        expect(defaultDbPath()).toBe(join(appSupportDir(), 'index.db'));
     });
 });
 

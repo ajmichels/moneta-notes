@@ -1,8 +1,9 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { mkdtempSync, readFileSync } from 'node:fs';
-import { tmpdir, homedir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { getLogger, defaultLogDir, getAuditLogger, logAudit, runWithLogger, getContextLogger } from './logger.js';
+import { logDir as platformLogDir } from './platform/index.js';
 import { cleanupTempDir } from '../vitest.helpers.js';
 
 const tempDirs = [];
@@ -102,8 +103,8 @@ describe('getLogger: directory creation and defaultLogDir', () => {
         expect(line).toContain('created nested dir');
     });
 
-    it('defaultLogDir points at ~/Library/Logs/com.ajmichels.mnotes', () => {
-        expect(defaultLogDir()).toBe(join(homedir(), 'Library', 'Logs', 'com.ajmichels.mnotes'));
+    it('defaultLogDir delegates to the platform module (S009)', () => {
+        expect(defaultLogDir()).toBe(platformLogDir());
     });
 });
 

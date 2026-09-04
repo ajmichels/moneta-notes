@@ -3,16 +3,26 @@
 Status: **Approved**
 Owns: `src/indexer/daemon.js`, `src/indexer/embed.js`
 Depends on: `S001-data-model` (including `enqueuePath`, which this file re-exports), `S004-grep-tags`
-(tag extraction, invoked here during processing), `S010-shared-utilities`, `S011-links` (link
+(tag extraction, invoked here during processing), `S009-config-and-install` (`src/platform` supplies
+this daemon's app-support/log directory paths — see below), `S010-shared-utilities`, `S011-links` (link
 extraction, invoked here during processing)
 Consumed by: `S006-cli` (reindex/stats/search talk to this daemon), `S007-mcp-server` (search talks to
 this daemon), `S009-config-and-install` (new config knobs introduced here)
 
 ## Purpose
 
-Defines the long-running `launchd`-managed daemon: startup catch-up, live `fswatch`-driven indexing,
-the embedding pipeline's lifecycle (load/idle-unload), and the Unix-socket IPC that lets the CLI and
-MCP server drive the same warm daemon rather than loading their own model copy per invocation/process.
+Defines the long-running, OS-service-managed daemon (`launchd` on macOS, `systemd --user` on Linux —
+S009 owns which): startup catch-up, live `fswatch`-driven indexing, the embedding pipeline's lifecycle
+(load/idle-unload), and the Unix-socket IPC that lets the CLI and MCP server drive the same warm daemon
+rather than loading their own model copy per invocation/process.
+
+**`fswatch` itself needs no platform branching.** It's a portable CLI binary — kqueue-backed on macOS,
+inotify-backed on Linux — and `daemon.js`'s `spawnFswatch`/`assertFswatchAvailable` shell out to it
+identically on both, no `process.platform` check anywhere in this file. Only `daemon.js`'s two path
+helpers (`defaultAppSupportDir()`, and `defaultLogDir()` imported from `src/logger.js`) are
+platform-dependent, and both now delegate to `src/platform` (S009) instead of hardcoding
+`~/Library/...` — see S009's platform-abstraction section for the exact `appSupportDir()`/`logDir()`
+contract.
 
 `index_queue` (S001) is the **single path for all indexing work**, not just explicit `mnotes reindex`
 calls — every live `fswatch`-triggered change funnels through the same debounce → enqueue → drain
@@ -213,7 +223,9 @@ excluded — matches S001's `chunks.char_start`/`char_end` being offsets into th
 
 ## IPC: CLI/MCP ↔ daemon
 
-A Unix domain socket at `~/Library/Application Support/mnotes/daemon.sock`, so `mnotes reindex`, query
+A Unix domain socket at `daemon.sock` inside `src/platform`'s `appSupportDir()` (`~/Library/Application
+Support/mnotes/daemon.sock` on macOS, `${XDG_DATA_HOME:-~/.local/share}/mnotes/daemon.sock` on Linux —
+S009), so `mnotes reindex`, query
 embedding for `search --mode semantic|hybrid` (CLI and MCP alike), and any other command needing
 daemon-backed work reuse the daemon's warm model instead of loading their own.
 
@@ -307,4 +319,6 @@ that sense, even though it writes to the index.
 - **`mnotes stats`'s "notes pending re-embedding" query** — this is a read against `chunks`/`notes`
   comparing `embedding_model`/`embedding_version` to the currently configured model (per S001); the
   command itself is specified in S006.
-- **`launchd` plist configuration (KeepAlive, RunAtLoad, etc.) that keeps this daemon running** — S009.
+- **The service-manager configuration that keeps this daemon running** (`launchd` plist `KeepAlive`/
+  `RunAtLoad` on macOS, the `systemd` unit's `Restart`/`WantedBy` on Linux) and the platform-abstraction
+  contract (`src/platform`) this file's path helpers delegate to — both S009.

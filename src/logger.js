@@ -1,8 +1,8 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { mkdirSync } from 'node:fs';
 import { appendFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { logDir as platformLogDir } from './platform/index.js';
 
 const LEVELS = [ 'trace', 'debug', 'info', 'warn', 'error', 'fatal' ];
 
@@ -18,7 +18,7 @@ export function getContextLogger() {
 }
 
 export function defaultLogDir() {
-    return join(homedir(), 'Library', 'Logs', 'com.ajmichels.mnotes');
+    return platformLogDir();
 }
 
 export function getLogger(component, logDir) {

@@ -29,7 +29,7 @@ Every tunable `mnotes` has, what it does, and its default. The authoritative spe
 | Key | Default | What it does |
 |---|---|---|
 | `vault_path` | `~/Documents/Notes` | Root directory of the Obsidian vault `mnotes` reads/writes/indexes. Prompted for during install. |
-| `db_path` | `~/Library/Application Support/mnotes/index.db` | Path to the SQLite index file (FTS5 + sqlite-vec). Prompted for during install. |
+| `db_path` | `~/Library/Application Support/mnotes/index.db` (macOS) / `~/.local/share/mnotes/index.db` (Linux) | Path to the SQLite index file (FTS5 + sqlite-vec). Prompted for during install. |
 | `embedding_model` | `"Qwen3-Embedding-0.6B"` | Which embedding model the indexing daemon loads for semantic search. Changing this requires a full reindex (`mnotes reindex`) — existing vectors were computed against the old model and won't compare meaningfully against the new one. |
 
 ## `[search]`

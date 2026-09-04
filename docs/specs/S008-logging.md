@@ -2,9 +2,11 @@
 
 Status: **Approved**
 Owns: `src/logger.js`, `src/log-rotator.js`
-Depends on: none (used by every other component)
+Depends on: `S009-config-and-install` (`src/platform` supplies `defaultLogDir()`'s actual path — see
+Rotation/File layout below; otherwise used by every other component with no further dependencies of
+its own)
 Consumed by: `S005-indexing-daemon`, `S006-cli`, `S007-mcp-server`, `S009-config-and-install`
-(rotation LaunchAgent installation), `S012-attachments` — and, via `getContextLogger()`, every `core/`
+(rotation service installation), `S012-attachments` — and, via `getContextLogger()`, every `core/`
 module (`S001`-`S004`), per CLAUDE.md's instruction that `core/` use the shared logger instead of ad hoc
 `console.log`.
 
@@ -95,38 +97,54 @@ Example:
   (below), which throw synchronously and immediately — a malformed audit entry is a programming error
   caught before any I/O is attempted, and CLAUDE.md's "fail loudly" applies there, not to I/O faults.
 
-## Rotation: separate LaunchAgent, not in-process, not `newsyslog`
+## Rotation: separate OS-managed service, not in-process, not `logrotate`/`newsyslog`
 
 Pino's own maintainers recommend OS-level rotation over an in-process rotation library, to keep the
 logging process's own overhead minimal — normally that means `logrotate` (Linux) or `newsyslog`
-(macOS). **This project uses neither.** `newsyslog` configuration lives in `/etc/newsyslog.d/`, which
-requires admin/sudo access to write — not reliably available on a work machine, which this project
-explicitly needs to support (README: "personal or work machine, never both at once").
+(macOS). **This project uses neither.** Both `logrotate`'s and `newsyslog`'s config live under `/etc/`,
+which requires admin/sudo access to write — not reliably available on a work machine, which this
+project explicitly needs to support on **both** platforms (README: "personal or work machine, never
+both at once"), not just macOS.
 
 Instead: a small standalone script (`src/log-rotator.js`) that checks each log file against the
-rotation policy and rotates if needed, run on a schedule by its **own separate LaunchAgent**
-(`~/Library/LaunchAgents/com.ajmichels.mnotes.logrotate.plist`, installed alongside the main daemon's
-plist by `scripts/install.sh` — S009). LaunchAgents (as opposed to LaunchDaemons) install per-user
-under `~/Library/LaunchAgents/` and need no admin privileges, the same way the main indexing daemon's
-plist already doesn't. This satisfies the "keep rotation logic out of the long-running process" goal
-pino's maintainers recommend, without depending on system-level configuration this project can't
-assume access to.
+rotation policy and rotates if needed, run on a schedule by its **own separate service**, installed
+alongside the main daemon's by `scripts/install.sh` (S009) — a second LaunchAgent on macOS, or a
+`systemd` `.service`+`.timer` pair on Linux (systemd splits "what to run" from "when," unlike a single
+plist):
 
-- **Check cadence**: `RunAtLoad: true` (a check runs every time the LaunchAgent loads — i.e. every
-  login/boot) plus `StartCalendarInterval` entries at four fixed times daily (`00:00`, `06:00`,
+- **macOS**: `~/Library/LaunchAgents/com.ajmichels.mnotes.logrotate.plist`. LaunchAgents (as opposed to
+  LaunchDaemons) install per-user and need no admin privileges, the same way the main indexing daemon's
+  plist already doesn't.
+- **Linux**: `mnotes-logrotate.service` (what runs: `log-rotator.js`, once) triggered by
+  `mnotes-logrotate.timer` (when), both under `${XDG_CONFIG_HOME:-~/.config}/systemd/user/` and
+  activated via `systemctl --user enable --now`, needing no admin privileges either.
+
+Either way, this satisfies the "keep rotation logic out of the long-running process" goal pino's
+maintainers recommend, without depending on system-level configuration this project can't assume access
+to on either OS.
+
+- **Check cadence**: on macOS, `RunAtLoad: true` (a check runs every time the LaunchAgent loads — i.e.
+  every login/boot) plus `StartCalendarInterval` entries at four fixed times daily (`00:00`, `06:00`,
   `12:00`, `18:00`). This combination, not `StartInterval`, deliberately: `StartInterval` firings that
   occur while the Mac is asleep are silently dropped on modern macOS with no catch-up, whereas
   `StartCalendarInterval` *does* catch up a missed firing once the machine wakes from sleep (though
-  not after being fully powered off). Between `RunAtLoad` (catches every actual use of the machine)
-  and the calendar-interval catch-up behavior, a personal machine that isn't always on still gets
-  checked reliably — and since log volume is driven by real file-change activity, a machine that's
+  not after being fully powered off). On Linux, the `.timer` unit's `OnCalendar=*-*-* 00,06,12,18:00:00`
+  is the direct equivalent of the same four fixed times, and `Persistent=true` is the direct equivalent
+  of `StartCalendarInterval`'s wake catch-up — it triggers an immediate run on the next boot/login if
+  the machine was off/asleep through a scheduled firing, per `systemd.timer(5)`. Neither platform uses a
+  plain fixed-interval timer (`StartInterval` / systemd's `OnUnitActiveSec=`) for the same reason: both
+  drop missed firings silently instead of catching up. Between the login-triggered check and the
+  calendar-interval catch-up behavior, a personal machine that isn't always on still gets checked
+  reliably on either OS — and since log volume is driven by real file-change activity, a machine that's
   off/asleep isn't generating log volume either; the two naturally track each other, so the worst case
   from a missed window is a somewhat-overdue rotation, never unbounded growth. The rotation logic
   itself is idempotent regardless of how long it's been since the last check — it just compares
   current size/age against the threshold whenever it happens to run.
 - **Rotation policy** (per log file, config-backed per the established pattern — flagged for S009):
   size threshold **10MB** or age threshold **7 days**, whichever comes first; **keep last 5** rotated
-  files, oldest deleted beyond that.
+  files, oldest deleted beyond that. Identical on both platforms — the policy is evaluated entirely
+  inside `log-rotator.js`, which has no OS-specific code at all; only the thing that schedules it
+  differs.
 - Rotated files are renamed with a numeric suffix (`indexer.log.1`, `indexer.log.2`, ...), shifting
   existing numbered files up by one and dropping anything beyond the keep-5 window, then the active
   log file is recreated empty — standard `logrotate`-style behavior, just implemented directly rather
@@ -134,7 +152,8 @@ assume access to.
 
 ## File layout
 
-`~/Library/Logs/com.ajmichels.mnotes/`:
+`src/platform`'s `logDir()` (S009) — `~/Library/Logs/com.ajmichels.mnotes/` on macOS,
+`${XDG_STATE_HOME:-~/.local/state}/mnotes/log/` on Linux:
 
 - **`indexer.log`** — daemon lifecycle (started, schema check/rebuild, watermark catch-up results,
   existence-check cleanup count, `fswatch` watcher started) and processing events (queue drain
@@ -178,4 +197,5 @@ Extended by S012: never the attachment's bytes or base64 content either, same ra
 ## Explicitly out of scope here
 
 - **Exact `config.toml` keys for the rotation policy numbers** — S009.
-- **`log-rotator.js`'s LaunchAgent plist contents and install-script wiring** — S009.
+- **`log-rotator.js`'s service definition contents (plist on macOS, `.service`/`.timer` on Linux) and
+  install-script wiring** — S009.

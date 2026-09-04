@@ -1,0 +1,8 @@
+[Unit]
+Description=Moneta Notes log rotation
+
+[Service]
+Type=oneshot
+ExecStart=__LAUNCH_EXECUTABLE__ --disable-warning=ExperimentalWarning __LOG_ROTATOR_SCRIPT_PATH__
+StandardOutput=append:__LOG_DIR__/logrotate.stdout.log
+StandardError=append:__LOG_DIR__/logrotate.stderr.log

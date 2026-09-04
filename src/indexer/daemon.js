@@ -4,7 +4,6 @@ import { join, relative, sep } from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { createServer } from 'node:net';
-import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { noteRead } from '../core/notes.js';
 import { stripMdExtension } from '../core/note-fs.js';
@@ -13,6 +12,7 @@ import { extractLinkTargets, syncNoteLinks } from '../core/links.js';
 import { openDb, setMeta, enqueuePath } from '../core/db.js';
 import { getLogger, defaultLogDir, runWithLogger, getContextLogger } from '../logger.js';
 import { loadConfig } from '../config.js';
+import { appSupportDir } from '../platform/index.js';
 import {
     chunkText as realChunkText, loadTokenizer, tokenizeWithOffsets as realTokenizeWithOffsets,
     embed as realEmbed, embedQuery as realEmbedQuery, configureEmbedder, buildChunkPrompt,
@@ -434,7 +434,7 @@ export async function runReindex(vaultRoot, db, deps, options = {}, onMessage = 
 }
 
 export function defaultAppSupportDir() {
-    return join(homedir(), 'Library', 'Application Support', 'mnotes');
+    return appSupportDir();
 }
 
 export function defaultSocketPath() {

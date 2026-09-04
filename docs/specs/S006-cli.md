@@ -3,7 +3,8 @@
 Status: **Approved**
 Owns: `src/cli/main.js`, `src/cli/reindex.js`, `src/cli/daemon.js`, `src/cli/stats.js`
 Depends on: `S001-data-model`, `S002-search`, `S003-notes`, `S004-grep-tags`, `S005-indexing-daemon`,
-`S010-shared-utilities`, `S011-links`, `S012-attachments`
+`S009-config-and-install` (`src/platform` supplies `mnotes daemon`'s service-control functions — see
+below), `S010-shared-utilities`, `S011-links`, `S012-attachments`
 Consumed by: (terminal use, `obsidian.nvim` integration)
 
 ## Purpose
@@ -143,7 +144,7 @@ exact absolute title — see "Absolute titles for mutating commands" below).
 | `mnotes attachment read <path>` | `--raw`, `--metadata`/`--json` | Default action opens the file via the OS default app (`open`); see S012. |
 | `mnotes attachment write <path> [local-file]` | | Reads `<local-file>` off local disk (stdin if omitted), writes it to `<path>` (vault-relative) — see S012. |
 | `mnotes reindex [title]` | | Talks to the daemon over the S005 Unix socket; hard error if daemon isn't running. Blocks until done, streaming attempt/retry progress for a single-title reindex. |
-| `mnotes daemon <start\|stop\|restart>` | | Controls the `launchd`-managed daemon process itself (not the IPC socket) — see below. |
+| `mnotes daemon <start\|stop\|restart>` | | Controls the OS-service-managed daemon process itself (not the IPC socket) — see below. |
 | `mnotes stats` | `--json` | See below. |
 | `mnotes vectors <subcommand>` | (per subcommand) | `compare`/`nearest`/`cluster`/`reduce`/`tag-fit`/`tag-redundancy`/`outliers`/`calibrate` — CLI-only debug/analysis tooling over the raw embedding space, no MCP equivalent (same rationale as `mnotes links`). Fully specified in [S013 — Vector Tools](S013-vector-tools.md), which owns `src/cli/vectors.js` and amends this spec only to add `vectors` to the dispatch table above. |
 
@@ -224,24 +225,32 @@ consistent with `search`/`grep`/`tags`/`links`.
 
 ### `mnotes daemon <start|stop|restart>`
 
-A thin wrapper around `launchctl`, targeting the `com.ajmichels.mnotes` LaunchAgent (S009) directly —
-distinct from `mnotes reindex`, which talks to the *already-running* daemon over its IPC socket.
-This command manages the process itself, for when the daemon is stuck, needs picking up after a config
-change, or needs to be stopped entirely:
+A thin wrapper around `src/platform`'s `startDaemonService`/`stopDaemonService`/`restartDaemonService`
+(S009) — `src/cli/daemon.js` itself contains no `launchctl`/`systemctl` calls or `process.platform`
+checks; it just calls whichever platform module `src/platform/index.js` selected. Distinct from
+`mnotes reindex`, which talks to the *already-running* daemon over its IPC socket. This command manages
+the process itself, for when the daemon is stuck, needs picking up after a config change, or needs to
+be stopped entirely:
 
-- `start` — `launchctl bootstrap gui/<uid> <plist path>`, loading the LaunchAgent (a no-op error if
-  it's already loaded).
-- `stop` — `launchctl bootout gui/<uid>/com.ajmichels.mnotes`, unloading it. Since the plist sets
+- `start` — macOS: `launchctl bootstrap gui/<uid> <plist path>`, loading the LaunchAgent (a no-op error
+  if it's already loaded). Linux: `systemctl --user start mnotes.service` — the unit is already
+  loaded/enabled by `scripts/install.sh` (S009), so `start` here just (re)starts the process, not a
+  load/enable step.
+- `stop` — macOS: `launchctl bootout gui/<uid>/com.ajmichels.mnotes`, unloading it. Since the plist sets
   `KeepAlive: true` (S009), a plain kill/signal would just have `launchd` immediately relaunch the
   process — `bootout` is the only way to actually stop it until the next `start` (or the next login,
-  since `RunAtLoad` is also `true`).
-- `restart` — `launchctl kickstart -k gui/<uid>/com.ajmichels.mnotes`, killing and relaunching a
-  currently-loaded daemon in place.
+  since `RunAtLoad` is also `true`). Linux: `systemctl --user stop mnotes.service` — `Restart=always`
+  (S009's equivalent of `KeepAlive`) only restarts a service that *crashes*, not one `systemctl stop`
+  asked to stop, so a plain `stop` is sufficient here; the unit stays enabled and comes back on next
+  login same as macOS's `RunAtLoad`.
+- `restart` — macOS: `launchctl kickstart -k gui/<uid>/com.ajmichels.mnotes`, killing and relaunching a
+  currently-loaded daemon in place. Linux: `systemctl --user restart mnotes.service`.
 
-`launchctl`'s own stderr is surfaced directly in the error message on failure (e.g. `restart` against
-a daemon that was never started) rather than being pattern-matched into a synthesized message —
-`launchctl`'s exact wording isn't stable across macOS versions, so passing it through as-is is more
-reliable than guessing at it.
+The underlying service manager's own stderr is surfaced directly in the error message on failure (e.g.
+`restart` against a daemon that was never started) rather than being pattern-matched into a synthesized
+message — neither `launchctl`'s nor `systemctl`'s exact wording is stable across OS/distro versions, so
+passing it through as-is is more reliable than guessing at it. This was already true of the macOS-only
+version of this code and carries over unchanged to the Linux implementation.
 
 ### `mnotes stats`
 

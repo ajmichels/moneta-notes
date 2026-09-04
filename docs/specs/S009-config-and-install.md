@@ -1,19 +1,146 @@
 # S009 — Config & Install
 
 Status: **Approved**
-Owns: `src/config.js`, `scripts/install.sh`, `scripts/uninstall.sh`, `launchd/*.plist.template`,
-`launchd/launcher.c`, `launchd/Info.plist`
-Depends on: `S002-search`, `S003-notes`, `S004-grep-tags`, `S005-indexing-daemon`, `S007-mcp-server`,
-`S008-logging`, `S012-attachments` (config knobs flagged across all of these land here)
+Owns: `src/config.js`, `src/platform/index.js`, `src/platform/darwin.js`, `src/platform/linux.js`,
+`scripts/install.sh`, `scripts/uninstall.sh`, `scripts/lib/common.sh`, `scripts/lib/os-macos.sh`,
+`scripts/lib/os-linux.sh`, `launchd/*.plist.template`, `launchd/launcher.c`, `launchd/Info.plist`,
+`systemd/*.template`
+Depends on: `S002-search`, `S003-notes`, `S004-grep-tags`, `S005-indexing-daemon`, `S006-cli`,
+`S007-mcp-server`, `S008-logging`, `S012-attachments` (config knobs flagged across all of these land
+here; S005/S006/S008 also consume the platform abstraction defined below for daemon paths, `mnotes
+daemon` control, and log-rotation scheduling respectively)
 
 ## Purpose
 
 Finalizes `config.toml`'s full shape (collecting every tunable flagged across
-S002/S003/S004/S005/S008/S012 into one coherent schema), and the install/uninstall flow — now covering
-**two** LaunchAgents (the
-indexing daemon from the README, plus S008's log-rotation agent) instead of one, plus registering (and
-deregistering) `mnotes-mcp` as an actual Claude Code MCP server and linking (and unlinking) the `mnotes`
-CLI onto `PATH` — rather than leaving either step manual.
+S002/S003/S004/S005/S008/S012 into one coherent schema), the **cross-platform abstraction** that lets
+this project run on both macOS and Linux without OS checks scattered through the codebase, and the
+install/uninstall flow — now covering **two** background services (the indexing daemon from the
+README, plus S008's log-rotation job) instead of one, plus registering (and deregistering)
+`mnotes-mcp` as an actual Claude Code MCP server and linking (and unlinking) the `mnotes` CLI onto
+`PATH` — rather than leaving either step manual.
+
+## Supported platforms
+
+**macOS (Apple Silicon) and Linux (x86_64 or arm64).** Both run Node natively — there's no WSL-specific
+branch, because WSL2 presents a real Linux kernel and userspace to Node, so it's just Linux from this
+project's point of view (the daemon's file-watching backend and service-manager assumptions both hold
+under WSL2 the same as bare-metal/VM Linux). Anything else (Windows without WSL, BSD, etc.) is
+unsupported — `src/platform/index.js` throws rather than silently guessing.
+
+## Platform abstraction: fencing, not branching
+
+The rule this project follows: **OS-specific logic lives in exactly one file per OS, never inline
+behind an `if` in a shared file.** A single, small dispatcher per language picks which file runs; every
+other file only ever calls the shared, OS-agnostic contract those files both implement. This is
+deliberate — the alternative (one `daemon.js`/`install.sh` sprinkled with
+`process.platform === 'darwin'` / `case "$(uname -s)" in Darwin)` branches at each divergence point)
+makes it easy for the two platforms' logic to silently entangle (a Linux-only fix leaking an assumption
+into a shared branch) and hard to see, at a glance, everything a given OS needs. Fencing means adding a
+third platform later (or dropping one) is a matter of adding/removing one file that satisfies the
+existing contract, not auditing every call site for a missed branch.
+
+### JS layer: `src/platform/`
+
+```
+src/platform/index.js   — selects darwin.js or linux.js by process.platform; the ONLY file that reads
+                           process.platform. Throws `Unsupported platform: ${process.platform}` for
+                           anything else. Re-exports the winner's named exports unchanged.
+src/platform/darwin.js  — macOS implementation of the contract below.
+src/platform/linux.js   — Linux implementation of the contract below.
+```
+
+Both `darwin.js` and `linux.js` export the **same names with the same signatures** — that identical
+shape is the contract, enforced by convention (and by every call site working against either one
+interchangeably), not by a shared TypeScript interface (this project has no TypeScript, per CLAUDE.md):
+
+| Export | Returns | macOS | Linux |
+|---|---|---|---|
+| `appSupportDir()` | absolute path | `~/Library/Application Support/mnotes` | `${XDG_DATA_HOME:-~/.local/share}/mnotes` |
+| `logDir()` | absolute path | `~/Library/Logs/com.ajmichels.mnotes` | `${XDG_STATE_HOME:-~/.local/state}/mnotes/log` |
+| `daemonServiceName()` | string identifier (logging/error messages only) | `com.ajmichels.mnotes` | `mnotes.service` |
+| `startDaemonService(deps)` | `Promise<void>` | `launchctl bootstrap gui/<uid> <plist>` | `systemctl --user start mnotes.service` |
+| `stopDaemonService(deps)` | `Promise<void>` | `launchctl bootout gui/<uid>/com.ajmichels.mnotes` | `systemctl --user stop mnotes.service` |
+| `restartDaemonService(deps)` | `Promise<void>` | `launchctl kickstart -k gui/<uid>/com.ajmichels.mnotes` | `systemctl --user restart mnotes.service` |
+
+`appSupportDir()`/`logDir()` are consumed by `src/logger.js` (`defaultLogDir()`), `src/config.js`
+(`defaultDbPath()`), and `src/indexer/daemon.js` (`defaultAppSupportDir()`, hence `defaultSocketPath()`
+too) — all four currently hardcode a `~/Library/...` path directly; this spec replaces each with a call
+into `src/platform`. `startDaemonService`/`stopDaemonService`/`restartDaemonService` replace the
+`launchctl`-shelling logic currently inline in `src/cli/daemon.js` (S006) — that file keeps its
+`deps`-injection pattern (an `execFileFn` override for tests) by threading `deps` straight through to
+whichever platform module's function it calls, unchanged from today's test-doubling approach.
+
+**`configDir()` (`~/.config/mnotes/config.toml`) deliberately does *not* move into `src/platform`.** It
+already resolves identically on both OSes — `~/.config` is a CLI-tool convention this project already
+follows on macOS, not a Library-folder concession — so there's nothing to fence. `src/config.js` keeps
+computing it directly. Don't "helpfully" route an already-portable path through the platform module
+just for symmetry; that would just be indirection with no behavioral payoff.
+
+**fswatch needs no `src/platform` entry at all.** It's a portable CLI binary (kqueue-backed on macOS,
+inotify-backed on Linux) already available via both platforms' package managers, and
+`src/indexer/daemon.js`'s `spawnFswatch`/`assertFswatchAvailable` shell out to it identically either
+way — S005 requires zero code changes for Linux support. Only the install-time "how do I get this"
+messaging differs (see Install below), which is a `scripts/lib/os-*.sh` concern, not a JS one.
+
+### Shell layer: `scripts/lib/`
+
+```
+scripts/lib/common.sh    — OS-agnostic steps and helpers: resolve_path, escape_toml_string, the
+                            vault_path/db_path prompts, config.toml writing, embedding-model
+                            pre-download, pnpm link/unlink, Claude Code MCP registration/deregistration.
+                            Sourced by scripts/install.sh and scripts/uninstall.sh directly.
+scripts/lib/os-macos.sh   — macOS implementation of the contract below.
+scripts/lib/os-linux.sh   — Linux implementation of the contract below.
+```
+
+`scripts/install.sh`/`scripts/uninstall.sh` dispatch once, at the top, via `case "$(uname -s)" in
+Darwin) source .../os-macos.sh ;; Linux) source .../os-linux.sh ;; *) echo "unsupported OS: $(uname -s)"
+>&2; exit 1 ;; esac` — the only `uname` check in either script. Every step after that calls one of the
+functions below; neither script's linear step sequence (see Install/Uninstall) branches on OS again.
+Both `os-*.sh` files implement every function, even where one side's implementation is a one-liner (see
+`os_prepare_launch_executable` below) — a missing function in one file is a bug, not an intentionally
+absent case, so the contract stays a flat list of names both files must define:
+
+| Function | Does | macOS | Linux |
+|---|---|---|---|
+| `os_app_support_dir` | prints the app-support path | `~/Library/Application Support/mnotes` | `${XDG_DATA_HOME:-$HOME/.local/share}/mnotes` |
+| `os_log_dir` | prints the log path | `~/Library/Logs/com.ajmichels.mnotes` | `${XDG_STATE_HOME:-$HOME/.local/state}/mnotes/log` |
+| `os_service_dir` | prints the dir service definition files live in | `~/Library/LaunchAgents` | `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user` |
+| `os_prepare_launch_executable` | builds/resolves the executable the service(s) launch, sets `LAUNCH_EXECUTABLE` | builds+signs the native launcher bundle, or falls back to a wrapper script (unchanged from today) | one-liner: `LAUNCH_EXECUTABLE="$NODE_BIN"` — no bundle/signing concept exists on this path (see below) |
+| `os_write_service_files` | renders and writes both service definitions, given `LAUNCH_EXECUTABLE`, the two script paths, the log dir, and the resolved `fswatch` directory | renders both `.plist.template`s from `launchd/` | renders `mnotes.service`, `mnotes-logrotate.service`, and `mnotes-logrotate.timer` from `systemd/`; also runs `systemctl --user daemon-reload` |
+| `os_enable_services` | activates both services persistently | `launchctl bootstrap gui/<uid> <plist>` ×2 | `systemctl --user enable --now <unit>` ×2 |
+| `os_disable_services` | deactivates both services (uninstall) | `launchctl bootout gui/<uid>/<label>` ×2, tolerating "not loaded" | `systemctl --user disable --now <unit>` ×2, tolerating "not loaded" |
+| `os_remove_service_files` | deletes the service definition files (uninstall) | `rm -f` both plists | `rm -f` all three unit files, then `systemctl --user daemon-reload` |
+| `os_watcher_install_hint` | prints the human-facing install command for the preflight warning | `` `brew install fswatch` `` | generic multi-distro line, no detection (see below) |
+| `os_ripgrep_install_hint` | same, for `rg` | `` `brew install ripgrep` `` | generic multi-distro line, no detection (see below) |
+
+These two are plain **hints** — same posture as the existing macOS `brew` warnings, which never invoke Homebrew on the user's behalf either. `os-linux.sh` doesn't attempt to detect which package manager is present and pick a single command; a user running any of these distros already knows which package manager they run and how to use it, so the win from detection logic wouldn't be worth the extra fenced-off code path it'd need. Instead each hint is one static, generic line naming all three:
+
+- `os_ripgrep_install_hint`: `"install ripgrep via your distro's package manager, e.g. apt install ripgrep / dnf install ripgrep / pacman -S ripgrep"` — verified as an official package with no extra repo needed on Debian/Ubuntu (`apt`), Fedora (`dnf`), and Arch (`pacman -S ripgrep`, `extra` repo).
+- `os_watcher_install_hint`: `"install fswatch via your distro's package manager, e.g. apt install fswatch / pacman -S fswatch; on RHEL/CentOS/Rocky/AlmaLinux enable EPEL first (dnf install epel-release fswatch)"` — verified as an official package on Debian/Ubuntu (`apt`) and Arch (`pacman -S fswatch`, promoted out of the AUR into `extra`, so no AUR helper is needed) and on plain Fedora (`dnf install fswatch` works directly there); RHEL-family enterprise clones (RHEL/CentOS/Rocky/AlmaLinux, as opposed to Fedora itself) only carry it in EPEL, not the base repos, so the hint calls that out explicitly rather than implying a bare `dnf install fswatch` always works. This distinction is worth keeping in the hint text itself (not just this spec) since "RHEL-based" plausibly means the enterprise clones, not Fedora.
+
+Both hints are static strings, not scripts that shell out to detect anything — same one-liner-function simplicity as `os_prepare_launch_executable`'s Linux branch.
+
+### Concept mapping
+
+| Concept | macOS | Linux |
+|---|---|---|
+| Service manager | `launchd`, per-user `gui/<uid>` domain | `systemd` user instance, `systemctl --user` |
+| Service definition format | one XML plist per service (`ProgramArguments`, `RunAtLoad`, `KeepAlive`, `StartCalendarInterval`) | one `.service` (+ `.timer` for scheduled jobs) `ini`-style unit per service |
+| "Keep it running" | `KeepAlive: true` | `Restart=always` |
+| "Run at login" | `RunAtLoad: true` | `WantedBy=default.target` + `enable` |
+| Log-rotation scheduling | one plist's `StartCalendarInterval` (four fixed times) covers both "what" and "when" | systemd splits it: `mnotes-logrotate.service` (what) triggered by `mnotes-logrotate.timer` (when, via `OnCalendar=`) — see S008 |
+| Catch-up after sleep/off | `StartCalendarInterval`'s built-in wake catch-up | `Persistent=true` on the `.timer` unit (functionally equivalent) |
+| Background-task identity fix | `launchd/launcher.c` + ad-hoc `codesign`, wrapped in `MonetaNotes.app` — needed because macOS's Background Task Management attributes a LaunchAgent's displayed identity to its launched binary's code signature, which otherwise resolves to Node.js Foundation's | **doesn't exist as a problem.** systemd units carry their own `Description=` string as their identity; nothing attributes identity via a binary's signature, so `ExecStart` just points straight at `node` — no bundle, no signing step, no fallback-wrapper case to speak of |
+| `fswatch` PATH visibility | plist's `EnvironmentVariables` dict (services run with a minimal PATH lacking Homebrew's prefix) | unit's `Environment=PATH=...` line (same underlying problem — a systemd user service's default PATH is similarly minimal) |
+| Running without an active login session | not supported — LaunchAgents require an active GUI session (`gui/<uid>`) | not supported by default either — a systemd *user* instance normally only runs during an active login session. A headless/always-on Linux box needs `loginctl enable-linger $(whoami)` to keep it running unattended; `scripts/install.sh`'s Linux path prints this as an install-time hint (same "warn and continue" posture as the `rg`/`fswatch` preflight checks), not something it runs automatically |
+
+The native-launcher row is the one place this project has genuinely asymmetric logic between the two
+platforms, not just a different implementation of the same idea — Linux's `os_prepare_launch_executable`
+isn't "the Linux version of code-signing," it's a no-op because the problem the launcher solves is
+macOS-specific from the ground up. `launchd/launcher.c`, `launchd/Info.plist`, and the `.app`-bundle
+build step stay macOS-only artifacts with no parallel structure created on the Linux side.
 
 ## `config.toml` schema
 
@@ -51,6 +178,13 @@ rotation_max_age_days = 7    # S008
 rotation_keep = 5            # S008
 ```
 
+`db_path`'s example above is the **macOS** default (`platform.appSupportDir() + '/index.db'`); on
+Linux it's `${XDG_DATA_HOME:-~/.local/share}/mnotes/index.db` — same computation, different
+`src/platform` implementation (see Platform abstraction above). `config.example.toml` documents
+whichever platform it's generated/checked on; a user on the other OS overriding `db_path` by hand isn't
+copying a wrong-OS path from this file's built-in default either way, since an unset `db_path` already
+resolves correctly for their own platform.
+
 `vault_path`, `db_path`, and `embedding_model` are the three values already documented in the
 README/`config.example.toml`; everything under
 `[search]`/`[notes]`/`[grep]`/`[attachments]`/`[index]`/`[logging]` is new, collecting every value
@@ -75,13 +209,17 @@ Assumes `pnpm install` has already been run (dependency installation is a separa
 step, not part of this script). Steps, in order:
 
 1. **Preflight check**: `which rg` — if missing, print a clear warning ("ripgrep not found — install
-   via `brew install ripgrep` before using `mnotes grep`") and continue (not a hard blocker; every
-   other tool still works without it).
+   via `<os_ripgrep_install_hint>` before using `mnotes grep`") and continue (not a hard blocker; every
+   other tool still works without it). Same for `fswatch` (`<os_watcher_install_hint>` — see Platform
+   abstraction above for both hints' exact wording per OS). Everything from here through step 3 is
+   common code in `scripts/lib/common.sh`; step 4 onward starts calling into whichever `os-*.sh` the
+   top-of-script dispatch sourced.
 2. **Prompt** for `vault_path` and `db_path`, each showing a **smart suggested default** computed from
-   the current user (via `os.homedir()`) — e.g. `Vault path [~/Documents/Notes]:`,
-   `Index DB path [~/Library/Application Support/mnotes/index.db]:` — so accepting the default is just
-   pressing Enter. No other value is prompted for (everything else already has a code-level default,
-   per the schema above).
+   the current user (via `os.homedir()`) — e.g. `Vault path [~/Documents/Notes]:`, and
+   `Index DB path [~/Library/Application Support/mnotes/index.db]:` on macOS or
+   `Index DB path [~/.local/share/mnotes/index.db]:` on Linux (via `src/platform`'s `appSupportDir()`)
+   — so accepting the default is just pressing Enter. No other value is prompted for (everything else
+   already has a code-level default, per the schema above).
    - Whatever the user types (a bare Enter for the default, a `~`-relative path, or a relative path)
      is **resolved to an absolute path** before use — `~` expanded via `os.homedir()`, relative paths
      resolved via `path.resolve()`. `config.toml` (if written at all) never contains an unexpanded `~`
@@ -93,39 +231,64 @@ step, not part of this script). Steps, in order:
    the only thing that differs, not a full dump of every value. An existing `config.toml` (e.g.
    re-running install after an upgrade) is always left completely untouched regardless, so a reinstall
    never silently discards hand-edited tuning values.
-4. **Create Application Support directory** (`~/Library/Application Support/mnotes/`) — holds the
-   SQLite index (`index.db`, schema created by the daemon's own startup sequence per S005, not by this
-   script — no duplicate schema-creation logic between install and the daemon) and the S005 Unix
-   socket (`daemon.sock`).
-5. **Create Logs directory** (`~/Library/Logs/com.ajmichels.mnotes/`).
-6. **Build the native launcher app bundle.** macOS's Background Task Management attributes a
-   LaunchAgent's "Software from X" identity (both the Login Items & Extensions listing and the
-   transient "App Background Activity" notification) to the code signature of the executable
-   `ProgramArguments` actually launches — pointing it straight at `node` gets both LaunchAgents
-   attributed to Node.js Foundation's signing identity, not to `mnotes`. `which clang` — if present
-   (Xcode Command Line Tools; near-universal on a dev Mac), compile `launchd/launcher.c` (a ~20-line
-   native launcher that `execv`s `<node> --disable-warning=ExperimentalWarning <script> [args...]`,
-   with the `node` path baked in at compile time via `-DNODE_BIN_PATH`) into
-   `~/Library/Application Support/mnotes/MonetaNotes.app/Contents/MacOS/moneta-notes-launcher`,
-   copy `launchd/Info.plist` (static `CFBundleName`/`CFBundleIdentifier` metadata, no templating
-   needed) alongside it as `Contents/Info.plist` so Launch Services can resolve a bundle name, then
-   ad-hoc sign the bundle (`codesign --sign -` — no paid Apple Developer ID needed, since this binary
-   is compiled and run locally, never distributed, so Gatekeeper's quarantine flow never triggers). If
-   `clang` is missing, warn (same "warn and continue" posture as step 1's `rg` check, naming
-   `xcode-select --install` as the fix) and fall back to writing a plain
-   `~/Library/Application Support/mnotes/mnotes-node-wrapper.sh` (`exec node --disable-warning=... "$@"`)
-   instead — functionally equivalent (both LaunchAgents still work, warning still suppressed), just
-   without the corrected BTM identity. Either way, this step's output is a single **launch executable
-   path** (the compiled+signed launcher, or the fallback wrapper script) that step 7 points both
-   plists' `ProgramArguments[0]` at.
-7. **Create both Property List files** from templates: the indexing daemon's plist (existing, per
-   README) and the log-rotation LaunchAgent's plist (S008: `RunAtLoad: true` +
-   `StartCalendarInterval` at `00:00`/`06:00`/`12:00`/`18:00`). Both templates' `ProgramArguments` are
-   now `[launch executable from step 6, script path]` — two elements, not three — since the
-   `--disable-warning` flag and the real `node` path are both already baked into whichever launch
-   executable step 6 produced, rather than being separate array entries pointing at `node` directly.
-8. **Bootstrap both launchd jobs**: `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ajmichels.mnotes.plist`
-   and the equivalent for `com.ajmichels.mnotes.logrotate.plist`.
+4. **Create the app-support directory** (`os_app_support_dir`: `~/Library/Application Support/mnotes/`
+   on macOS, `${XDG_DATA_HOME:-~/.local/share}/mnotes/` on Linux) — holds the SQLite index (`index.db`,
+   schema created by the daemon's own startup sequence per S005, not by this script — no duplicate
+   schema-creation logic between install and the daemon) and the S005 Unix socket (`daemon.sock`).
+5. **Create the logs directory** (`os_log_dir`: `~/Library/Logs/com.ajmichels.mnotes/` on macOS,
+   `${XDG_STATE_HOME:-~/.local/state}/mnotes/log/` on Linux).
+6. **Prepare the launch executable** (`os_prepare_launch_executable`):
+   - **macOS**: build the native launcher app bundle. macOS's Background Task Management attributes a
+     LaunchAgent's "Software from X" identity (both the Login Items & Extensions listing and the
+     transient "App Background Activity" notification) to the code signature of the executable
+     `ProgramArguments` actually launches — pointing it straight at `node` gets both LaunchAgents
+     attributed to Node.js Foundation's signing identity, not to `mnotes`. `which clang` — if present
+     (Xcode Command Line Tools; near-universal on a dev Mac), compile `launchd/launcher.c` (a ~20-line
+     native launcher that `execv`s `<node> --disable-warning=ExperimentalWarning <script> [args...]`,
+     with the `node` path baked in at compile time via `-DNODE_BIN_PATH`) into
+     `<app-support-dir>/MonetaNotes.app/Contents/MacOS/moneta-notes-launcher`, copy `launchd/Info.plist`
+     (static `CFBundleName`/`CFBundleIdentifier` metadata, no templating needed) alongside it as
+     `Contents/Info.plist` so Launch Services can resolve a bundle name, then ad-hoc sign the bundle
+     (`codesign --sign -` — no paid Apple Developer ID needed, since this binary is compiled and run
+     locally, never distributed, so Gatekeeper's quarantine flow never triggers). If `clang` is missing,
+     warn (same "warn and continue" posture as step 1's `rg` check, naming `xcode-select --install` as
+     the fix) and fall back to writing a plain `<app-support-dir>/mnotes-node-wrapper.sh`
+     (`exec node --disable-warning=... "$@"`) instead — functionally equivalent (the LaunchAgent still
+     works, warning still suppressed), just without the corrected BTM identity.
+   - **Linux**: a one-liner — `LAUNCH_EXECUTABLE="$NODE_BIN"`. The Background Task Management identity
+     problem this step solves on macOS doesn't exist on Linux (see Platform abstraction above): a
+     systemd unit's own `Description=` is its identity, nothing attributes it via a launched binary's
+     code signature, so there's no bundle to build, no signing step, and no fallback-wrapper case.
+   - Either way, this step's output is a single **launch executable path** that step 7 points the
+     daemon's service definition at.
+7. **Write the service definition file(s)** (`os_write_service_files`):
+   - **macOS**: both Property List files, from templates — the indexing daemon's plist (existing, per
+     README) and the log-rotation LaunchAgent's plist (S008: `RunAtLoad: true` + `StartCalendarInterval`
+     at `00:00`/`06:00`/`12:00`/`18:00`). Both templates' `ProgramArguments` are `[launch executable from
+     step 6, script path]` — two elements, not three — since the `--disable-warning` flag and the real
+     `node` path are both already baked into whichever launch executable step 6 produced, rather than
+     being separate array entries pointing at `node` directly.
+   - **Linux**: three unit files from `systemd/` templates — `mnotes.service` (`ExecStart=<node bin>
+     --disable-warning=ExperimentalWarning <daemon.js path>`, `Restart=always`), `mnotes-logrotate.service`
+     (`ExecStart=... <log-rotator.js path>`, no `Restart=` — it's meant to run once per trigger, not stay
+     up), and `mnotes-logrotate.timer` (`OnCalendar=*-*-* 00,06,12,18:00:00`, `Persistent=true` — S008).
+     All three go under `os_service_dir` (`${XDG_CONFIG_HOME:-~/.config}/systemd/user/`), followed by
+     `systemctl --user daemon-reload` so systemd notices the new/changed files.
+   - Both OSes' daemon service definition also carries the `fswatch`-directory PATH fix from the
+     existing behavior below (macOS: `EnvironmentVariables` plist dict; Linux: `Environment=PATH=...`
+     unit line) — services on both platforms run with a minimal PATH that omits wherever `fswatch` was
+     installed, so `FSWATCH_DIR` (resolved via `command -v fswatch`, common to both OSes) gets prepended
+     either way, just rendered into each platform's own format.
+8. **Activate both services** (`os_enable_services`): macOS —
+   `launchctl bootstrap gui/$(id -u) <plist path>` for both plists. Linux —
+   `systemctl --user enable --now <unit>` for both `mnotes.service` and `mnotes-logrotate.timer` (not
+   `mnotes-logrotate.service` directly — the timer is what's enabled/persistent; it triggers the service
+   on its own schedule). On a machine with no active login session expected to stay logged in (a
+   headless/always-on box), also print a hint to run `loginctl enable-linger $(whoami)` — without it, a
+   `systemd --user` instance (and everything in it) stops when the last session for that user ends, the
+   same restriction a macOS LaunchAgent has under `gui/<uid>` needing an active GUI session; this is
+   informational only, same "warn and continue" posture as the `rg`/`fswatch`/`clang` checks, not
+   something this script runs on the user's behalf.
 9. **Pre-download the embedding model**: a one-line pipeline warm-up call (loads the `q8` model per
    the now-created config, triggering `@huggingface/transformers`' download-and-cache) as the final
    step, with a visible "downloading embedding model, this may take a minute..." message — so the
@@ -148,34 +311,44 @@ step, not part of this script). Steps, in order:
     `claude mcp add mnotes -s user -- <node> --disable-warning=ExperimentalWarning <repo>/src/mcp/server.js`
     (`-s user`: available in every Claude Code session on this machine, not just one project directory
     — matching how the daemon, config, and index are already all machine-level, not project-level,
-    resources). This step invokes `node`/the script path directly, not the step 6 launcher — the MCP
-    server is spawned per-session by Claude Code itself, never registered as its own launchd item, so
-    there's no separate BTM identity to fix here, only the same `ExperimentalWarning` suppression
-    already applied everywhere else. This step is independent of step 10's `mnotes-mcp` having
-    successfully landed on `PATH` — a step 10 failure shouldn't cascade into step 11 also failing.
+    resources). This step invokes `node`/the script path directly, not the step 6 launch executable —
+    the MCP server is spawned per-session by Claude Code itself, never registered as its own background
+    service on either OS, so there's no separate identity to fix here (macOS's BTM concern or otherwise),
+    only the same `ExperimentalWarning` suppression already applied everywhere else. This step is
+    independent of step 10's `mnotes-mcp` having successfully landed on `PATH` — a step 10 failure
+    shouldn't cascade into step 11 also failing.
 
-Both `launchd/launcher.c` and the two `.plist.template` files use a single shared launcher, not one
+On macOS, `launchd/launcher.c` and the two `.plist.template` files use a single shared launcher, not one
 compiled binary per agent — the launcher's first argument is always the target script path (`daemon.js`
 or `log-rotator.js`), so both plists point `ProgramArguments[1]` at their own script but share
-`ProgramArguments[0]` (the same launcher/wrapper path from step 6).
+`ProgramArguments[0]` (the same launcher/wrapper path from step 6). On Linux there's no shared-launcher
+concept to speak of — each unit's `ExecStart` just names `node` plus its own script path directly, since
+step 6 there is a no-op.
 
 ## Uninstall (`scripts/uninstall.sh`)
 
 1. **Deregister the MCP server from Claude Code**: `claude mcp remove mnotes -s user`, only if
    `claude` is present on `PATH` — tolerating "not registered" the same way step 3 below tolerates
-   "not currently loaded" for the launchd jobs, since uninstall must be safe to run even if install
-   never got that far (or `claude` was never installed on this machine at all).
+   "not currently loaded" for the background services, since uninstall must be safe to run even if
+   install never got that far (or `claude` was never installed on this machine at all).
 2. **Unlink the CLI from `PATH`**: `pnpm uninstall --global <package name>` (read from the repo's own
    `package.json`, not hardcoded, so a future rename can't silently desync install/uninstall), only if
    `pnpm` is present on `PATH` — tolerating "not linked" the same way step 1 tolerates "not registered."
-3. **Bootout both launchd jobs**: `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.ajmichels.mnotes.plist`
-   and the log-rotation agent's equivalent.
-4. **Delete both Property List files**.
-5. **Delete Logs directory**.
-6. **Delete Application Support directory** (the SQLite index and socket file — safe to delete
-   unconditionally since the index is a pure derived cache per S001; nothing here is a data-loss risk,
-   a future reinstall's daemon startup just rebuilds it from the vault on first run).
-7. **Delete Configuration directory** (`~/.config/mnotes/`).
+3. **Deactivate both services** (`os_disable_services`): macOS —
+   `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.ajmichels.mnotes.plist` and the
+   log-rotation agent's equivalent, tolerating "not currently loaded." Linux —
+   `systemctl --user disable --now mnotes.service` and `mnotes-logrotate.timer`, tolerating "not
+   currently loaded/enabled" the same way.
+4. **Delete the service definition file(s)** (`os_remove_service_files`): both plists on macOS; all
+   three unit files (`mnotes.service`, `mnotes-logrotate.service`, `mnotes-logrotate.timer`) on Linux,
+   followed by `systemctl --user daemon-reload` so systemd forgets them.
+5. **Delete the logs directory** (`os_log_dir`).
+6. **Delete the app-support directory** (`os_app_support_dir` — the SQLite index and socket file, plus
+   `MonetaNotes.app` on macOS if it was built — safe to delete unconditionally since the index is a pure
+   derived cache per S001; nothing here is a data-loss risk, a future reinstall's daemon startup just
+   rebuilds it from the vault on first run).
+7. **Delete Configuration directory** (`~/.config/mnotes/` — identical on both OSes, see Platform
+   abstraction above).
 
 Never touches the vault itself — uninstalling `mnotes` removes the tool's own state, not your notes.
 
@@ -244,9 +417,10 @@ every call.
 `scripts/install.sh`/`scripts/uninstall.sh` are bash, not Node — they print directly to the terminal
 (the "clear warning" for a missing `rg`, the path prompts, the model-download progress message) and
 never touch `src/logger.js`, which doesn't exist yet from bash's perspective at install time anyway.
-Their one connection to `S008` is purely mechanical: installing the log-rotation LaunchAgent's plist
-(step 6) is what makes `src/log-rotator.js`'s already-built `main()` (S008 Task 8) actually run on a
-schedule — there's no new logging behavior to design here, just wiring up what S008 shipped.
+Their one connection to `S008` is purely mechanical: installing the log-rotation service definition
+(step 7 — the LaunchAgent plist on macOS, the `.service`/`.timer` pair on Linux) is what makes
+`src/log-rotator.js`'s already-built `main()` (S008 Task 8) actually run on a schedule — there's no new
+logging behavior to design here, just wiring up what S008 shipped.
 
 `src/config.js` is a regular Node module loaded early by every entry point (daemon, CLI, MCP server).
 `getContextLogger()` inside `loadConfig()` only actually writes anywhere when the caller has already
@@ -279,6 +453,13 @@ config load is actually observable in `indexer.log` today (see above).
 
 ## Explicitly out of scope here
 
-- **Exact plist XML contents beyond what's specified in S005 (daemon) and S008 (log-rotation
-  schedule)** — implementation detail, not further architectural decisions to make.
+- **Exact plist XML / systemd unit-file contents beyond what's specified in S005 (daemon) and S008
+  (log-rotation schedule)** — implementation detail, not further architectural decisions to make.
 - **`pnpm install` / dependency management** — ordinary dev workflow, not part of this spec.
+- **Package availability of the native deps (`sqlite-vec`, `@huggingface/transformers`/
+  `onnxruntime-node`) on Linux** — both already publish Linux x86_64/arm64 prebuilt binaries upstream;
+  nothing in this project's own code needs to account for that, so it isn't a design decision this spec
+  makes.
+- **Windows (including non-WSL) support** — not a target platform; `src/platform/index.js` throwing on
+  anything other than `darwin`/`linux` is deliberate, not a gap to fill later without a separate
+  decision to do so.

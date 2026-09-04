@@ -6,7 +6,9 @@ and how to verify it worked. The authoritative spec for this behavior is
 
 ## Prerequisites
 
-Runs on **macOS only (Apple Silicon)** — see [README](../README.md).
+Runs on **macOS or Linux**. `scripts/install.sh` detects which one it's running on and behaves
+accordingly — see [S009's Platform abstraction](specs/S009-config-and-install.md#platform-abstraction-fencing-not-branching)
+for exactly what differs.
 
 Required:
 
@@ -15,14 +17,30 @@ Required:
 
 Strongly recommended, checked by the installer (warns and continues if missing, doesn't block):
 
-- **[ripgrep](https://github.com/BurntSushi/ripgrep)** (`brew install ripgrep`) — powers `mnotes grep`.
-  Without it, every other command still works.
-- **fswatch** (`brew install fswatch`) — the indexing daemon's file-watching backend. Without it, the
-  daemon will crash-loop under `launchd`.
+- **[ripgrep](https://github.com/BurntSushi/ripgrep)** — powers `mnotes grep`. Without it, every other
+  command still works. Install via `brew install ripgrep` on macOS, or your distro's package manager on
+  Linux (`apt install ripgrep`, `dnf install ripgrep`, `pacman -S ripgrep` — all three are official
+  packages, no extra repo needed).
+- **fswatch** — the indexing daemon's file-watching backend. Without it, the daemon will crash-loop
+  under its service manager. Install via `brew install fswatch` on macOS, or your distro's package
+  manager on Linux (`apt install fswatch`, `pacman -S fswatch`; on **RHEL/CentOS/Rocky/AlmaLinux**
+  specifically, enable EPEL first — `dnf install epel-release fswatch` — it isn't in the base repos
+  there, though it is on plain Fedora).
+
+macOS-only:
+
 - **Xcode Command Line Tools** (`xcode-select --install`, gives you `clang`) — used to compile a small
   native launcher so the two background LaunchAgents show up in macOS's Background Task Management UI
   as "Moneta Notes" rather than "Node.js Foundation". Without it, install falls back to a plain shell
-  wrapper — everything still works, just with the generic Node identity.
+  wrapper — everything still works, just with the generic Node identity. This step doesn't exist on
+  Linux — systemd units carry their own identity, so there's nothing to fix.
+
+Linux-only:
+
+- If this machine should keep the daemon running **without an active login session** (a headless/
+  always-on box), enable lingering after install: `loginctl enable-linger $(whoami)`. Without it, a
+  `systemd --user` instance (and everything in it, including the daemon) stops when your last session
+  ends — the installer prints this as a reminder, but doesn't run it for you.
 
 Optional:
 
@@ -45,7 +63,8 @@ You'll be prompted for two paths, each with a sensible default (press Enter to a
 
 ```
 Vault path [~/Documents/Notes]:
-Index DB path [~/Library/Application Support/mnotes/index.db]:
+Index DB path [~/Library/Application Support/mnotes/index.db]:    # macOS
+Index DB path [~/.local/share/mnotes/index.db]:                    # Linux
 ```
 
 Both prompts support `~`-relative paths, relative paths, arrow-key editing, and Tab-completion.
@@ -53,43 +72,53 @@ Whatever you type is resolved to an absolute path before use.
 
 ## What the installer does
 
-In order:
+In order (macOS/Linux differences noted inline — see S009 for the exact per-OS mechanics):
 
-1. **Preflight checks** — warns (doesn't block) if `rg` or `fswatch` are missing.
+1. **Preflight checks** — warns (doesn't block) if `rg` or `fswatch` are missing, with the platform-
+   appropriate install hint from above.
 2. **Prompts** for vault path and DB path (above).
 3. **Writes `~/.config/mnotes/config.toml`** — but only if it doesn't already exist, and only if at
    least one answer differs from its suggested default. If you accept both defaults, **no file is
    written at all** — every value already has a built-in default in `src/config.js`, and the file only
-   ever contains genuinely-overridden keys. See [Configuration](configuration.md) for every tunable
-   that can go in this file (or [config.example.toml](../config.example.toml) for the same schema as a
-   copy-pasteable file). An existing `config.toml` (e.g. re-running install after an upgrade) is always
-   left untouched.
-4. **Creates `~/Library/Application Support/mnotes/`** — holds the SQLite index (`index.db`, schema
-   created by the daemon on first run, not by this script) and the daemon's Unix socket
-   (`daemon.sock`).
-5. **Creates `~/Library/Logs/com.ajmichels.mnotes/`** — see [Process Management](process-management.md#logs)
-   for what lands here.
-6. **Builds a native launcher app bundle** (`MonetaNotes.app`) if `clang` is available, so the two
-   LaunchAgents below are correctly attributed in macOS's Background Task Management UI. Falls back to
-   a plain wrapper script if not.
-7. **Writes both LaunchAgent property lists** to `~/Library/LaunchAgents/`:
-   `com.ajmichels.mnotes.plist` (the indexing daemon) and `com.ajmichels.mnotes.logrotate.plist` (log
-   rotation, runs on a schedule — see [S008](specs/S008-logging.md)).
-8. **Bootstraps both launchd jobs** (`launchctl bootstrap gui/<uid> <plist>`) — both start running
-   immediately.
+   ever contains genuinely-overridden keys. Identical on both OSes. See [Configuration](configuration.md)
+   for every tunable that can go in this file (or [config.example.toml](../config.example.toml) for the
+   same schema as a copy-pasteable file). An existing `config.toml` (e.g. re-running install after an
+   upgrade) is always left untouched.
+4. **Creates the app-support directory** — `~/Library/Application Support/mnotes/` on macOS,
+   `~/.local/share/mnotes/` on Linux (respects `$XDG_DATA_HOME` if set). Holds the SQLite index
+   (`index.db`, schema created by the daemon on first run, not by this script) and the daemon's Unix
+   socket (`daemon.sock`).
+5. **Creates the logs directory** — `~/Library/Logs/com.ajmichels.mnotes/` on macOS,
+   `~/.local/state/mnotes/log/` on Linux (respects `$XDG_STATE_HOME`) — see
+   [Process Management](process-management.md#logs) for what lands here.
+6. **Prepares the launch executable**: on macOS, builds a native launcher app bundle
+   (`MonetaNotes.app`) if `clang` is available, so the two LaunchAgents below are correctly attributed
+   in macOS's Background Task Management UI — falls back to a plain wrapper script if not. On Linux,
+   this is a no-op — the daemon is launched via `node` directly, no bundle/signing concept applies.
+7. **Writes the service definition file(s)**: macOS gets two LaunchAgent property lists in
+   `~/Library/LaunchAgents/` (`com.ajmichels.mnotes.plist` for the indexing daemon,
+   `com.ajmichels.mnotes.logrotate.plist` for log rotation). Linux gets three systemd user units in
+   `~/.config/systemd/user/` (`mnotes.service`, `mnotes-logrotate.service`, `mnotes-logrotate.timer` —
+   systemd splits "what runs" from "when," unlike a single plist), followed by
+   `systemctl --user daemon-reload`.
+8. **Activates both services**: macOS runs `launchctl bootstrap gui/<uid> <plist>` for both plists.
+   Linux runs `systemctl --user enable --now` for `mnotes.service` and `mnotes-logrotate.timer` — both
+   start running immediately either way.
 9. **Pre-downloads the embedding model** (`Qwen3-Embedding-0.6B`, quantized) — a one-time download via
    `@huggingface/transformers`, printed as "downloading embedding model, this may take a minute...".
    Doing this at install time means the first real note write doesn't stall on a surprise multi-minute
-   download mid-index.
+   download mid-index. Identical on both OSes.
 10. **Links the CLI onto `PATH`** via `pnpm link --global` — this is what makes `mnotes`, `mnotes-mcp`,
     and `mnotes-indexer` (the three `bin` entries in `package.json`) resolve as commands. Warns and
     continues on failure (a stale/mismatched global pnpm store is a real, observed failure mode) rather
     than aborting the rest of install.
 11. **Registers the MCP server with Claude Code**: `claude mcp add mnotes -s user -- ...`, only if
     `claude` is on `PATH` and not already registered. `-s user` scope means it's available in every
-    Claude Code session on this machine, not just one project directory.
+    Claude Code session on this machine, not just one project directory. Identical on both OSes.
 
 ## Verifying the install
+
+macOS:
 
 ```sh
 mnotes stats          # note/tag counts, daemon status, queue depth
@@ -97,6 +126,16 @@ launchctl print gui/$(id -u)/com.ajmichels.mnotes             # confirm the daem
 launchctl print gui/$(id -u)/com.ajmichels.mnotes.logrotate    # confirm log rotation is loaded
 tail -f ~/Library/Logs/com.ajmichels.mnotes/indexer.log        # watch the daemon's first indexing pass
 claude mcp list        # confirm "mnotes" is registered, if you use Claude Code
+```
+
+Linux:
+
+```sh
+mnotes stats                                  # note/tag counts, daemon status, queue depth
+systemctl --user status mnotes.service        # confirm the daemon is running
+systemctl --user list-timers mnotes-logrotate.timer   # confirm log rotation is scheduled
+tail -f ~/.local/state/mnotes/log/indexer.log # watch the daemon's first indexing pass
+claude mcp list                               # confirm "mnotes" is registered, if you use Claude Code
 ```
 
 `mnotes stats` reporting `daemon running: false` right after install usually means the model download

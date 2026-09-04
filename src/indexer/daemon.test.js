@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, utimesSync, readFileSync, mkdirSync } from 'node:fs';
-import { tmpdir, homedir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createConnection } from 'node:net';
 import { openDb, getMeta } from '../core/db.js';
@@ -10,6 +10,7 @@ import {
     watermarkCatchup, existenceCheck, createDebouncer, assertFswatchAvailable, spawnFswatch, runReindex,
     createIpcServer, defaultSocketPath, startDaemon, createSerialGate, isDotPath,
 } from './daemon.js';
+import { appSupportDir } from '../platform/index.js';
 import { cleanupTempDir } from '../../vitest.helpers.js';
 
 const tempDirs = [];
@@ -784,10 +785,8 @@ describe('runReindex: records last_full_reindex_at on a full-vault run', () => {
 });
 
 describe('defaultSocketPath', () => {
-    it('points at ~/Library/Application Support/mnotes/daemon.sock', () => {
-        expect(defaultSocketPath()).toBe(
-            join(homedir(), 'Library', 'Application Support', 'mnotes', 'daemon.sock'),
-        );
+    it('points at daemon.sock under the platform module\'s app-support directory (S009)', () => {
+        expect(defaultSocketPath()).toBe(join(appSupportDir(), 'daemon.sock'));
     });
 });
 

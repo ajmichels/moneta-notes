@@ -15,8 +15,8 @@ The CLI and MCP server are thin wrappers around one shared `core` library. Neith
 search, hashing, or file I/O logic itself — that guarantees the two surfaces can never drift out of
 sync.
 
-Runs on macOS only (Apple Silicon), on either a personal or work machine, never both at once. Each
-machine gets its own vault, its own index, and its own config.
+Runs on macOS or Linux, on either a personal or work machine, never both at once. Each machine gets its
+own vault, its own index, and its own config.
 
 This file is a maintainer-facing overview — architecture, tech stack, dev conventions. **Detailed,
 binding functional specs live in `docs/specs/`** and are the actual source of truth for what this
@@ -47,10 +47,10 @@ languages. The reminding/advising sense is the one that gave this project its na
 
 ## Prerequisites
 
-Runs on **macOS only (Apple Silicon)**. Required: Node.js, pnpm. Strongly recommended: ripgrep,
-fswatch, Xcode Command Line Tools. Optional: the Claude Code CLI, for automatic MCP registration.
-See [Installation](docs/installation.md#prerequisites) for what each is for and what happens if
-it's missing.
+Runs on **macOS or Linux**. Required: Node.js, pnpm. Strongly recommended: ripgrep, fswatch (on macOS,
+also Xcode Command Line Tools). Optional: the Claude Code CLI, for automatic MCP registration.
+See [Installation](docs/installation.md#prerequisites) for what each is for, what's macOS-only, and
+what happens if something's missing.
 
 ---
 
