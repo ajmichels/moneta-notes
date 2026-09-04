@@ -1,0 +1,8 @@
+packageImportMethod: copy
+overrides:
+  sharp: npm:noop-package@1.0.0
+allowBuilds:
+  onnxruntime-node: true
+  protobufjs: true
+minimumReleaseAgeExclude:
+  - eslint@10.10.0

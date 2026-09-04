@@ -88,7 +88,8 @@ messaging differs (see Install below), which is a `scripts/lib/os-*.sh` concern,
 ```
 scripts/lib/common.sh    — OS-agnostic steps and helpers: resolve_path, escape_toml_string, the
                             vault_path/db_path prompts, config.toml writing, embedding-model
-                            pre-download, pnpm link/unlink, Claude Code MCP registration/deregistration.
+                            pre-download, pnpm global add/uninstall, Claude Code MCP
+                            registration/deregistration.
                             Sourced by scripts/install.sh and scripts/uninstall.sh directly.
 scripts/lib/os-macos.sh   — macOS implementation of the contract below.
 scripts/lib/os-linux.sh   — Linux implementation of the contract below.
@@ -294,14 +295,16 @@ step, not part of this script). Steps, in order:
    step, with a visible "downloading embedding model, this may take a minute..." message — so the
    first real note write after install doesn't stall on a surprise multi-minute download in the middle
    of the daemon's first indexing pass.
-10. **Link the CLI onto `PATH`**: `pnpm link --global` (run against the repo root) — this is what
-    actually makes `package.json`'s `bin` entries (`mnotes`, `mnotes-mcp`, `mnotes-indexer`) resolve
-    as commands; a plain local `pnpm install` (this script's own prerequisite, per the top of this
-    section) never puts a package's own `bin` entries on `PATH` on its own, only `pnpm link --global`
-    or an actual global install does. If the command fails (e.g. a stale/mismatched global pnpm store
-    on this machine — a real, observed failure mode, unrelated to anything this script controls), print
-    a warning with the exact command to retry by hand and continue (same "warn and continue" posture as
-    step 1's `rg` check) rather than aborting the rest of install over it.
+10. **Link the CLI onto `PATH`**: `pnpm add --global <repo root>` — this is what actually makes
+    `package.json`'s `bin` entries (`mnotes`, `mnotes-mcp`, `mnotes-indexer`) resolve as commands; a
+    plain local `pnpm install` (this script's own prerequisite, per the top of this section) never puts
+    a package's own `bin` entries on `PATH` on its own, only this or an actual global install does.
+    (pnpm 11 removed `pnpm link --global`, which this used to be — `pnpm add --global <path>` is the
+    documented replacement and behaves the same way for this use case.) If the command fails (e.g. a
+    stale/mismatched global pnpm store on this machine, or a missing `PNPM_HOME` on a distro-packaged
+    pnpm that never ran `pnpm setup` — both real, observed failure modes, unrelated to anything this
+    script controls), print a warning with the exact command to retry by hand and continue (same "warn
+    and continue" posture as step 1's `rg` check) rather than aborting the rest of install over it.
 11. **Register the MCP server with Claude Code**: `which claude` — if missing, print a clear warning
     (the same "warn and continue" posture as step 1's `rg` check — Claude Desktop users or anyone
     registering the server by hand don't need the CLI present) naming the manual `claude mcp add`

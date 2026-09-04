@@ -113,11 +113,13 @@ import('$REPO_ROOT/src/indexer/embed.js').then((m) => m.embed('warm-up')).then((
 "
 
 # --- Step 10: link the mnotes CLI onto PATH via pnpm ---------------------------
+#
+# `pnpm link --global` was removed in pnpm 11; `pnpm add --global <path>` is the replacement.
 
-if pnpm link --global -C "$REPO_ROOT"; then
+if pnpm add --global "$REPO_ROOT"; then
     echo "Linked mnotes/mnotes-mcp/mnotes-indexer onto PATH via pnpm."
 else
-    echo "WARNING: \`pnpm link --global\` failed — mnotes/mnotes-mcp/mnotes-indexer will not be on PATH. Retry manually with \`pnpm link --global -C $REPO_ROOT\` once resolved."
+    echo "WARNING: \`pnpm add --global $REPO_ROOT\` failed — mnotes/mnotes-mcp/mnotes-indexer will not be on PATH. Retry manually with \`pnpm add --global $REPO_ROOT\` once resolved."
 fi
 
 # --- Step 11: register the MCP server with Claude Code -------------------------

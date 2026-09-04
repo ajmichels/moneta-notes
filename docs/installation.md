@@ -13,7 +13,14 @@ for exactly what differs.
 Required:
 
 - **Node.js** — the runtime everything executes under.
-- **pnpm** — dependency install and the global `pnpm link` step that puts `mnotes` on `PATH`.
+- **pnpm 11+** — dependency install and the global `pnpm add --global` step that puts `mnotes` on
+  `PATH`. The pinned version lives in `package.json`'s `packageManager` field; if you have
+  [Corepack](https://nodejs.org/api/corepack.html) enabled (`corepack enable`), it'll transparently
+  fetch and run that exact version for you. If pnpm came from your distro's package manager (Arch's
+  `pnpm` package, Debian/Ubuntu's, etc.) rather than Corepack or the official installer, it may not
+  have a global bin directory configured — run `pnpm setup` once and restart your shell (or open a
+  new one) so `PNPM_HOME` is on `PATH` before running `install.sh`, otherwise step 10 below
+  (`pnpm add --global`) will succeed but leave `mnotes` unreachable.
 
 Strongly recommended, checked by the installer (warns and continues if missing, doesn't block):
 
@@ -108,10 +115,11 @@ In order (macOS/Linux differences noted inline — see S009 for the exact per-OS
    `@huggingface/transformers`, printed as "downloading embedding model, this may take a minute...".
    Doing this at install time means the first real note write doesn't stall on a surprise multi-minute
    download mid-index. Identical on both OSes.
-10. **Links the CLI onto `PATH`** via `pnpm link --global` — this is what makes `mnotes`, `mnotes-mcp`,
-    and `mnotes-indexer` (the three `bin` entries in `package.json`) resolve as commands. Warns and
-    continues on failure (a stale/mismatched global pnpm store is a real, observed failure mode) rather
-    than aborting the rest of install.
+10. **Links the CLI onto `PATH`** via `pnpm add --global` — this is what makes `mnotes`, `mnotes-mcp`,
+    and `mnotes-indexer` (the three `bin` entries in `package.json`) resolve as commands. (pnpm 11
+    removed `pnpm link --global`; `pnpm add --global <path>` is its replacement.) Warns and continues
+    on failure (a stale/mismatched global pnpm store, or a missing `PNPM_HOME` — see Prerequisites
+    above — are real, observed failure modes) rather than aborting the rest of install.
 11. **Registers the MCP server with Claude Code**: `claude mcp add mnotes -s user -- ...`, only if
     `claude` is on `PATH` and not already registered. `-s user` scope means it's available in every
     Claude Code session on this machine, not just one project directory. Identical on both OSes.

@@ -30,8 +30,8 @@
     "@commitlint/cli": "^21.2.2",
     "@commitlint/config-conventional": "^21.2.2",
     "@eslint/js": "^10.0.1",
-    "eslint": "^10.9.1",
-    "globals": "^17.11.0",
+    "eslint": "^10.10.0",
+    "globals": "^17.12.0",
     "husky": "^9.1.7",
     "jest-extended": "^7.0.0",
     "vitest": "^4.1.11"
@@ -45,14 +45,10 @@
     "ml-kmeans": "^7.0.1",
     "ml-pca": "^4.1.1",
     "pdf-lib": "^1.17.1",
-    "smol-toml": "^1",
+    "smol-toml": "^1.8.0",
     "sqlite-vec": "^0.1.9",
     "umap-js": "^1.4.0",
     "zod": "^4.5.4"
   },
-  "pnpm": {
-    "overrides": {
-      "sharp": "npm:noop-package@1.0.0"
-    }
-  }
+  "packageManager": "pnpm@11.25.0+sha512.5cde925b4f075f725eb71fbae18a42ffe784524789f19b61c731cb8721ec28aaee160e01a8d5af4fedb2a42cdbf300efe23db356b0d4a17b4d63e11f8ab7c956"
 }
