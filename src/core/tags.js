@@ -1,6 +1,6 @@
 import { stripMdExtension, stripCodeRegions } from './note-fs.js';
 
-const INLINE_TAG_PATTERN = /(^|[^\p{L}\p{N}_])#([\p{L}\p{N}_/-]+)/gmu;
+const INLINE_TAG_PATTERN = /(?<=^|[^\p{L}\p{N}_])#([\p{L}\p{N}_/-]+)/gmu;
 
 export function extractTags(body, metadata = {}) {
     const seen = new Map();
@@ -22,8 +22,8 @@ function inlineTags(body) {
     const stripped = stripCodeRegions(body);
     const tags = [];
     for (const match of stripped.matchAll(INLINE_TAG_PATTERN)) {
-        const tag = match[2];
-        if (/^\d+$/.test(tag)) {
+        const tag = match[1];
+        if (/^\d+$/.test(tag) || tag.startsWith('/')) {
             continue;
         }
         tags.push(tag);

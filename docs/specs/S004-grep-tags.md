@@ -83,13 +83,34 @@ Tags come from two sources per note, merged into one set with no source distinct
    [Obsidian's own tag rules](https://help.obsidian.md/tags) exactly, since these are Obsidian vault
    notes):
    - A `#` starts a candidate tag only if it's at the start of a line or preceded by whitespace/a
-     non-word character (never mid-word, and never a URL fragment like
-     `https://example.com/page#section` — the `#` there is preceded by a word character).
+     non-word character — never mid-word. A URL fragment like `https://example.com/page#section` is
+     safe for this reason alone (the `#` is preceded by the word character `e`), **not** because the
+     scan is URL-aware: `https://example.com/#section` has no protection (the `#` is preceded by `/`,
+     a non-word character) and is extracted as tag `section`. This matches a known, unfixed Obsidian
+     bug (bare URLs with a `#` right after `/` render as a tag there too) — extraction is not made
+     smarter than Obsidian here, per the "match Obsidian exactly" rule above.
+   - This boundary check is a **zero-width lookbehind**, not a consuming capture group — it must not
+     itself consume the separator character between two adjacent tags. `#foo/#bar/#baz` has to yield
+     three tags (`foo/`, `bar/`, `baz`); a consuming-group implementation eats the `/` before each
+     interior `#` as "part of the previous match," leaving no boundary character available for the
+     next `#` and silently dropping every other tag in the run.
    - Valid tag characters after the `#`: Unicode letters (any script), digits, `_`, `-`, and `/` (for
      nesting, e.g. `#project/api-migration`). The tag ends at the first character outside this set
      (typically whitespace or punctuation).
    - The tag must contain **at least one non-numeric character** — `#1984` is not a valid tag (matches
      Obsidian's own rule), `#y1984` is.
+   - A tag **starting with `/`** is rejected — Obsidian does not support nested tags beginning with a
+     slash (confirmed unsupported by Obsidian's own developers).
+   - A trailing or doubled `/` (e.g. `#5/`, `#foo//bar`) is **not** special-cased and is extracted
+     as-is. This looks like junk when it comes from adjacent prose issue references (`#5/#6/#7`
+     produces tags `5/` and `6/` — the trailing `#7` has no `/` of its own, so it stays a bare
+     numeric ref and is rejected by the rule above), but Obsidian itself parses that same text into
+     the same trailing-slash tags — extraction mirrors Obsidian's actual (if odd-looking) behavior
+     rather than guessing at author intent. A note author who means a literal issue reference, not a
+     tag, can either add whitespace around the `/` (`#5 / #6 / #7` — each `#N` then ends at the
+     space, leaving a bare numeric ref that the non-numeric-character rule above already rejects) or
+     escape the `#` with a backslash (`\#5`), Obsidian's own escape syntax for suppressing
+     tag/heading interpretation.
    - Matches inside fenced code blocks (` ``` `) and inline code spans (`` ` ``) are excluded, to
      avoid false positives from shell shebangs (`#!/bin/bash`), CSS hex colors (`#3498db`), or
      comments referencing issue numbers — none of these are tags, and a code-aware personal-notes

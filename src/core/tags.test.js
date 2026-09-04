@@ -42,9 +42,14 @@ describe('extractTags: inline hashtags', () => {
         expect(tags).toEqual([ 'project/api-migration' ]);
     });
 
-    it('does not extract a mid-word # or a URL fragment', () => {
+    it('does not extract a mid-word # or a URL fragment preceded by a word character', () => {
         const tags = extractTags('see foo#bar and https://example.com/page#section', {});
         expect(tags).toEqual([]);
+    });
+
+    it('extracts a URL fragment preceded by a slash, matching a known unfixed Obsidian bug', () => {
+        const tags = extractTags('see https://example.com/#section for context', {});
+        expect(tags).toEqual([ 'section' ]);
     });
 
     it('merges frontmatter and inline sources, frontmatter casing wins on conflict', () => {
@@ -60,6 +65,53 @@ describe('extractTags: numeric-only tags are invalid', () => {
 
     it('accepts a tag with at least one non-numeric character', () => {
         expect(extractTags('see #y1984 for context', {})).toEqual([ 'y1984' ]);
+    });
+});
+
+describe('extractTags: leading-slash tags are invalid', () => {
+    it('rejects a tag with a leading slash, matching Obsidian (unsupported nested-tag form)', () => {
+        expect(extractTags('see #/foo for context', {})).toEqual([]);
+    });
+});
+
+describe('extractTags: the tag-start boundary check does not consume a character', () => {
+    // The scan uses a zero-width lookbehind for "start of line or non-word character" rather than a
+    // consuming capture group. A consuming group would eat the single separator character between
+    // two adjacent tags (e.g. the "/" in "#foo/#bar"), leaving no boundary character available for
+    // the next "#" and silently dropping it from the results.
+    it('does not drop the middle tag in a run of slash-separated adjacent hashtags', () => {
+        const tags = extractTags('#foo/#bar/#baz', {});
+        expect(tags).toEqual([ 'foo/', 'bar/', 'baz' ]);
+    });
+});
+
+describe('extractTags: slash-adjacent issue references match Obsidian, not "junk" filtering', () => {
+    // Obsidian itself parses adjacent prose issue refs like "#2/#3/#7" into real (if odd-looking)
+    // trailing-slash tags, and a slash immediately followed by prose text into a real compound tag
+    // — it does not special-case or reject either shape. Extraction mirrors that exactly rather
+    // than guessing at "junk"; `\#` is the documented Obsidian escape for a literal issue ref.
+    it('extracts a trailing-slash tag from each adjacent issue ref, #2/#3/#7', () => {
+        const tags = extractTags('Settled across #2/#3/#7 in the end.', {});
+        expect(tags).toEqual([ '2/', '3/' ]);
+    });
+
+    it('extracts a doubled-slash tag as-is', () => {
+        expect(extractTags('see #foo//bar for context', {})).toEqual([ 'foo//bar' ]);
+    });
+
+    it('extracts a slash immediately followed by prose as one compound tag', () => {
+        const tags = extractTags('Settled across #6/the research-findings note.', {});
+        expect(tags).toEqual([ '6/the' ]);
+    });
+
+    it('still accepts a normal nested tag with no empty segment', () => {
+        const tags = extractTags('working on #project/api-migration today', {});
+        expect(tags).toEqual([ 'project/api-migration' ]);
+    });
+
+    it('treats spaced-out issue refs as bare numeric tags, already rejected', () => {
+        const tags = extractTags('Settled across #5 / #6 / #7 in the end.', {});
+        expect(tags).toEqual([]);
     });
 });
 
