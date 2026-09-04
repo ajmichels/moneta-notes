@@ -116,6 +116,12 @@ Tags come from two sources per note, merged into one set with no source distinct
      comments referencing issue numbers — none of these are tags, and a code-aware personal-notes
      vault will hit these regularly enough that skipping code regions is worth the extra scan logic.
 
+**Changing these rules requires bumping `EXTRACTION_VERSION`** (`indexer/daemon.js`, S005) — a
+parsing-logic fix here doesn't touch any note's file content, so `mnotes reindex` would otherwise
+skip every already-indexed note (unchanged `content_hash`) and the old, wrong tags would stick around
+forever. Bumping the constant is what makes a plain `mnotes reindex` reach them, exactly like bumping
+`embed.js`'s embedding version already does for the embedding pipeline.
+
 ### Storage
 
 Per S001, `tags.name` is `COLLATE NOCASE` — case-insensitive uniqueness, first-seen casing preserved.
@@ -123,6 +129,13 @@ Extraction upserts via `INSERT INTO tags (name) VALUES (?) ON CONFLICT(name) DO 
 `NOCASE` collation makes this conflict check case-insensitive), then looks up the row's actual stored
 `id`/`name` for the `note_tags` join — so a tag first seen as `#Project` stays `Project` even after a
 later note uses `#project`.
+
+`syncNoteTags` prunes orphaned `tags` rows (`pruneOrphanedTags`) after every resync — nothing else
+ever deletes from `tags`, so without this a tag's row would outlive every note referencing it,
+inflating `mnotes stats`' `tag_count` forever (`tag_list`/`tag_notes` already filter these out via
+their join to `note_tags`, so only `stats`' raw `COUNT(*)` was ever affected). `deleteNoteByPath`
+(`indexer/daemon.js`) calls the same prune directly, since deleting a note cascades its `note_tags`
+rows via FK without going through `syncNoteTags`.
 
 ### `tag_list`
 

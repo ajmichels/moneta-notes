@@ -8,7 +8,7 @@ import { getLogger, runWithLogger } from '../logger.js';
 import {
     enqueuePath, dequeueNextPath, processPath, deleteNoteByPath, recordFailure, drainQueueOnce,
     watermarkCatchup, existenceCheck, createDebouncer, assertFswatchAvailable, spawnFswatch, runReindex,
-    createIpcServer, defaultSocketPath, startDaemon, createSerialGate, isDotPath,
+    createIpcServer, defaultSocketPath, startDaemon, createSerialGate, isDotPath, EXTRACTION_VERSION,
 } from './daemon.js';
 import { appSupportDir } from '../platform/index.js';
 import { cleanupTempDir } from '../../vitest.helpers.js';
@@ -101,9 +101,10 @@ describe('processPath: skip-unchanged', () => {
         const vaultRoot = makeTempVault();
         writeNote(vaultRoot, 'A.md', 'body text', 1000);
         const db = makeTestDb();
-        db.prepare(
-            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
-        ).run('A.md', 'irrelevant-hash', 1, 1000, 1000);
+        db.prepare(`
+            INSERT INTO notes (path, content_hash, line_count, mtime, updated_at, extraction_version)
+            VALUES (?, ?, ?, ?, ?, ?)
+        `).run('A.md', 'irrelevant-hash', 1, 1000, 1000, EXTRACTION_VERSION);
 
         const result = await processPath(vaultRoot, db, 'A.md', baseDeps());
 
@@ -142,6 +143,37 @@ describe('processPath: skip-unchanged', () => {
         const chunkRow = db.prepare('SELECT embedding_version FROM chunks WHERE note_id = ?').get(note.id);
         expect(chunkRow.embedding_version).toBe('v2');
     });
+
+    it('reindexes an mtime-unchanged note when its extraction_version is stale', async () => {
+        const vaultRoot = makeTempVault();
+        const db = makeTestDb();
+        writeNote(vaultRoot, 'A.md', 'body text', 1000);
+        await processPath(vaultRoot, db, 'A.md', baseDeps());
+        db.prepare('UPDATE notes SET extraction_version = 0 WHERE path = ?').run('A.md');
+
+        const result = await processPath(vaultRoot, db, 'A.md', baseDeps());
+
+        expect(result).toEqual({ status: 'reindexed' });
+        const note = db.prepare('SELECT extraction_version FROM notes WHERE path = ?').get('A.md');
+        expect(note.extraction_version).toBe(EXTRACTION_VERSION);
+    });
+
+    it('reindexes a hash-unchanged note when its extraction_version is stale', async () => {
+        const vaultRoot = makeTempVault();
+        const db = makeTestDb();
+        writeNote(vaultRoot, 'A.md', 'body text', 1000);
+        await processPath(vaultRoot, db, 'A.md', baseDeps());
+        db.prepare('UPDATE notes SET extraction_version = 0 WHERE path = ?').run('A.md');
+        // Newer mtime with byte-identical content reaches the content_hash skip point (not the
+        // earlier mtime one) — this is the "editor rewrote identical bytes" path.
+        writeNote(vaultRoot, 'A.md', 'body text', 2000);
+
+        const result = await processPath(vaultRoot, db, 'A.md', baseDeps());
+
+        expect(result).toEqual({ status: 'reindexed' });
+        const note = db.prepare('SELECT extraction_version FROM notes WHERE path = ?').get('A.md');
+        expect(note.extraction_version).toBe(EXTRACTION_VERSION);
+    });
 });
 
 describe('processPath: content changed', () => {
@@ -151,9 +183,10 @@ describe('processPath: content changed', () => {
         writeNote(vaultRoot, 'A.md', 'stable body', 1000);
         const raw = 'stable body';
         const { hashContent } = await import('../core/notes.js');
-        db.prepare(
-            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
-        ).run('A.md', hashContent(raw), 1, 500, 500);
+        db.prepare(`
+            INSERT INTO notes (path, content_hash, line_count, mtime, updated_at, extraction_version)
+            VALUES (?, ?, ?, ?, ?, ?)
+        `).run('A.md', hashContent(raw), 1, 500, 500, EXTRACTION_VERSION);
         utimesSync(join(vaultRoot, 'A.md'), 2000, 2000);
 
         const result = await processPath(vaultRoot, db, 'A.md', baseDeps());
@@ -177,6 +210,7 @@ describe('processPath: content changed', () => {
 
         const note = db.prepare('SELECT * FROM notes WHERE path = ?').get('New Note.md');
         expect(note.mtime).toBe(1000);
+        expect(note.extraction_version).toBe(EXTRACTION_VERSION);
 
         const chunkRows = db.prepare('SELECT * FROM chunks WHERE note_id = ?').all(note.id);
         expect(chunkRows).toHaveLength(1);
@@ -373,6 +407,32 @@ describe('deleteNoteByPath', () => {
         expect(db.prepare("SELECT rowid FROM notes_fts WHERE notes_fts MATCH 'project'").get()).toBeUndefined();
         expect(db.prepare('SELECT * FROM note_tags WHERE note_id = ?').all(note.id)).toHaveLength(0);
         expect(db.prepare('SELECT * FROM note_links WHERE source_note_id = ?').all(note.id)).toHaveLength(0);
+    });
+
+    it('removes an orphaned tags row when deleting the last note that carried it (fixes #1)', async () => {
+        const vaultRoot = makeTempVault();
+        const db = makeTestDb();
+        writeNote(vaultRoot, 'Solo.md', '#onlyhere note body', 1000);
+        await processPath(vaultRoot, db, 'Solo.md', baseDeps());
+
+        deleteNoteByPath(db, 'Solo.md');
+
+        const tagNames = db.prepare('SELECT name FROM tags').all().map((r) => r.name);
+        expect(tagNames).toEqual([]);
+    });
+
+    it('leaves a still-referenced tag alone when deleting one of several notes carrying it', async () => {
+        const vaultRoot = makeTempVault();
+        const db = makeTestDb();
+        writeNote(vaultRoot, 'One.md', '#shared note body', 1000);
+        writeNote(vaultRoot, 'Two.md', '#shared other body', 1000);
+        await processPath(vaultRoot, db, 'One.md', baseDeps());
+        await processPath(vaultRoot, db, 'Two.md', baseDeps());
+
+        deleteNoteByPath(db, 'One.md');
+
+        const tagNames = db.prepare('SELECT name FROM tags').all().map((r) => r.name);
+        expect(tagNames).toEqual([ 'shared' ]);
     });
 
     it('is a safe no-op for a path with no matching notes row', () => {

@@ -196,6 +196,32 @@ describe('syncNoteTags', () => {
         expect(linkCount).toBe(1);
         db.close();
     });
+
+    it('deletes a tag row once its last note reference is resynced away (fixes #1)', () => {
+        const db = makeTestDb();
+        const noteId = insertTestNote(db, 'Test.md');
+
+        syncNoteTags(db, noteId, [ 'old-tag' ]);
+        syncNoteTags(db, noteId, [ 'new-tag' ]);
+
+        const tagNames = db.prepare('SELECT name FROM tags').all().map(r => r.name);
+        expect(tagNames).toEqual([ 'new-tag' ]);
+        db.close();
+    });
+
+    it('leaves a tag row alone while at least one other note still references it', () => {
+        const db = makeTestDb();
+        const noteA = insertTestNote(db, 'A.md');
+        const noteB = insertTestNote(db, 'B.md');
+
+        syncNoteTags(db, noteA, [ 'shared' ]);
+        syncNoteTags(db, noteB, [ 'shared' ]);
+        syncNoteTags(db, noteA, []);
+
+        const tagNames = db.prepare('SELECT name FROM tags').all().map(r => r.name);
+        expect(tagNames).toEqual([ 'shared' ]);
+        db.close();
+    });
 });
 
 describe('tagList', () => {

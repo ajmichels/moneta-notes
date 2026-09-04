@@ -7,7 +7,7 @@ import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { noteRead } from '../core/notes.js';
 import { stripMdExtension } from '../core/note-fs.js';
-import { extractTags, syncNoteTags } from '../core/tags.js';
+import { extractTags, syncNoteTags, pruneOrphanedTags } from '../core/tags.js';
 import { extractLinkTargets, syncNoteLinks } from '../core/links.js';
 import { openDb, setMeta, enqueuePath } from '../core/db.js';
 import { getLogger, defaultLogDir, runWithLogger, getContextLogger } from '../logger.js';
@@ -43,16 +43,27 @@ function hasStaleChunks(db, noteId, embeddingModel, embeddingVersion) {
     return row.count > 0;
 }
 
+// EXTRACTION_VERSION is a plain code constant, not config-driven (unlike embeddingModel/
+// embeddingVersion) — extraction logic isn't a user-tunable, so bumping it is how a future
+// tag/link-extraction-logic fix (S004/S011) forces reprocessing of already-indexed notes via a
+// plain `mnotes reindex`, mirroring how embeddingVersion already does this for embeddings (S005).
+export const EXTRACTION_VERSION = 1;
+
+function isExtractionStale(existing) {
+    return existing.extraction_version !== EXTRACTION_VERSION;
+}
+
 function upsertNoteRow(db, path, contentHash, lineCount, mtime, updatedAt) {
     db.prepare(`
-        INSERT INTO notes (path, content_hash, line_count, mtime, updated_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO notes (path, content_hash, line_count, mtime, updated_at, extraction_version)
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(path) DO UPDATE SET
             content_hash = excluded.content_hash,
             line_count = excluded.line_count,
             mtime = excluded.mtime,
-            updated_at = excluded.updated_at
-    `).run(path, contentHash, lineCount, mtime, updatedAt);
+            updated_at = excluded.updated_at,
+            extraction_version = excluded.extraction_version
+    `).run(path, contentHash, lineCount, mtime, updatedAt, EXTRACTION_VERSION);
     return db.prepare('SELECT id FROM notes WHERE path = ?').get(path).id;
 }
 
@@ -171,6 +182,9 @@ export function deleteNoteByPath(db, path) {
     db.prepare('DELETE FROM notes_fts WHERE rowid = ?').run(note.id);
     // cascades chunks, note_tags, note_links (S001 FKs)
     db.prepare('DELETE FROM notes WHERE id = ?').run(note.id);
+    // The cascade above never goes through syncNoteTags, so a tag this note was the last carrier
+    // of would otherwise linger as a permanent orphan row (#1).
+    pruneOrphanedTags(db);
 }
 
 function statOrNull(absPath) {
@@ -233,9 +247,12 @@ export async function processPath(vaultRoot, db, path, deps) {
     }
 
     const currentMtime = Math.floor(stats.mtimeMs / 1000);
-    const existing = db.prepare('SELECT id, mtime, content_hash FROM notes WHERE path = ?').get(path);
+    const existing = db.prepare(
+        'SELECT id, mtime, content_hash, extraction_version FROM notes WHERE path = ?',
+    ).get(path);
     if (existing && existing.mtime === currentMtime
-        && !hasStaleChunks(db, existing.id, embeddingModel, embeddingVersion)) {
+        && !hasStaleChunks(db, existing.id, embeddingModel, embeddingVersion)
+        && !isExtractionStale(existing)) {
         getContextLogger().debug('skipping unchanged path', { note_title: title });
         return { status: 'unchanged' };
     }
@@ -247,7 +264,8 @@ export async function processPath(vaultRoot, db, path, deps) {
     }
 
     if (existing && existing.content_hash === read.content_hash
-        && !hasStaleChunks(db, existing.id, embeddingModel, embeddingVersion)) {
+        && !hasStaleChunks(db, existing.id, embeddingModel, embeddingVersion)
+        && !isExtractionStale(existing)) {
         db.prepare('UPDATE notes SET mtime = ?, updated_at = ? WHERE id = ?')
             .run(currentMtime, Math.floor(now / 1000), existing.id);
         getContextLogger().debug('skipping unchanged path', { note_title: title });

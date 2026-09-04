@@ -123,17 +123,23 @@ whose `next_attempt_at` is still in the future (backoff not yet elapsed).
 
 For each dequeued path:
 
-1. **Skip-unchanged check**: compare the file's current mtime to `notes.mtime`, **and** whether the
-   note's existing `chunks` all match the currently configured `embedding_model`/`embedding_version`
-   (`hasStaleChunks` in `indexer/daemon.js`). Only skips (removes from queue, done) if both hold — file
-   unchanged *and* chunks current. If the mtime changed, read the file and compute `content_hash`; if
-   that matches the stored hash (content genuinely unchanged, e.g. a `touch` or a save that rewrote
-   identical bytes) **and** chunks are current, update `notes.mtime` only and skip straight to done —
-   no re-chunking or re-embedding for unchanged, already-current content. A stale `embedding_model`/
-   `embedding_version` alone (file untouched) falls through to step 2 just like a real content change
-   — this is what makes bumping `embed.js`'s embedding version (e.g. after a pooling-strategy change)
-   an effective way to force a full re-embed via a plain `mnotes reindex`, with no separate migration
-   mechanism needed.
+1. **Skip-unchanged check**: compare the file's current mtime to `notes.mtime`, whether the note's
+   existing `chunks` all match the currently configured `embedding_model`/`embedding_version`
+   (`hasStaleChunks` in `indexer/daemon.js`), **and** whether `notes.extraction_version` matches the
+   code's `EXTRACTION_VERSION` constant (`isExtractionStale`, same file). Only skips (removes from
+   queue, done) if all three hold — file unchanged, chunks current, extraction current. If the mtime
+   changed, read the file and compute `content_hash`; if that matches the stored hash (content
+   genuinely unchanged, e.g. a `touch` or a save that rewrote identical bytes) **and** chunks/
+   extraction are current, update `notes.mtime` only and skip straight to done — no re-chunking,
+   re-embedding, or re-extraction for unchanged, already-current content. A stale `embedding_model`/
+   `embedding_version` or a stale `extraction_version` alone (file untouched either way) falls through
+   to step 2 just like a real content change — this is what makes bumping `embed.js`'s embedding
+   version (e.g. after a pooling-strategy change) an effective way to force a full re-embed, and
+   bumping `EXTRACTION_VERSION` (e.g. after a tag/link-extraction-logic fix, S004/S011) an effective
+   way to force re-extraction, both via a plain `mnotes reindex` with no separate migration mechanism
+   needed. `EXTRACTION_VERSION` must be bumped whenever inline-tag scanning (S004) or wikilink
+   extraction (S011) rules change, or already-indexed notes silently keep whatever tags/links the old
+   logic produced until their file content next changes.
 2. If the hash actually changed: re-chunk (see Chunking below), re-embed each chunk, extract tags
    (S004) and link targets (S011), and upsert everything per S001's idempotent-reindex procedure
    (`notes` upsert, delete+reinsert `chunks`/`chunk_vectors`/`notes_fts` row/`note_tags`/`note_links`).

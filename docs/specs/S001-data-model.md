@@ -82,6 +82,7 @@ One row per indexed note file.
 | `line_count`   | INTEGER | NOT NULL                  | Used directly in `file_line_count` tool output columns. |
 | `mtime`        | INTEGER | NOT NULL                  | File mtime (epoch seconds) at last index. Lets the daemon skip rehashing a file whose mtime hasn't changed. |
 | `updated_at`   | INTEGER | NOT NULL                  | Epoch seconds this row was last (re)written by the indexer. |
+| `extraction_version` | INTEGER | NOT NULL DEFAULT 0  | The `EXTRACTION_VERSION` (`indexer/daemon.js`) in effect the last time this note's tags/links were extracted. Checked the same way `chunks.embedding_version` is (S005) — a mismatch forces reprocessing on the next `mnotes reindex` even though the file's `content_hash` is unchanged, which is what makes a tag/link-extraction-logic fix (S004/S011) reach already-indexed notes without a schema rebuild. |
 
 **Title is never stored.** `core/note-fs.js` (S010) derives it from `path` (strip vault root prefix,
 strip `.md` extension) and derives `path` from a title the same way in reverse. This is a pure,
@@ -366,12 +367,17 @@ behaves identically, just without writing anywhere.
 
 Reindexing a single note (`mnotes reindex <title>` or a daemon-triggered re-index on file change) is:
 
-1. `INSERT INTO notes (...) VALUES (...) ON CONFLICT(path) DO UPDATE SET content_hash=excluded.content_hash, line_count=excluded.line_count, mtime=excluded.mtime, updated_at=excluded.updated_at`.
+1. `INSERT INTO notes (...) VALUES (...) ON CONFLICT(path) DO UPDATE SET content_hash=excluded.content_hash, line_count=excluded.line_count, mtime=excluded.mtime, updated_at=excluded.updated_at, extraction_version=excluded.extraction_version`.
 2. Delete all existing `chunks` rows for that `note_id` (cascades to `chunk_vectors` via the
    `chunks`/`chunk_vectors` 1:1 rowid relationship — deletion is explicit in application code since
    `vec0` doesn't support `ON DELETE CASCADE` from a regular foreign key).
 3. Delete and re-insert `notes_fts` row for that rowid.
-4. Delete and re-insert `note_tags` rows for that note.
+4. Delete and re-insert `note_tags` rows for that note, then delete any `tags` row left with no
+   remaining `note_tags` reference (`pruneOrphanedTags` in `core/tags.js`) — otherwise a tag this
+   note was the last carrier of would linger as a permanent orphan row, inflating `mnotes stats`'
+   `tag_count` forever (this was #1: a raw `SELECT COUNT(*) FROM tags` doesn't filter these out the
+   way `tagList`'s join does). `deleteNoteByPath`'s note-removal path prunes the same way, since it
+   never goes through this step.
 5. Delete and re-insert `note_links` rows for that note (S011).
 6. Re-chunk, re-embed, and insert fresh `chunks`/`chunk_vectors` rows.
 

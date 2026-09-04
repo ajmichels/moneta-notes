@@ -8,7 +8,7 @@ import { getContextLogger } from '../logger.js';
 // `meta.value` (TEXT affinity) would silently store a trailing '.0' unless explicitly
 // String()-ed — see getMeta/setMeta below, which apply that rule internally.
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 function createNotesTable(db) {
     db.exec(`
@@ -18,7 +18,8 @@ function createNotesTable(db) {
             content_hash TEXT NOT NULL,
             line_count INTEGER NOT NULL,
             mtime INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL
+            updated_at INTEGER NOT NULL,
+            extraction_version INTEGER NOT NULL DEFAULT 0
         )
     `);
 }

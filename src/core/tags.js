@@ -49,11 +49,21 @@ export function syncNoteTags(db, noteId, tagNames) {
     for (const tagId of tagIds) {
         insert.run(noteId, tagId);
     }
+
+    pruneOrphanedTags(db);
 }
 
 function upsertTag(db, name) {
     db.prepare('INSERT INTO tags (name) VALUES (?) ON CONFLICT(name) DO NOTHING').run(name);
     return db.prepare('SELECT id FROM tags WHERE name = ?').get(name).id;
+}
+
+// A tag row with no note_tags reference left is garbage — nothing else ever deletes from `tags`
+// (upsertTag only ever inserts). Called after every resync so `tags.name` count stays consistent
+// with tagList/tagNotes, which already filter to referenced tags via their JOIN (see #1: mnotes
+// stats previously counted these orphans since it does a raw `SELECT COUNT(*) FROM tags`).
+export function pruneOrphanedTags(db) {
+    db.prepare('DELETE FROM tags WHERE id NOT IN (SELECT DISTINCT tag_id FROM note_tags)').run();
 }
 
 export function tagList(db) {

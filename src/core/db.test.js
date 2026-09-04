@@ -71,6 +71,7 @@ describe('schema: notes table', () => {
         const row = db.prepare('SELECT * FROM notes WHERE path = ?').get('Weekly Notes/2026-W32.md');
         expect(row.content_hash).toBe('abc123');
         expect(row.line_count).toBe(42);
+        expect(row.extraction_version).toBe(0);
         db.close();
     });
 
