@@ -270,7 +270,12 @@ step, not part of this script). Steps, in order:
      `node` path are both already baked into whichever launch executable step 6 produced, rather than
      being separate array entries pointing at `node` directly.
    - **Linux**: three unit files from `systemd/` templates — `mnotes.service` (`ExecStart=<node bin>
-     --disable-warning=ExperimentalWarning <daemon.js path>`, `Restart=always`), `mnotes-logrotate.service`
+     --disable-warning=ExperimentalWarning <daemon.js path>`, `Restart=always`, `RestartSec=5` — without
+     an explicit `RestartSec=`, systemd's 100ms default burns through the default 5-starts-per-10s
+     `StartLimitBurst`/`StartLimitIntervalSec` in under a second whenever the daemon fails fast (e.g. no
+     `fswatch` on `PATH`), landing the unit in `failed (start-limit-hit)` — a state that refuses *any*
+     start, manual included, until `systemctl --user reset-failed`; spacing restarts 5s apart keeps it
+     under that limit indefinitely instead), `mnotes-logrotate.service`
      (`ExecStart=... <log-rotator.js path>`, no `Restart=` — it's meant to run once per trigger, not stay
      up), and `mnotes-logrotate.timer` (`OnCalendar=*-*-* 00,06,12,18:00:00`, `Persistent=true` — S008).
      All three go under `os_service_dir` (`${XDG_CONFIG_HOME:-~/.config}/systemd/user/`), followed by

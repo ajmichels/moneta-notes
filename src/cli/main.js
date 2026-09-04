@@ -241,6 +241,9 @@ async function runTagsNotes(args, deps) {
 
 export async function runTags(args, deps) {
     const [ sub, ...rest ] = args;
+    if (sub === undefined) {
+        return { stdout: '', stderr: 'mnotes: tags requires a subcommand (list|notes)\n', exitCode: 1 };
+    }
     if (sub === 'list') {
         return runTagsList(rest, deps);
     }
@@ -542,6 +545,9 @@ export async function runAttachmentWrite(args, deps) {
 
 export async function runAttachment(args, deps) {
     const [ sub, ...rest ] = args;
+    if (sub === undefined) {
+        return { stdout: '', stderr: 'mnotes: attachment requires a subcommand (read|write)\n', exitCode: 1 };
+    }
     if (sub === 'read') {
         return runAttachmentRead(rest, deps);
     }

@@ -327,6 +327,13 @@ describe('runTags', () => {
         expect(result.exitCode).toBe(1);
         expect(result.stderr).toMatch(/unknown tags subcommand "bogus"/);
     });
+
+    it('returns a helpful error when no subcommand is given, not literal "undefined"', async () => {
+        const result = await runTags([], {});
+        expect(result.exitCode).toBe(1);
+        expect(result.stderr).toMatch(/tags requires a subcommand \(list\|notes\)/);
+        expect(result.stderr).not.toMatch(/undefined/);
+    });
 });
 
 function writeRawNote(vaultRoot, relPath, raw) {
@@ -855,6 +862,13 @@ describe('runAttachment dispatcher', () => {
         const result = await runAttachment([ 'bogus' ], {});
         expect(result.exitCode).toBe(1);
         expect(result.stderr).toMatch(/unknown attachment subcommand "bogus"/);
+    });
+
+    it('returns a helpful error when no subcommand is given, not literal "undefined"', async () => {
+        const result = await runAttachment([], {});
+        expect(result.exitCode).toBe(1);
+        expect(result.stderr).toMatch(/attachment requires a subcommand \(read\|write\)/);
+        expect(result.stderr).not.toMatch(/undefined/);
     });
 });
 

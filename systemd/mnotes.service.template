@@ -5,6 +5,7 @@ Description=Moneta Notes indexing daemon
 ExecStart=__LAUNCH_EXECUTABLE__ --disable-warning=ExperimentalWarning __DAEMON_SCRIPT_PATH__
 Environment=PATH=__DAEMON_PATH_ENV__
 Restart=always
+RestartSec=5
 StandardOutput=append:__LOG_DIR__/daemon.stdout.log
 StandardError=append:__LOG_DIR__/daemon.stderr.log
 

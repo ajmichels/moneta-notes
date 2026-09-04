@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import matter from 'gray-matter';
 import { getContextLogger } from '../logger.js';
 import { titleToPath, pathToTitle, countLines, resolveTitle } from './note-fs.js';
+import { ripgrepInstallHint } from '../platform/index.js';
 
 const DEFAULT_LINE_MATCH_CAP = 10;
 
@@ -13,7 +14,7 @@ export function assertRipgrepAvailable(env = process.env) {
     } catch (error) {
         if (error.code === 'ENOENT') {
             getContextLogger().warn('ripgrep not found on PATH');
-            throw new Error('ripgrep not found — install via `brew install ripgrep`', { cause: error });
+            throw new Error(`ripgrep not found — install via \`${ripgrepInstallHint()}\``, { cause: error });
         }
         throw error;
     }

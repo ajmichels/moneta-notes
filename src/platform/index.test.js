@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolveImpl, appSupportDir, logDir, daemonServiceName } from './index.js';
+import { resolveImpl, appSupportDir, logDir, daemonServiceName, watcherInstallHint, ripgrepInstallHint } from './index.js';
 import * as darwin from './darwin.js';
 import * as linux from './linux.js';
 
@@ -27,5 +27,7 @@ describe('top-level re-exports', () => {
         expect(appSupportDir()).toBe(impl.appSupportDir());
         expect(logDir()).toBe(impl.logDir());
         expect(daemonServiceName()).toBe(impl.daemonServiceName());
+        expect(watcherInstallHint()).toBe(impl.watcherInstallHint());
+        expect(ripgrepInstallHint()).toBe(impl.ripgrepInstallHint());
     });
 });

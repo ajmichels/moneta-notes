@@ -217,7 +217,8 @@ the same state both times. See [Process Management](process-management.md) if th
 
 ### `mnotes daemon <start|stop|restart>`
 
-Controls the daemon process itself via `launchctl`, distinct from `reindex` above. Full detail in
+Controls the daemon process itself — `launchctl` on macOS, `systemctl --user` on Linux — distinct
+from `reindex` above. Full detail in
 [Process Management](process-management.md#mnotes-daemon-startstoprestart).
 
 ### `mnotes stats`

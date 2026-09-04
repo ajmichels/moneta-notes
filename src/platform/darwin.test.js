@@ -5,6 +5,7 @@ import {
     appSupportDir, logDir, daemonServiceName,
     startDaemonService, stopDaemonService, restartDaemonService,
     defaultPlistPath, defaultDomain, defaultServiceTarget, DAEMON_LABEL,
+    watcherInstallHint, ripgrepInstallHint,
 } from './darwin.js';
 
 function fakeExecFile(impl = async () => {}) {
@@ -21,6 +22,13 @@ describe('appSupportDir / logDir', () => {
 describe('daemonServiceName', () => {
     it('is the LaunchAgent label', () => {
         expect(daemonServiceName()).toBe(DAEMON_LABEL);
+    });
+});
+
+describe('watcherInstallHint / ripgrepInstallHint', () => {
+    it('point at Homebrew', () => {
+        expect(watcherInstallHint()).toBe('brew install fswatch');
+        expect(ripgrepInstallHint()).toBe('brew install ripgrep');
     });
 });
 

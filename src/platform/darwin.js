@@ -19,6 +19,14 @@ export function daemonServiceName() {
     return DAEMON_LABEL;
 }
 
+export function watcherInstallHint() {
+    return 'brew install fswatch';
+}
+
+export function ripgrepInstallHint() {
+    return 'brew install ripgrep';
+}
+
 export function defaultPlistPath() {
     return join(homedir(), 'Library', 'LaunchAgents', `${DAEMON_LABEL}.plist`);
 }

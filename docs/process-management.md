@@ -10,9 +10,9 @@ Two long-running background processes are installed per-user (no admin/sudo need
 | `com.ajmichels.mnotes` | `mnotes.service` | `src/indexer/daemon.js` | Watches the vault (`fswatch`), keeps the SQLite FTS5 + vector index in sync, serves the IPC socket (reindex requests, and query embedding for `search --mode=semantic\|hybrid` from both the CLI and the MCP server). |
 | `com.ajmichels.mnotes.logrotate` | `mnotes-logrotate.service` + `mnotes-logrotate.timer` | `src/log-rotator.js` | Rotates the three log files on a schedule (login/boot + four times daily). |
 
-Both keep the daemon running if it dies (`KeepAlive: true` on macOS, `Restart=always` on Linux) — a
-plain `kill`/signal just gets it relaunched, which is why stopping it requires the commands below, not
-a signal.
+Both keep the daemon running if it dies (`KeepAlive: true` on macOS, `Restart=always` + `RestartSec=5`
+on Linux) — a plain `kill`/signal just gets it relaunched, which is why stopping it requires the
+commands below, not a signal.
 
 ## `mnotes daemon <start|stop|restart>`
 

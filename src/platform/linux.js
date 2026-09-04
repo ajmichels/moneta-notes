@@ -21,6 +21,17 @@ export function daemonServiceName() {
     return DAEMON_SERVICE_NAME;
 }
 
+export function watcherInstallHint() {
+    return "install fswatch via your distro's package manager, e.g. apt install fswatch / "
+        + 'pacman -S fswatch; on RHEL/CentOS/Rocky/AlmaLinux enable EPEL first '
+        + '(dnf install epel-release fswatch)';
+}
+
+export function ripgrepInstallHint() {
+    return "install ripgrep via your distro's package manager, e.g. apt install ripgrep / "
+        + 'dnf install ripgrep / pacman -S ripgrep';
+}
+
 async function runSystemctl(args, execFileFn) {
     try {
         await execFileFn('systemctl', [ '--user', ...args ]);

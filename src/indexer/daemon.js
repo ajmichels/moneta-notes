@@ -12,7 +12,7 @@ import { extractLinkTargets, syncNoteLinks } from '../core/links.js';
 import { openDb, setMeta, enqueuePath } from '../core/db.js';
 import { getLogger, defaultLogDir, runWithLogger, getContextLogger } from '../logger.js';
 import { loadConfig } from '../config.js';
-import { appSupportDir } from '../platform/index.js';
+import { appSupportDir, watcherInstallHint } from '../platform/index.js';
 import {
     chunkText as realChunkText, loadTokenizer, tokenizeWithOffsets as realTokenizeWithOffsets,
     embed as realEmbed, embedQuery as realEmbedQuery, configureEmbedder, buildChunkPrompt,
@@ -379,7 +379,7 @@ export function assertFswatchAvailable(env = process.env) {
         execFileSync('fswatch', [ '--version' ], { env, stdio: 'ignore' });
     } catch (error) {
         if (error.code === 'ENOENT') {
-            throw new Error('fswatch not found — install via `brew install fswatch`', { cause: error });
+            throw new Error(`fswatch not found — install via \`${watcherInstallHint()}\``, { cause: error });
         }
         throw error;
     }

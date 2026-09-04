@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import {
     appSupportDir, logDir, daemonServiceName,
     startDaemonService, stopDaemonService, restartDaemonService,
-    DAEMON_SERVICE_NAME,
+    DAEMON_SERVICE_NAME, watcherInstallHint, ripgrepInstallHint,
 } from './linux.js';
 
 function fakeExecFile(impl = async () => {}) {
@@ -52,6 +52,13 @@ describe('daemonServiceName', () => {
     it('is the systemd unit name', () => {
         expect(daemonServiceName()).toBe(DAEMON_SERVICE_NAME);
         expect(DAEMON_SERVICE_NAME).toBe('mnotes.service');
+    });
+});
+
+describe('watcherInstallHint / ripgrepInstallHint', () => {
+    it('point at distro package managers, not Homebrew', () => {
+        expect(watcherInstallHint()).toMatch(/apt install fswatch/);
+        expect(ripgrepInstallHint()).toMatch(/apt install ripgrep/);
     });
 });
 
