@@ -76,15 +76,23 @@ export function tagList(db) {
     `).all();
 }
 
+// Exact match, or a nested child (parent-includes-child, e.g. "project" matches "project/api") —
+// case-insensitive via `tags.name`'s COLLATE NOCASE (S001/S004). Shared by tagNotes below and
+// metadata_query's `key: "tags"` interception (S014), so the two can never drift apart.
+export function tagMatchClause(tagName) {
+    return { clause: 't.name = ? OR t.name LIKE ? || \'/%\'', params: [ tagName, tagName ] };
+}
+
 export function tagNotes(db, tagName) {
+    const { clause, params } = tagMatchClause(tagName);
     const rows = db.prepare(`
         SELECT DISTINCT n.path AS path, n.line_count AS fileLineCount
         FROM notes n
         JOIN note_tags nt ON nt.note_id = n.id
         JOIN tags t ON t.id = nt.tag_id
-        WHERE t.name = ? OR t.name LIKE ? || '/%'
+        WHERE ${clause}
         ORDER BY n.path
-    `).all(tagName, tagName);
+    `).all(...params);
 
     return rows.map(row => ({
         noteTitle: stripMdExtension(row.path),

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { extractTags, syncNoteTags, tagList, tagNotes } from './tags.js';
+import { extractTags, syncNoteTags, tagList, tagNotes, tagMatchClause } from './tags.js';
 import { openDb } from './db.js';
 
 function makeTestDb() {
@@ -253,6 +253,14 @@ describe('tagList', () => {
 
         expect(tagList(db)).toEqual([]);
         db.close();
+    });
+});
+
+describe('tagMatchClause', () => {
+    it('returns an exact-or-nested-child predicate with two bound params', () => {
+        const { clause, params } = tagMatchClause('project');
+        expect(clause).toBe("t.name = ? OR t.name LIKE ? || '/%'");
+        expect(params).toEqual([ 'project', 'project' ]);
     });
 });
 
