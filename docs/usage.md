@@ -9,7 +9,8 @@ Run `mnotes --help` or `mnotes <command> --help` any time for the in-tool versio
 
 ## Output formats
 
-List-style commands (`search`, `grep`, `tags list`, `tags notes`, `links`) print pipe-delimited
+List-style commands (`search`, `grep`, `tags list`, `tags notes`, `metadata keys`, `metadata query`,
+`links`) print pipe-delimited
 columnar text by default, columns padded with whitespace so they stay visually aligned in a terminal,
 with a `--json` flag for scripting or `obsidian.nvim` integration (JSON output is always compact, not
 padded). Mutating commands (`write`/`edit`/`append`/`rename`) are always structured JSON
@@ -70,6 +71,53 @@ mnotes tags notes "project/moneta-notes"
 ```
 
 Flag: `--json`.
+
+### `mnotes metadata keys` / `mnotes metadata query`
+
+```sh
+mnotes metadata keys
+mnotes metadata query --filter="status=active"
+mnotes metadata query --filter="priority>3" --filter="status!=archived"
+mnotes metadata query --filter="due<2026-01-01" --exists=due
+mnotes metadata query --filter="status in draft,review" --match=any
+mnotes metadata query --filter="depends_on.project=project/moneta-notes"
+mnotes metadata query --filter="tags=project"
+```
+
+Frontmatter search — every field except `tags` (which has its own purpose-built, indexed storage;
+`tags` is still filterable here, see below) is projected into a searchable per-note JSON blob at index
+time. `metadata keys` is discovery (`key | type | example | notes_with_key`, one row per distinct
+field found across the vault, `type` inferred from one sampled value); `metadata query` filters notes
+by one or more conditions on those fields.
+
+Each `--filter` is a small string, parsed into `{key, op, value, negate}`:
+
+| Filter string | Meaning |
+|---|---|
+| `key=value` | equals |
+| `key!=value` | not equals (negated equals) |
+| `key>value` / `key>=value` / `key<value` / `key<=value` | numeric or date range |
+| `key in v1,v2,...` | equals any of a comma-separated list |
+
+`key` may be a bare top-level field (`status`) or exactly one level of nesting (`depends_on.project`
+— e.g. matching one field of an array-of-objects entry independently, like a `depends_on: [{project,
+source}, ...]` list). Deeper nesting than that isn't addressable here — still fully visible via
+`mnotes read`'s raw metadata output, just not filterable by this command. A value that looks like a
+number (`3`) or `true`/`false` is parsed as that type, not a string; an unquoted `Y-M-D`-shaped date
+value is compared correctly regardless of whether the stored value carries full timestamp precision.
+
+`--exists=key`/`--missing=key` are sugar for `{key, op: 'exists'}` / `{key, op: 'exists', negate:
+true}` — "does/doesn't have this field set at all." Multiple `--filter`/`--exists`/`--missing` flags
+combine via `--match=all` (default, AND) or `--match=any` (OR) — a single flat toggle over every
+condition given, not per-pair nested grouping.
+
+`key: "tags"` is a special case: filterable here (`eq`/`in`/`exists` only — tags aren't ordered, so
+`>`/`<` etc. are a usage error) without duplicating `mnotes tags`' storage or matching logic — it
+resolves through the exact same exact-or-nested-child, case-insensitive match `tags notes` uses, so
+`tags=project` also matches a note tagged `project/api-migration`.
+
+Flags: `--filter=...` (repeatable), `--exists=key`/`--missing=key` (repeatable), `--match=all|any`
+(default `all`), `--json`.
 
 ### `mnotes links <title>` / `mnotes links broken`
 

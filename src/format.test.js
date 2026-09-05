@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
     formatJson, formatJsonPretty, formatTable, formatSearchTable, formatExplain, formatGrepTable,
-    formatTagListTable, formatTagNotesTable, formatLinksTable, formatBrokenLinksTable, formatStats,
+    formatTagListTable, formatTagNotesTable, formatMetadataKeysTable, formatLinksTable,
+    formatBrokenLinksTable, formatStats,
 } from './format.js';
 
 describe('formatJson', () => {
@@ -222,6 +223,15 @@ describe('formatTagNotesTable', () => {
     it('maps noteTitle/fileLineCount to note_title/file_line_count', () => {
         const text = formatTagNotesTable([ { noteTitle: 'A', fileLineCount: 5 } ]);
         expect(text).toBe('note_title|file_line_count\nA|5\n');
+    });
+});
+
+describe('formatMetadataKeysTable', () => {
+    it('maps key/type/example/notesWithKey to key/type/example/notes_with_key', () => {
+        const text = formatMetadataKeysTable([
+            { key: 'status', type: 'string', example: 'active', notesWithKey: 4 },
+        ]);
+        expect(text).toBe('key|type|example|notes_with_key\nstatus|string|active|4\n');
     });
 });
 

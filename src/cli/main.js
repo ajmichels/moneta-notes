@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process';
 import { search, explainSearch } from '../core/search.js';
 import { grep } from '../core/grep.js';
 import { tagList, tagNotes } from '../core/tags.js';
+import { metadataKeys, metadataQuery } from '../core/metadata.js';
 import { getBrokenLinks } from '../core/links.js';
 import { noteRead, noteWrite, noteEdit, noteAppend, noteRename } from '../core/notes.js';
 import { readAttachment, writeAttachment, resolveAttachmentPath } from '../core/attachments.js';
@@ -21,7 +22,8 @@ import { runDaemonCommand } from './daemon.js';
 import { runVectorsCommand } from './vectors.js';
 import {
     formatSearchTable, formatExplain, formatGrepTable, formatTagListTable, formatTagNotesTable,
-    formatLinksTable, formatBrokenLinksTable, formatStats, formatJson, formatJsonPretty,
+    formatMetadataKeysTable, formatLinksTable, formatBrokenLinksTable, formatStats, formatJson,
+    formatJsonPretty,
 } from '../format.js';
 
 export function resolveVaultRoot(config = loadConfig()) {
@@ -44,6 +46,7 @@ Commands:
   search    Full-text, semantic, or hybrid search over the vault
   grep      Ripgrep-backed literal/regex search over note files
   tags      list | notes <tag>
+  metadata  keys | query
   links     <title> | broken
   read      Read a note by title
   write     Create a note or fully replace an existing one
@@ -64,6 +67,12 @@ const COMMAND_USAGE = {
     grep: 'mnotes grep <pattern> [--regex] [--note=<title>] [--content] [--json]\n'
         + '       (--note resolves like read\'s <title> does — exact match, or a unique basename match)',
     tags: "mnotes tags list [--json]\n       mnotes tags notes <tag> [--json]",
+    metadata: 'mnotes metadata keys [--json]\n'
+        + '       mnotes metadata query [--filter="key op value"]... [--exists=key]...\n'
+        + '                              [--missing=key]... [--match=any] [--json]\n'
+        + '       (--filter op is one of = != > >= < <=, or "key in v1,v2,...";\n'
+        + "        --exists/--missing are sugar for {op: 'exists'}/{op: 'exists', negate: true};\n"
+        + '        --match=any ORs conditions together instead of ANDing)',
     links: "mnotes links <title> [--json]\n       mnotes links broken [--json]",
     read: 'mnotes read <title> [--start=N] [--end=N] [--raw] [--json]\n'
         + '       (<title> resolves: exact match, or a unique basename match, e.g. text from a [[wikilink]])',
@@ -254,6 +263,110 @@ export async function runTags(args, deps) {
 }
 
 registerCommand('tags', runTags);
+
+// Longest operator token first so e.g. '>=' isn't misread as '=' at the wrong index — '!=' maps to
+// eq(negate) since metadata_query has no separate `ne` op (S014).
+const FILTER_OPERATOR_TOKENS = [
+    [ '>=', 'gte' ], [ '<=', 'lte' ], [ '!=', 'eq' ], [ '>', 'gt' ], [ '<', 'lt' ], [ '=', 'eq' ],
+];
+
+// CLI-only presentation-layer translation (S014/S006) — parses a friendly "key op value" string
+// into the exact {key, op, value, negate} shape core/metadata.js's metadataQuery (and the MCP tool)
+// take directly, the same relationship --metadata='{...}' already has with note_write.
+export function parseFilterString(raw) {
+    const numericOrBoolean = (token) => {
+        if (/^-?\d+(\.\d+)?$/.test(token)) {
+            return Number(token);
+        }
+        if (token === 'true' || token === 'false') {
+            return token === 'true';
+        }
+        return token;
+    };
+
+    const inMatch = raw.match(/^(.+?)\s+in\s+(.+)$/);
+    if (inMatch) {
+        const [ , key, valueList ] = inMatch;
+        return {
+            key: key.trim(), op: 'in',
+            value: valueList.split(',').map((v) => numericOrBoolean(v.trim())),
+        };
+    }
+
+    for (const [ token, op ] of FILTER_OPERATOR_TOKENS) {
+        const index = raw.indexOf(token);
+        if (index === -1) {
+            continue;
+        }
+        return {
+            key: raw.slice(0, index).trim(),
+            op,
+            value: numericOrBoolean(raw.slice(index + token.length).trim()),
+            negate: token === '!=',
+        };
+    }
+
+    throw new Error(`--filter is not a recognized expression: "${raw}"`);
+}
+
+async function runMetadataKeys(args, deps) {
+    const { values } = parseArgs({ args, options: { json: { type: 'boolean', default: false } } });
+    const keys = metadataKeys(deps.db);
+
+    if (values.json) {
+        const mapped = keys.map((k) => (
+            { key: k.key, type: k.type, example: k.example, notes_with_key: k.notesWithKey }
+        ));
+        return { stdout: formatJson(mapped), stderr: '', exitCode: 0 };
+    }
+
+    return { stdout: formatMetadataKeysTable(keys, { align: true }), stderr: '', exitCode: 0 };
+}
+
+async function runMetadataQuery(args, deps) {
+    const { values } = parseArgs({
+        args,
+        options: {
+            filter: { type: 'string', multiple: true, default: [] },
+            exists: { type: 'string', multiple: true, default: [] },
+            missing: { type: 'string', multiple: true, default: [] },
+            match: { type: 'string', default: 'all' },
+            json: { type: 'boolean', default: false },
+        },
+    });
+
+    const filters = [
+        ...values.filter.map(parseFilterString),
+        ...values.exists.map((key) => ({ key, op: 'exists' })),
+        ...values.missing.map((key) => ({ key, op: 'exists', negate: true })),
+    ];
+    const notes = metadataQuery(deps.db, { filters, match: values.match });
+
+    if (values.json) {
+        const mapped = notes.map((n) => ({ note_title: n.noteTitle, file_line_count: n.fileLineCount }));
+        return { stdout: formatJson(mapped), stderr: '', exitCode: 0 };
+    }
+
+    return { stdout: formatTagNotesTable(notes, { align: true }), stderr: '', exitCode: 0 };
+}
+
+export async function runMetadata(args, deps) {
+    const [ sub, ...rest ] = args;
+    if (sub === undefined) {
+        return {
+            stdout: '', stderr: 'mnotes: metadata requires a subcommand (keys|query)\n', exitCode: 1,
+        };
+    }
+    if (sub === 'keys') {
+        return runMetadataKeys(rest, deps);
+    }
+    if (sub === 'query') {
+        return runMetadataQuery(rest, deps);
+    }
+    return { stdout: '', stderr: `mnotes: unknown metadata subcommand "${sub}"\n`, exitCode: 1 };
+}
+
+registerCommand('metadata', runMetadata);
 
 async function runLinksTitle(args, deps) {
     const { values, positionals } = parseArgs({

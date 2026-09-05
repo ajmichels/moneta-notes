@@ -94,6 +94,15 @@ export function formatTagNotesTable(results, { align = false } = {}) {
     return formatTable([ 'note_title', 'file_line_count' ], rows, { align });
 }
 
+// metadata_query's output is the same { noteTitle, fileLineCount } shape tagNotes returns (S014) —
+// no separate formatMetadataQueryTable, formatTagNotesTable already fits it exactly.
+export function formatMetadataKeysTable(results, { align = false } = {}) {
+    const rows = results.map((r) => ({
+        key: r.key, type: r.type, example: r.example, notes_with_key: r.notesWithKey,
+    }));
+    return formatTable([ 'key', 'type', 'example', 'notes_with_key' ], rows, { align });
+}
+
 export function formatLinksTable({ backlinks, links_out: linksOut }, { align = false } = {}) {
     const rows = [
         ...backlinks.map((noteTitle) => ({ direction: 'backlink', note_title: noteTitle })),

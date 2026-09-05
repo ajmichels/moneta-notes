@@ -5,8 +5,8 @@ import { mkdtempSync, writeFileSync, mkdirSync, readFileSync as readAuditLog } f
 import { Readable } from 'node:stream';
 import {
     main, dispatch, resolveVaultRoot, resolveDbPath, registerCommand, runSearch, runGrep, runTags,
-    runLinks, runRead, runWrite, runEdit, runAppend, runRename, runStats,
-    runAttachment, runAttachmentRead, runAttachmentWrite,
+    runMetadata, parseFilterString, runLinks, runRead, runWrite, runEdit, runAppend, runRename,
+    runStats, runAttachment, runAttachmentRead, runAttachmentWrite,
 } from './main.js';
 import { openDb } from '../core/db.js';
 import { syncNoteTags } from '../core/tags.js';
@@ -31,6 +31,14 @@ function insertTestNote(db, path, lineCount = 5) {
     db.prepare(
         'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
     ).run(path, 'hash', lineCount, 1000, 1000);
+    return db.prepare('SELECT id FROM notes WHERE path = ?').get(path).id;
+}
+
+function insertTestNoteWithMetadata(db, path, metadata, lineCount = 5) {
+    db.prepare(`
+        INSERT INTO notes (path, content_hash, line_count, mtime, updated_at, metadata_json)
+        VALUES (?, ?, ?, ?, ?, ?)
+    `).run(path, 'hash', lineCount, 1000, 1000, JSON.stringify(metadata));
     return db.prepare('SELECT id FROM notes WHERE path = ?').get(path).id;
 }
 
@@ -332,6 +340,160 @@ describe('runTags', () => {
         const result = await runTags([], {});
         expect(result.exitCode).toBe(1);
         expect(result.stderr).toMatch(/tags requires a subcommand \(list\|notes\)/);
+        expect(result.stderr).not.toMatch(/undefined/);
+    });
+});
+
+describe('parseFilterString', () => {
+    it('parses "key=value" into an eq condition', () => {
+        expect(parseFilterString('status=active')).toEqual({
+            key: 'status', op: 'eq', value: 'active', negate: false,
+        });
+    });
+
+    it('parses "key!=value" into a negated eq condition', () => {
+        expect(parseFilterString('status!=active')).toEqual({
+            key: 'status', op: 'eq', value: 'active', negate: true,
+        });
+    });
+
+    it('parses ">"/">="/"<"/"<=" without misreading ">=" as "="', () => {
+        expect(parseFilterString('priority>3')).toEqual({
+            key: 'priority', op: 'gt', value: 3, negate: false,
+        });
+        expect(parseFilterString('priority>=3')).toEqual({
+            key: 'priority', op: 'gte', value: 3, negate: false,
+        });
+        expect(parseFilterString('due<2026-01-01')).toEqual({
+            key: 'due', op: 'lt', value: '2026-01-01', negate: false,
+        });
+        expect(parseFilterString('due<=2026-01-01')).toEqual({
+            key: 'due', op: 'lte', value: '2026-01-01', negate: false,
+        });
+    });
+
+    it('parses a numeric-looking value as a JS number', () => {
+        expect(parseFilterString('priority=3').value).toBe(3);
+    });
+
+    it('parses a "true"/"false" value as a JS boolean', () => {
+        expect(parseFilterString('done=true').value).toBe(true);
+        expect(parseFilterString('done=false').value).toBe(false);
+    });
+
+    it('parses "key in v1,v2" into an in condition with a value array', () => {
+        expect(parseFilterString('status in draft,review')).toEqual({
+            key: 'status', op: 'in', value: [ 'draft', 'review' ],
+        });
+    });
+
+    it('parses a dot-path key unchanged', () => {
+        expect(parseFilterString('depends_on.project=foo/bar')).toEqual({
+            key: 'depends_on.project', op: 'eq', value: 'foo/bar', negate: false,
+        });
+    });
+
+    it('throws on an unrecognized expression', () => {
+        expect(() => parseFilterString('nonsense')).toThrow(/not a recognized expression/);
+    });
+});
+
+describe('runMetadata', () => {
+    it('keys: formats key discovery', async () => {
+        const { db } = openDb(':memory:');
+        insertTestNoteWithMetadata(db, 'A.md', { status: 'active' });
+
+        const result = await runMetadata([ 'keys' ], { db });
+
+        expect(result.stdout).toBe(
+            'key    | type   | example | notes_with_key\n'
+            + '------ | ------ | ------- | --------------\n'
+            + 'status | string | active  | 1\n',
+        );
+        db.close();
+    });
+
+    it('keys --json: formats key discovery as JSON', async () => {
+        const { db } = openDb(':memory:');
+        insertTestNoteWithMetadata(db, 'A.md', { status: 'active' });
+
+        const result = await runMetadata([ 'keys', '--json' ], { db });
+
+        expect(JSON.parse(result.stdout)).toEqual([
+            { key: 'status', type: 'string', example: 'active', notes_with_key: 1 },
+        ]);
+        db.close();
+    });
+
+    it('query --filter: filters notes by a scalar condition', async () => {
+        const { db } = openDb(':memory:');
+        insertTestNoteWithMetadata(db, 'A.md', { status: 'active' }, 7);
+        insertTestNoteWithMetadata(db, 'B.md', { status: 'archived' });
+
+        const result = await runMetadata([ 'query', '--filter=status=active' ], { db });
+
+        expect(result.stdout).toBe(
+            'note_title | file_line_count\n---------- | ---------------\nA          | 7\n',
+        );
+        db.close();
+    });
+
+    it('query --exists/--missing: sugar for {op: exists}/{op: exists, negate: true}', async () => {
+        const { db } = openDb(':memory:');
+        insertTestNoteWithMetadata(db, 'A.md', { due: '2026-01-01' });
+        insertTestNoteWithMetadata(db, 'B.md', { status: 'active' });
+
+        const withDue = await runMetadata([ 'query', '--exists=due' ], { db });
+        expect(withDue.stdout).toContain('A');
+        expect(withDue.stdout).not.toContain('B');
+
+        const withoutDue = await runMetadata([ 'query', '--missing=due' ], { db });
+        expect(withoutDue.stdout).toContain('B');
+        expect(withoutDue.stdout).not.toContain('A');
+        db.close();
+    });
+
+    it('query --match=any: ORs conditions instead of ANDing', async () => {
+        const { db } = openDb(':memory:');
+        insertTestNoteWithMetadata(db, 'A.md', { status: 'active' });
+        insertTestNoteWithMetadata(db, 'B.md', { priority: 9 });
+        insertTestNoteWithMetadata(db, 'C.md', { status: 'archived' });
+
+        const result = await runMetadata([
+            'query', '--filter=status=active', '--filter=priority>5', '--match=any',
+        ], { db });
+
+        expect(result.stdout).toContain('A');
+        expect(result.stdout).toContain('B');
+        expect(result.stdout).not.toContain('C');
+        db.close();
+    });
+
+    it('query --json: formats results as JSON', async () => {
+        const { db } = openDb(':memory:');
+        insertTestNoteWithMetadata(db, 'A.md', { status: 'active' }, 3);
+
+        const result = await runMetadata([ 'query', '--filter=status=active', '--json' ], { db });
+
+        expect(JSON.parse(result.stdout)).toEqual([ { note_title: 'A', file_line_count: 3 } ]);
+        db.close();
+    });
+
+    it('propagates a validation error (e.g. no filters at all) as a thrown error', async () => {
+        const { db } = openDb(':memory:');
+        await expect(runMetadata([ 'query' ], { db })).rejects.toThrow(/non-empty array/);
+        db.close();
+    });
+
+    it('returns an error for an unknown metadata subcommand', async () => {
+        const result = await runMetadata([ 'bogus' ], {});
+        expect(result.exitCode).toBe(1);
+        expect(result.stderr).toMatch(/unknown metadata subcommand "bogus"/);
+    });
+
+    it('returns a helpful error when no subcommand is given, not literal "undefined"', async () => {
+        const result = await runMetadata([], {});
+        expect(result.stderr).toMatch(/metadata requires a subcommand \(keys\|query\)/);
         expect(result.stderr).not.toMatch(/undefined/);
     });
 });
