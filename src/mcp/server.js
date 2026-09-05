@@ -116,11 +116,11 @@ const TOOL_DEFS = [
     },
     {
         name: 'metadata_keys',
-        description: 'Discover which frontmatter fields are currently in use across the vault '
-            + '(every field except tags, which tag_list already covers — see metadata_query for '
-            + 'filtering by tag). One row per distinct field: key, an inferred type (string/number/ '
-            + 'boolean/date, sampled from one non-null value — a hint, not an enforced schema), an '
-            + 'example value, and the count of notes carrying that field.',
+        description: 'Discover which frontmatter fields are currently in use across the vault. '
+            + 'tags is never listed here even though it IS filterable via metadata_query — use '
+            + 'tag_list to discover the tag vocabulary instead. One row per distinct field: key, an '
+            + 'inferred type (string/number/boolean/date, sampled from one non-null value — a hint, '
+            + 'not an enforced schema), an example value, and the count of notes carrying that field.',
         inputSchema: { reason: z.string() },
         annotations: {
             readOnlyHint: true,
@@ -144,8 +144,10 @@ const TOOL_DEFS = [
             + "of how a caller's literal is written. key: \"tags\" is a special case, routed through "
             + 'the same tag-matching tag_notes uses (including nested-child matching) instead of '
             + "frontmatter — only eq/in/exists are valid against it (tags aren't ordered), and it "
-            + 'takes no dot-path nesting. Multiple filters combine via match: "all" (default, AND) '
-            + 'or "any" (OR) — one flat toggle over every filter, not nested boolean grouping.',
+            + 'takes no dot-path nesting; note that tags does NOT appear in metadata_keys\' output '
+            + '(use tag_list to discover tag names), even though it\'s filterable here. Multiple '
+            + 'filters combine via match: "all" (default, AND) or "any" (OR) — one flat toggle over '
+            + 'every filter, not nested boolean grouping.',
         inputSchema: {
             filters: z.array(z.object({
                 key: z.string(),

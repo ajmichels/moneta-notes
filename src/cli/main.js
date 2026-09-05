@@ -72,7 +72,9 @@ const COMMAND_USAGE = {
         + '                              [--missing=key]... [--match=any] [--json]\n'
         + '       (--filter op is one of = != > >= < <=, or "key in v1,v2,...";\n'
         + "        --exists/--missing are sugar for {op: 'exists'}/{op: 'exists', negate: true};\n"
-        + '        --match=any ORs conditions together instead of ANDing)',
+        + '        --match=any ORs conditions together instead of ANDing;\n'
+        + '        key="tags" is filterable via query (eg. --filter="tags=project") but never\n'
+        + '        listed by `keys` — run `mnotes tags list` for the tag vocabulary instead)',
     links: "mnotes links <title> [--json]\n       mnotes links broken [--json]",
     read: 'mnotes read <title> [--start=N] [--end=N] [--raw] [--json]\n'
         + '       (<title> resolves: exact match, or a unique basename match, e.g. text from a [[wikilink]])',
