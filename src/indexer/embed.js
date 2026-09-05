@@ -1,6 +1,16 @@
 import { createConnection } from 'node:net';
-import { AutoTokenizer, pipeline } from '@huggingface/transformers';
+import { join } from 'node:path';
+import { AutoTokenizer, env, pipeline } from '@huggingface/transformers';
 import { getContextLogger } from '../logger.js';
+import { appSupportDir } from '../platform/index.js';
+
+// Left at its library default, @huggingface/transformers caches downloaded model/tokenizer files
+// inside its own package directory under node_modules — a location package managers treat as
+// disposable. Any reinstall (a `pnpm install` after a pnpm major upgrade, a lockfile-forced clean
+// install, etc.) wipes it, forcing a redownload from huggingface.co on next daemon start. Pointing
+// it at appSupportDir() instead — the same persistent, package-manager-independent directory
+// index.db already lives in (see config.js) — makes the downloaded model survive reinstalls.
+env.cacheDir = join(appSupportDir(), 'models');
 
 const DEFAULT_CHUNK_SIZE = 512;
 const DEFAULT_OVERLAP_TOKENS = 77;

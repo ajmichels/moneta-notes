@@ -117,7 +117,9 @@ In order (macOS/Linux differences noted inline — see S009 for the exact per-OS
 9. **Pre-downloads the embedding model** (`Qwen3-Embedding-0.6B`, quantized) — a one-time download via
    `@huggingface/transformers`, printed as "downloading embedding model, this may take a minute...".
    Doing this at install time means the first real note write doesn't stall on a surprise multi-minute
-   download mid-index. Identical on both OSes.
+   download mid-index. Identical on both OSes. Cached under `appSupportDir()/models` (alongside
+   `index.db`) rather than inside `node_modules`, so it survives a `pnpm install`/upgrade rather than
+   being wiped and needing a network redownload on next daemon start.
 10. **Links the CLI onto `PATH`** via `pnpm add --global` — this is what makes `mnotes`, `mnotes-mcp`,
     and `mnotes-indexer` (the three `bin` entries in `package.json`) resolve as commands. (pnpm 11
     removed `pnpm link --global`; `pnpm add --global <path>` is its replacement.) Warns and continues
