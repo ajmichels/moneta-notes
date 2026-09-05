@@ -165,6 +165,27 @@ describe('metadataKeys', () => {
             { key: 'priority', type: 'number', example: 3, notesWithKey: 1 },
         ]);
     });
+
+    it('prefers a non-numeric-leading example over an earlier numeric-leading one '
+        + '(e.g. an obsidian.nvim id, so it doesn\'t misread as a date)', () => {
+        const db = makeTestDb();
+        insertNoteWithRawMetadataJson(db, 'A.md', '{"id":20240708102843484}');
+        insertNoteWithRawMetadataJson(db, 'B.md', '{"id":"my-note-title"}');
+
+        expect(metadataKeys(db)).toEqual([
+            { key: 'id', type: 'string', example: 'my-note-title', notesWithKey: 2 },
+        ]);
+    });
+
+    it('falls back to the first-seen example when every value for a key is numeric-leading', () => {
+        const db = makeTestDb();
+        insertNoteWithRawMetadataJson(db, 'A.md', '{"id":20240708102843484}');
+        insertNoteWithMetadata(db, 'B.md', { id: 42 });
+
+        expect(metadataKeys(db)).toEqual([
+            { key: 'id', type: 'number', example: '20240708102843484', notesWithKey: 2 },
+        ]);
+    });
 });
 
 function titles(results) {

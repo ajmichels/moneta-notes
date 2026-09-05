@@ -223,6 +223,12 @@ either, so nothing changes there. `tags` never appears as a row here — `tag_li
 single discovery surface for the tag vocabulary; `metadata_query`'s tool description documents `tags`
 as an always-available special-cased key.
 
+Sampling prefers a value that doesn't start with a digit over one that does (a large opaque integer —
+e.g. an obsidian.nvim `id` like `20240708102843484` — reads misleadingly like a date to an agent
+skimming this output otherwise): among a key's sampled values, the first non-numeric-leading one wins;
+if every value for that key is numeric-leading, the first non-null value sampled is used instead, same
+as before this preference existed.
+
 ### `metadata_query`
 
 **Input**: `filters<array>` (each `{ key<string>, op<'eq'|'gt'|'gte'|'lt'|'lte'|'in'|'exists'>,

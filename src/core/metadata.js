@@ -92,9 +92,18 @@ export function metadataKeys(db) {
         }
         const entry = byKey.get(key);
         entry.noteIds.add(row.note_id);
-        if (entry.example === undefined && row.type !== 'null') {
+        if (row.type === 'null') {
+            continue;
+        }
+        // A numeric-leading example (e.g. an obsidian.nvim note id like "20240708102843484") reads
+        // misleadingly like a date to an agent skimming metadata_keys output. Prefer the first
+        // example whose text doesn't start with a digit; once one is found, stop overriding it. If
+        // every value for this key is numeric-leading, fall back to the plain first-seen example.
+        const numericLeading = /^[0-9]/.test(row.atom_text);
+        if (entry.example === undefined || (entry.exampleNumericLeading && !numericLeading)) {
             entry.type = inferType(row.type, row.atom_text);
             entry.example = exampleValue(row.type, row.atom_text);
+            entry.exampleNumericLeading = numericLeading;
         }
     }
 
