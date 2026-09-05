@@ -48,7 +48,7 @@ function hasStaleChunks(db, noteId, embeddingModel, embeddingVersion) {
 // embeddingVersion) — extraction logic isn't a user-tunable, so bumping it is how a future
 // tag/link-extraction-logic fix (S004/S011) forces reprocessing of already-indexed notes via a
 // plain `mnotes reindex`, mirroring how embeddingVersion already does this for embeddings (S005).
-export const EXTRACTION_VERSION = 1;
+export const EXTRACTION_VERSION = 2;
 
 function isExtractionStale(existing) {
     return existing.extraction_version !== EXTRACTION_VERSION;

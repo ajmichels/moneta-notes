@@ -115,6 +115,31 @@ describe('extractTags: slash-adjacent issue references match Obsidian, not "junk
     });
 });
 
+describe('extractTags: a backslash-escaped # is not a tag', () => {
+    it('rejects a single backslash-escaped tag that would otherwise be valid', () => {
+        expect(extractTags('see \\#foo for context', {})).toEqual([]);
+    });
+
+    it('rejects a backslash-escaped tag at the start of a line', () => {
+        expect(extractTags('\\#tag at the start of the line', {})).toEqual([]);
+    });
+
+    it('only suppresses the escaped occurrence, not the whole adjacent run', () => {
+        // \#1 is suppressed entirely; #2 is left as a bare numeric ref, already rejected on its own
+        expect(extractTags('see \\#1/#2 for context', {})).toEqual([]);
+    });
+
+    it('does not suppress an unescaped tag elsewhere in the same note', () => {
+        const tags = extractTags('\\#not-a-tag but #real/tag is', {});
+        expect(tags).toEqual([ 'real/tag' ]);
+    });
+
+    it('does not break the zero-width adjacency scan for unescaped runs', () => {
+        const tags = extractTags('#foo/#bar/#baz', {});
+        expect(tags).toEqual([ 'foo/', 'bar/', 'baz' ]);
+    });
+});
+
 describe('extractTags: excludes code fences and inline code spans', () => {
     it('ignores a hashtag-shaped string inside an inline code span', () => {
         const body = 'the tag syntax is `#project` written like that';

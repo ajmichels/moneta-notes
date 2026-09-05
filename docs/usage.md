@@ -466,6 +466,11 @@ title-resolution split: `note_read`/`grep` accept a short or ambiguous title (re
 `note_write`/`note_edit`/`note_append`/`note_rename` require the exact absolute title with no
 resolution — each tool's own description states this.
 
+`note_write`/`note_edit`/`note_append`'s descriptions also warn about inline tag extraction on the next
+reindex ([S004](specs/S004-grep-tags.md)): an isolated `#5` is already safe (rejected as purely
+numeric), but adjacent refs (`#1/#2`) or a hex-looking run (`#3498db`) become real tags. Escape a single
+value with a backslash (`\#foo`, Obsidian's own escape syntax) or wrap a longer run in backticks.
+
 `metadata_query`'s `filters` argument takes the structured `{key, op, value?, negate?}` shape
 directly — no string parsing — the same shape `mnotes metadata query`'s `--filter`/`--exists`/
 `--missing` flags compile down to (see [`mnotes metadata query`](#mnotes-metadata-keys--mnotes-metadata-query)

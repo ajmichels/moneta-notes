@@ -106,21 +106,42 @@ Tags come from two sources per note, merged into one set with no source distinct
      produces tags `5/` and `6/` — the trailing `#7` has no `/` of its own, so it stays a bare
      numeric ref and is rejected by the rule above), but Obsidian itself parses that same text into
      the same trailing-slash tags — extraction mirrors Obsidian's actual (if odd-looking) behavior
-     rather than guessing at author intent. A note author who means a literal issue reference, not a
-     tag, can either add whitespace around the `/` (`#5 / #6 / #7` — each `#N` then ends at the
-     space, leaving a bare numeric ref that the non-numeric-character rule above already rejects) or
-     escape the `#` with a backslash (`\#5`), Obsidian's own escape syntax for suppressing
-     tag/heading interpretation.
-   - Matches inside fenced code blocks (` ``` `) and inline code spans (`` ` ``) are excluded, to
-     avoid false positives from shell shebangs (`#!/bin/bash`), CSS hex colors (`#3498db`), or
-     comments referencing issue numbers — none of these are tags, and a code-aware personal-notes
-     vault will hit these regularly enough that skipping code regions is worth the extra scan logic.
+     rather than guessing at author intent. **A single, non-adjacent numeric ref like `#5` is already
+     safe** — it's rejected outright by the non-numeric-character rule above, no escaping needed. The
+     risk is specifically adjacency (`#5/#6/#7`), for which a note author can add whitespace around
+     each `/` (`#5 / #6 / #7` — each `#N` then ends at the space, leaving a bare numeric ref the
+     non-numeric-character rule rejects), wrap the whole run in backticks, or backslash-escape each
+     `#` individually (see the next bullet).
+   - **A `#` immediately preceded by a backslash is not a tag start** — `` \#foo `` and `` \#project ``
+     extract nothing, matching [Obsidian's own `\#` escape](https://help.obsidian.md/tags) for
+     suppressing tag/heading interpretation. The backslash isn't consumed — a second, independent
+     zero-width lookbehind (`(?<!\\)`) alongside the boundary check above — so it doesn't interfere
+     with the adjacency scan: `` \#1/#2 `` suppresses only the escaped `#1`, leaving `#2` to fall
+     through to the bare-numeric rejection on its own. This is the escape hatch for a **single value**
+     that isn't meant to be a tag; a hex color or a whole adjacent run is still better served by
+     wrapping in backticks (below), since backslash only ever escapes the one `#` it directly
+     precedes, not a run.
+   - Matches inside fenced code blocks (` ``` `) and inline code spans (`` ` ``) are excluded. This is
+     what actually protects a **CSS hex color** (`#3498db` is not purely numeric — it contains `d`/`b`
+     — so outside a code span it *is* extracted as a real tag, and a leading backslash wouldn't help
+     since the digits/letters after `#` aren't touched by that escape) and what lets a **comment
+     referencing an adjacent issue run** (`#2/#3`) be written literally by backticking the whole thing
+     instead of escaping each `#`. A bare shell shebang (`#!/bin/bash`) needs no such protection
+     regardless of code fencing: `!` isn't a valid tag character, so the pattern never matches there in
+     the first place.
+   - **Two verified escapes exist**: a leading backslash (`\#foo`) for a single value, or wrapping in
+     backticks/a code fence for anything else (a hex color, or a whole adjacent run). A human typing in
+     an editor gets Obsidian's own tag highlighting as a visual cue that something just became a tag —
+     an agent calling `note_write`/`note_edit`/`note_append` over MCP gets no such signal, so S007
+     duplicates this guidance directly into those three tools' descriptions (`TAG_ESCAPE_NOTE`) rather
+     than assuming the caller has read this spec.
 
 **Changing these rules requires bumping `EXTRACTION_VERSION`** (`indexer/daemon.js`, S005) — a
 parsing-logic fix here doesn't touch any note's file content, so `mnotes reindex` would otherwise
 skip every already-indexed note (unchanged `content_hash`) and the old, wrong tags would stick around
 forever. Bumping the constant is what makes a plain `mnotes reindex` reach them, exactly like bumping
-`embed.js`'s embedding version already does for the embedding pipeline.
+`embed.js`'s embedding version already does for the embedding pipeline. The backslash-escape rule
+above bumped it to `2`.
 
 ### Storage
 
@@ -185,3 +206,4 @@ extraction function itself.
 - **When/how extraction runs during reindex** (per-note vs. full-vault, idempotency) — S005.
 - **CLI-only `--explain` style debug output for grep or tags** — S006, if it ends up needed there at
   all (neither tool has raw scores to hide in the first place, unlike search).
+</content>

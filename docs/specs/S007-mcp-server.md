@@ -147,6 +147,17 @@ requires that absolute title exactly; read a note first if you only have a short
 This is the sentence that makes the read/write split (S003/S010) legible to Claude at call time, not
 just to a spec reader.
 
+**`note_write`/`note_edit`/`note_append` all warn about inline tag extraction in their tool
+description** (a shared `TAG_ESCAPE_NOTE` string, appended to each): content passed to these tools is
+scanned for `#hashtags` on the next reindex exactly as S004 describes, and a caller has no way to see
+that scan happen — unlike a human typing directly into the vault in an editor with Obsidian's own tag
+highlighting, an agent calling these tools blind has no visual signal that adjacent refs like `#1/#2`
+just became tags. A single isolated ref like `#5` is already safe (rejected as purely numeric, per
+S004) and the description says so, so a caller doesn't over-escape things that were never at risk. The
+description states both escapes S004's extractor honors: a leading backslash (`\#foo`) for a single
+value, or wrapping a longer run in backticks/a code span (a hex color, or several adjacent refs) —
+backslash only escapes the one `#` it precedes, not a whole run.
+
 ### `note_write`
 
 **Input**: `note_title<string>`, `hash<null|string>`, `?metadata<json>`, `content<string>`,

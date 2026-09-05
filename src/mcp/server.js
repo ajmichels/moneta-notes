@@ -56,6 +56,11 @@ const SEARCH_DESCRIPTION = 'Full-text, semantic, or hybrid search over the vault
     + 'more similar). hybrid mode has neither — it reports fulltext_rank/semantic_rank position only, '
     + 'since its fused RRF score isn\'t independently meaningful.';
 
+const TAG_ESCAPE_NOTE = ' Content is scanned for inline #tags on reindex. An isolated ref like #5 is '
+    + 'already safe (rejected as purely numeric) — the risk is adjacency (#1/#2 from prose issue '
+    + 'refs) or a hex-looking run (#3498db), both of which become real tags. Escape a single value '
+    + 'with a backslash (\\#foo) or wrap a longer run in backticks, e.g. `#1/#2`.';
+
 const TOOL_DEFS = [
     {
         name: 'search',
@@ -194,7 +199,7 @@ const TOOL_DEFS = [
             + 'current content_hash). No hash against an existing title is an error, not a silent '
             + 'overwrite. note_title must be the note\'s exact absolute title (full path from vault '
             + 'root) — as returned by search or note_read, never a short or ambiguous wikilink '
-            + 'reference.',
+            + 'reference.' + TAG_ESCAPE_NOTE,
         inputSchema: {
             note_title: z.string(),
             hash: z.string().nullable(),
@@ -214,7 +219,7 @@ const TOOL_DEFS = [
         name: 'note_edit',
         description: 'Surgically replace old_txt with new_txt in an existing note. old_txt must '
             + 'match exactly once. note_title must be the note\'s exact absolute title, as returned '
-            + 'by search or note_read — no resolution fallback.',
+            + 'by search or note_read — no resolution fallback.' + TAG_ESCAPE_NOTE,
         inputSchema: {
             note_title: z.string(),
             hash: z.string(),
@@ -233,7 +238,8 @@ const TOOL_DEFS = [
     {
         name: 'note_append',
         description: 'Append content to the end of an existing note. note_title must be the note\'s '
-            + 'exact absolute title, as returned by search or note_read — no resolution fallback.',
+            + 'exact absolute title, as returned by search or note_read — no resolution fallback.'
+            + TAG_ESCAPE_NOTE,
         inputSchema: {
             note_title: z.string(),
             hash: z.string(),

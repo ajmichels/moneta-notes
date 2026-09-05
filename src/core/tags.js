@@ -1,6 +1,10 @@
 import { stripMdExtension, stripCodeRegions } from './note-fs.js';
 
-const INLINE_TAG_PATTERN = /(?<=^|[^\p{L}\p{N}_])#([\p{L}\p{N}_/-]+)/gmu;
+// (?<!\\) rejects a backslash-escaped "#" (Obsidian's own tag/heading escape syntax) without
+// consuming it, same non-consuming reasoning as the boundary lookbehind before it: consuming the
+// backslash would shift what "preceded by" means for a following character and isn't needed anyway
+// since a lookbehind never advances the match position.
+const INLINE_TAG_PATTERN = /(?<=^|[^\p{L}\p{N}_])(?<!\\)#([\p{L}\p{N}_/-]+)/gmu;
 
 export function extractTags(body, metadata = {}) {
     const seen = new Map();
