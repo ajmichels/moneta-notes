@@ -201,7 +201,7 @@ describe('processPath: content changed', () => {
         const db = makeTestDb();
         writeNote(
             vaultRoot, 'New Note.md',
-            '---\ntags:\n  - project\n---\nhello world, see [[Other Note]]', 1000,
+            '---\ntags:\n  - project\nstatus: active\n---\nhello world, see [[Other Note]]', 1000,
         );
 
         const result = await processPath(vaultRoot, db, 'New Note.md', baseDeps());
@@ -211,6 +211,7 @@ describe('processPath: content changed', () => {
         const note = db.prepare('SELECT * FROM notes WHERE path = ?').get('New Note.md');
         expect(note.mtime).toBe(1000);
         expect(note.extraction_version).toBe(EXTRACTION_VERSION);
+        expect(JSON.parse(note.metadata_json)).toEqual({ status: 'active' });
 
         const chunkRows = db.prepare('SELECT * FROM chunks WHERE note_id = ?').all(note.id);
         expect(chunkRows).toHaveLength(1);
@@ -273,6 +274,19 @@ describe('processPath: content changed', () => {
         const links = db.prepare('SELECT target_title FROM note_links WHERE source_note_id = ?')
             .all(note.id).map(r => r.target_title);
         expect(links).toEqual([ 'New Target' ]);
+    });
+
+    it('overwrites metadata_json in place on a content change, rather than merging', async () => {
+        const vaultRoot = makeTempVault();
+        const db = makeTestDb();
+        writeNote(vaultRoot, 'Changing.md', '---\nstatus: draft\n---\nbody', 1000);
+        await processPath(vaultRoot, db, 'Changing.md', baseDeps());
+
+        writeNote(vaultRoot, 'Changing.md', '---\npriority: 3\n---\nbody', 2000);
+        await processPath(vaultRoot, db, 'Changing.md', baseDeps());
+
+        const note = db.prepare('SELECT metadata_json FROM notes WHERE path = ?').get('Changing.md');
+        expect(JSON.parse(note.metadata_json)).toEqual({ priority: 3 });
     });
 
     it('logs an info line via the context logger with the note title and chunk count', async () => {

@@ -9,6 +9,7 @@ import { noteRead } from '../core/notes.js';
 import { stripMdExtension } from '../core/note-fs.js';
 import { extractTags, syncNoteTags, pruneOrphanedTags } from '../core/tags.js';
 import { extractLinkTargets, syncNoteLinks } from '../core/links.js';
+import { buildMetadataJson } from '../core/metadata.js';
 import { openDb, setMeta, enqueuePath } from '../core/db.js';
 import { getLogger, defaultLogDir, runWithLogger, getContextLogger } from '../logger.js';
 import { loadConfig } from '../config.js';
@@ -53,17 +54,20 @@ function isExtractionStale(existing) {
     return existing.extraction_version !== EXTRACTION_VERSION;
 }
 
-function upsertNoteRow(db, path, contentHash, lineCount, mtime, updatedAt) {
+function upsertNoteRow(db, path, contentHash, lineCount, mtime, updatedAt, metadataJson) {
     db.prepare(`
-        INSERT INTO notes (path, content_hash, line_count, mtime, updated_at, extraction_version)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO notes (
+            path, content_hash, line_count, mtime, updated_at, extraction_version, metadata_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(path) DO UPDATE SET
             content_hash = excluded.content_hash,
             line_count = excluded.line_count,
             mtime = excluded.mtime,
             updated_at = excluded.updated_at,
-            extraction_version = excluded.extraction_version
-    `).run(path, contentHash, lineCount, mtime, updatedAt, EXTRACTION_VERSION);
+            extraction_version = excluded.extraction_version,
+            metadata_json = excluded.metadata_json
+    `).run(path, contentHash, lineCount, mtime, updatedAt, EXTRACTION_VERSION, metadataJson);
     return db.prepare('SELECT id FROM notes WHERE path = ?').get(path).id;
 }
 
@@ -276,6 +280,7 @@ export async function processPath(vaultRoot, db, path, deps) {
 
     const noteId = upsertNoteRow(
         db, path, read.content_hash, read.total_lines, currentMtime, Math.floor(now / 1000),
+        buildMetadataJson(read.metadata),
     );
     replaceChunks(db, noteId, embeddedChunks, embeddingModel, embeddingVersion);
     replaceFtsRow(db, noteId, title, read.content);
