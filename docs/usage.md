@@ -63,6 +63,12 @@ Flags: `--regex`, `--note=<title>` (restrict to one note — resolves the same w
 does, see below), `--content` (show matched line text inline — CLI-only; the MCP tool always omits it
 for context-budget reasons), `--json`.
 
+A whole-vault `grep` (no `--note`) skips any path matched by a `.mnotesignore` file at the vault root —
+a plain-text, gitignore-syntax file (comments, negation, `Templates/`-style directory patterns all
+work) for excluding paths from both `grep` and the index (see `mnotes reindex` below). `--note=<title>`
+still finds a note directly by name even if it matches `.mnotesignore` — the exclusion only affects
+"search everywhere," not a lookup where you already know the title.
+
 ### `mnotes tags list` / `mnotes tags notes <tag>`
 
 ```sh
@@ -262,6 +268,13 @@ mnotes reindex "Weekly Notes/2026-W32"      # single note, streams attempt/retry
 Talks to the *running* daemon over its Unix socket — hard error ("could not connect to the daemon") if
 the daemon isn't up. Idempotent: running it twice with no intervening vault changes leaves the index in
 the same state both times. See [Process Management](process-management.md) if this fails.
+
+A full `mnotes reindex` (no title) also re-reads `.mnotesignore` and purges any already-indexed note
+that now matches it — the same cleanup a daemon restart does at startup. Add or edit `.mnotesignore`,
+then run a full `mnotes reindex`, to retroactively exclude a folder (e.g. Obsidian template files,
+which commonly have unquoted `{{placeholder}}` syntax in frontmatter that YAML misparses as nested
+objects — see [S010](specs/S010-shared-utilities.md)) without waiting for each file to be touched
+individually.
 
 ### `mnotes daemon <start|stop|restart>`
 

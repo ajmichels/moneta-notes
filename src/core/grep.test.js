@@ -102,6 +102,44 @@ describe('grep: glob restriction', () => {
     });
 });
 
+describe('grep: .mnotesignore', () => {
+    it('excludes matches from a path listed in .mnotesignore at the vault root', () => {
+        const vaultRoot = makeTempVault({
+            'A.md': 'first note mentions apple\n',
+            'Templates/Daily Note.md': 'a template also mentions apple\n',
+            '.mnotesignore': 'Templates/\n',
+        });
+
+        const results = grep(vaultRoot, 'apple');
+        const titles = results.map(r => r.noteTitle).sort();
+
+        expect(titles).toEqual([ 'A' ]);
+    });
+
+    it('searches normally when there is no .mnotesignore file', () => {
+        const vaultRoot = makeTempVault({
+            'A.md': 'first note mentions apple\n',
+            'Templates/Daily Note.md': 'a template also mentions apple\n',
+        });
+
+        const results = grep(vaultRoot, 'apple');
+        const titles = results.map(r => r.noteTitle).sort();
+
+        expect(titles).toEqual([ 'A', 'Templates/Daily Note' ]);
+    });
+
+    it('still respects noteTitle scoping for a note explicitly named even if it matches .mnotesignore', () => {
+        const vaultRoot = makeTempVault({
+            'Templates/Daily Note.md': 'a template mentions apple\n',
+            '.mnotesignore': 'Templates/\n',
+        });
+
+        const results = grep(vaultRoot, 'apple', { noteTitle: 'Templates/Daily Note' });
+
+        expect(results.map(r => r.noteTitle)).toEqual([ 'Templates/Daily Note' ]);
+    });
+});
+
 describe('grep: regex option', () => {
     it('matches literally by default even with regex metacharacters in the pattern', () => {
         const vaultRoot = makeTempVault({

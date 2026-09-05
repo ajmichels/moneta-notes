@@ -3,12 +3,14 @@ import { mkdtempSync, rmSync, writeFileSync, utimesSync, readFileSync, mkdirSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createConnection } from 'node:net';
+import ignore from 'ignore';
 import { openDb, getMeta } from '../core/db.js';
 import { getLogger, runWithLogger } from '../logger.js';
 import {
     enqueuePath, dequeueNextPath, processPath, deleteNoteByPath, recordFailure, drainQueueOnce,
-    watermarkCatchup, existenceCheck, createDebouncer, assertFswatchAvailable, spawnFswatch, runReindex,
-    createIpcServer, defaultSocketPath, startDaemon, createSerialGate, isDotPath, EXTRACTION_VERSION,
+    watermarkCatchup, existenceCheck, ignoredPathsCheck, createDebouncer, assertFswatchAvailable,
+    spawnFswatch, runReindex, createIpcServer, defaultSocketPath, startDaemon, createSerialGate,
+    isDotPath, EXTRACTION_VERSION,
 } from './daemon.js';
 import { appSupportDir } from '../platform/index.js';
 import { cleanupTempDir } from '../../vitest.helpers.js';
@@ -405,6 +407,48 @@ describe('processPath: dot paths', () => {
     });
 });
 
+describe('processPath: .mnotesignore paths', () => {
+    it('purges an already-indexed note whose path is now matched by ignoreMatcher', async () => {
+        const vaultRoot = makeTempVault();
+        const db = makeTestDb();
+        mkdirSync(join(vaultRoot, 'Templates'));
+        writeNote(vaultRoot, 'Templates/Daily Note.md', 'id: {{title}}', 1000);
+        db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('Templates/Daily Note.md', 'hash', 1, 1000, 1000);
+        const ignoreMatcher = ignore().add('Templates/');
+
+        const result = await processPath(
+            vaultRoot, db, 'Templates/Daily Note.md', { ...baseDeps(), ignoreMatcher },
+        );
+
+        expect(result).toEqual({ status: 'deleted' });
+        expect(db.prepare('SELECT id FROM notes WHERE path = ?').get('Templates/Daily Note.md'))
+            .toBeUndefined();
+    });
+
+    it('is a no-op for an ignored path with no matching notes row', async () => {
+        const vaultRoot = makeTempVault();
+        const db = makeTestDb();
+        const ignoreMatcher = ignore().add('Templates/');
+
+        const result = await processPath(vaultRoot, db, 'Templates/New.md', { ...baseDeps(), ignoreMatcher });
+
+        expect(result).toEqual({ status: 'deleted' });
+    });
+
+    it('does not purge or skip a path the ignoreMatcher does not match', async () => {
+        const vaultRoot = makeTempVault();
+        const db = makeTestDb();
+        writeNote(vaultRoot, 'Visible.md', 'body', 1000);
+        const ignoreMatcher = ignore().add('Templates/');
+
+        const result = await processPath(vaultRoot, db, 'Visible.md', { ...baseDeps(), ignoreMatcher });
+
+        expect(result.status).toBe('reindexed');
+    });
+});
+
 describe('deleteNoteByPath', () => {
     it('removes chunks, chunk_vectors, notes_fts, note_tags, and note_links for the note', async () => {
         const vaultRoot = makeTempVault();
@@ -623,6 +667,20 @@ describe('watermarkCatchup', () => {
         expect(count).toBe(1);
         expect(db.prepare('SELECT path FROM index_queue').get().path).toBe('Visible.md');
     });
+
+    it('skips paths matched by a supplied ignoreMatcher, never descending into an ignored folder', () => {
+        const vaultRoot = makeTempVault();
+        writeNote(vaultRoot, 'Visible.md', 'v', 1000);
+        mkdirSync(join(vaultRoot, 'Templates'));
+        writeNote(vaultRoot, 'Templates/Daily Note.md', 't', 1000);
+        const db = makeTestDb();
+        const ignoreMatcher = ignore().add('Templates/');
+
+        const count = watermarkCatchup(db, vaultRoot, 2000, ignoreMatcher);
+
+        expect(count).toBe(1);
+        expect(db.prepare('SELECT path FROM index_queue').get().path).toBe('Visible.md');
+    });
 });
 
 describe('isDotPath', () => {
@@ -659,6 +717,34 @@ describe('existenceCheck', () => {
 
         expect(count).toBe(1);
         expect(db.prepare('SELECT path FROM notes').get().path).toBe('Still Here.md');
+    });
+});
+
+describe('ignoredPathsCheck', () => {
+    it('deletes notes rows whose path is matched by the ignore matcher', () => {
+        const db = makeTestDb();
+        db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('Templates/Daily Note.md', 'hash', 1, 1000, 1000);
+        db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('Visible.md', 'hash', 1, 1000, 1000);
+        const ignoreMatcher = ignore().add('Templates/');
+
+        const count = ignoredPathsCheck(db, ignoreMatcher);
+
+        expect(count).toBe(1);
+        expect(db.prepare('SELECT path FROM notes').get().path).toBe('Visible.md');
+    });
+
+    it('is a no-op when nothing indexed matches the ignore matcher', () => {
+        const db = makeTestDb();
+        db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('Visible.md', 'hash', 1, 1000, 1000);
+        const ignoreMatcher = ignore().add('Templates/');
+
+        expect(ignoredPathsCheck(db, ignoreMatcher)).toBe(0);
     });
 });
 
@@ -816,6 +902,23 @@ describe('runReindex', () => {
         const finalOutcome = messages.find((m) => m.path === 'Flaky.md' && m.outcome === 'reindexed');
         expect(finalOutcome).toBeDefined();
         expect(messages.filter((m) => m.outcome === 'attempt_failed')).toHaveLength(3);
+    });
+
+    it('skips .mnotesignore-matched files and purges already-indexed ones during a full-vault run', async () => {
+        const vaultRoot = makeTempVault();
+        writeNote(vaultRoot, 'A.md', 'note a', 1000);
+        mkdirSync(join(vaultRoot, 'Templates'));
+        writeNote(vaultRoot, 'Templates/Daily Note.md', 'id: {{title}}', 1000);
+        const db = makeTestDb();
+        db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('Templates/Daily Note.md', 'hash', 1, 1000, 1000);
+        const ignoreMatcher = ignore().add('Templates/');
+
+        await runReindex(vaultRoot, db, { ...baseDeps(), now: 0, ignoreMatcher }, {}, () => {});
+
+        const paths = db.prepare('SELECT path FROM notes').all().map((r) => r.path);
+        expect(paths).toEqual([ 'A.md' ]);
     });
 
     it('reports failed in the summary once retries are exhausted', async () => {
@@ -994,6 +1097,74 @@ describe('startDaemon', () => {
         expect(messages.find((m) => m.summary)).toBeDefined();
 
         await daemon.stop();
+    });
+
+    it('honors a .mnotesignore file at the vault root, never indexing matched paths', async () => {
+        const vaultRoot = makeTempVault();
+        writeNote(vaultRoot, 'Visible.md', 'body', 1000);
+        mkdirSync(join(vaultRoot, 'Templates'));
+        writeNote(vaultRoot, 'Templates/Daily Note.md', 'id: {{title}}', 1000);
+        writeFileSync(join(vaultRoot, '.mnotesignore'), 'Templates/\n');
+        const socketDir = makeTempVault();
+        const socketPath = join(socketDir, 'daemon.sock');
+
+        const daemon = await startDaemon({
+            vaultRoot,
+            dbPath: ':memory:',
+            socketPath,
+            createWatcher: () => ({ stop() {} }),
+            chunkText: fakeChunkText,
+            embed: fakeEmbed,
+            embeddingModel: 'test-model',
+            embeddingVersion: 'v1',
+            drainIntervalMs: null,
+        });
+
+        const paths = daemon.db.prepare('SELECT path FROM notes').all().map((r) => r.path);
+        expect(paths).toEqual([ 'Visible.md' ]);
+
+        await daemon.stop();
+    });
+
+    it('purges an already-indexed note on startup once .mnotesignore starts matching its path', async () => {
+        const vaultRoot = makeTempVault();
+        mkdirSync(join(vaultRoot, 'Templates'));
+        writeNote(vaultRoot, 'Templates/Daily Note.md', 'id: {{title}}', 1000);
+        const dbPath = join(makeTempVault(), 'index.db');
+        const socketDir = makeTempVault();
+        const socketPath = join(socketDir, 'daemon.sock');
+
+        const first = await startDaemon({
+            vaultRoot,
+            dbPath,
+            socketPath,
+            createWatcher: () => ({ stop() {} }),
+            chunkText: fakeChunkText,
+            embed: fakeEmbed,
+            embeddingModel: 'test-model',
+            embeddingVersion: 'v1',
+            drainIntervalMs: null,
+        });
+        expect(first.db.prepare('SELECT path FROM notes').get().path).toBe('Templates/Daily Note.md');
+        await first.stop();
+
+        writeFileSync(join(vaultRoot, '.mnotesignore'), 'Templates/\n');
+
+        const second = await startDaemon({
+            vaultRoot,
+            dbPath,
+            socketPath,
+            createWatcher: () => ({ stop() {} }),
+            chunkText: fakeChunkText,
+            embed: fakeEmbed,
+            embeddingModel: 'test-model',
+            embeddingVersion: 'v1',
+            drainIntervalMs: null,
+        });
+
+        expect(second.db.prepare('SELECT COUNT(*) AS count FROM notes').get().count).toBe(0);
+
+        await second.stop();
     });
 
     it('logs "daemon started" via the context logger before opening the DB', async () => {

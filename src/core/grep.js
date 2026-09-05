@@ -40,6 +40,14 @@ export function grep(vaultRoot, pattern, options = {}) {
     if (!regex) {
         args.push('-F');
     }
+    // .mnotesignore isn't a name ripgrep recognizes on its own (only .gitignore/.ignore/.rgignore
+    // are), so it has to be pointed at explicitly. Ignore rules only apply to ripgrep's own
+    // directory walk (the noteTitle === null branch below) — an explicitly named target file is
+    // still searched regardless, same as `rg pattern some/gitignored/file` would be.
+    const ignoreFilePath = join(vaultRoot, '.mnotesignore');
+    if (existsSync(ignoreFilePath)) {
+        args.push('--ignore-file', ignoreFilePath);
+    }
 
     let targetPath = null;
     if (noteTitle !== null) {

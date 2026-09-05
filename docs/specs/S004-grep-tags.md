@@ -66,6 +66,19 @@ never does.
   open the file in an editor. This is intentionally different from `file_line_count` above, which is
   body-only; the two conventions serve different purposes (locating a match on disk vs. reporting the
   note's overall length) and shouldn't be reconciled to match each other.
+- **`.mnotesignore`** (S010's `loadIgnoreMatcher` owns the file format; this is the other consumer):
+  a gitignore-style ignore file at the vault root, the same mechanism S005's indexer uses to keep
+  Obsidian template folders (and anything else a caller wants excluded) out of the index. `grep`
+  doesn't use `loadIgnoreMatcher`/the `ignore` npm package directly — since it already shells out to
+  a real `rg` binary, it points ripgrep at the file itself with `--ignore-file <vaultRoot>/.mnotesignore`
+  when that file exists (ripgrep only auto-discovers `.gitignore`/`.ignore`/`.rgignore` by name, not an
+  arbitrary filename, so this has to be explicit). This only takes effect for a whole-vault search
+  (`note_title` omitted) — ripgrep's ignore-file filtering applies to its own directory walk, not to a
+  file passed as an explicit positional argument, so a `note_title`-scoped search still finds a note
+  even if it happens to match a `.mnotesignore` pattern. That's deliberate, not an oversight: `grep`'s
+  `note_title` is read-only and can't pollute the index the way S005's exclusion is protecting against,
+  so there's no reason to also block a caller who already knows the note's exact title from searching
+  it directly.
 
 ## Tags
 

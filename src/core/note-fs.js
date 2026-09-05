@@ -1,4 +1,6 @@
+import { existsSync, readFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
+import ignore from 'ignore';
 
 export function resolveVaultPath(vaultRoot, relativePath) {
     const candidate = join(vaultRoot, relativePath);
@@ -69,4 +71,15 @@ export function resolveAgainstIndex(index, rawTitle) {
 
 export function resolveTitle(db, rawTitle) {
     return resolveAgainstIndex(buildTitleIndex(db), rawTitle);
+}
+
+// Gitignore-style exclusion for vault-relative paths (Obsidian template folders being the driving
+// case — see S010). An absent .mnotesignore is equivalent to an empty one: the returned matcher's
+// ignores() always returns false, no different from a project with no .gitignore. Checking a
+// directory during a walk should pass a trailing slash (matches ignore's own directory convention)
+// so a dir-only pattern like "Templates/" matches before descending into it.
+export function loadIgnoreMatcher(vaultRoot) {
+    const ignoreFilePath = join(vaultRoot, '.mnotesignore');
+    const patterns = existsSync(ignoreFilePath) ? readFileSync(ignoreFilePath, 'utf8') : '';
+    return ignore().add(patterns);
 }

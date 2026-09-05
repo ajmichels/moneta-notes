@@ -89,6 +89,42 @@ This spec was split out after implementing S006 surfaced two real problems with 
   exists to prevent (see "Purpose" above). `core/tags.js` now imports this instead of keeping its own
   copy.
 
+## `.mnotesignore`
+
+- **`loadIgnoreMatcher(vaultRoot) -> matcher`** — reads a gitignore-style `.mnotesignore` file at the
+  vault root (via the `ignore` npm package — negation, `**`, directory-only trailing-slash patterns,
+  comments, all standard gitignore syntax) and returns a matcher exposing `.ignores(relativePath)`. An
+  absent `.mnotesignore` is equivalent to an empty one: `.ignores()` always returns `false`, the same
+  as a project with no `.gitignore`. Checking a directory (as opposed to a file) requires appending a
+  trailing slash to the path passed in — `ignore`'s own convention for correctly matching a dir-only
+  pattern like `Templates/` before descending into it, rather than only matching files inside it one by
+  one.
+- **Why this exists**: an Obsidian template note's frontmatter commonly contains an unquoted
+  Templater/core-Templates placeholder like `id: {{title}}`. YAML parses `{{title}}` as flow-mapping
+  syntax (a mapping whose key is itself a mapping, with an implicit `null` value) rather than the
+  literal string it's meant to be — so an indexed template note ends up with a nested-object `id`
+  instead of a scalar, which is exactly the kind of malformed metadata `S014`'s `metadata_keys`/
+  `metadata_query` assume never happens. `.mnotesignore` is the general fix (exclude the folder rather
+  than special-case template syntax), modeled directly on how Obsidian itself scopes both its core
+  Templates plugin and the Templater community plugin: a single configurable template folder, no
+  frontmatter marker or naming convention involved (verified against Obsidian's own help docs and
+  Templater's settings docs before choosing this shape).
+- **Where a vault-relative path comes from before calling `.ignores()`**: the same `toVaultRelativePath`
+  (S005) / `pathToTitle`-adjacent conventions already used everywhere else in this file — `/`-separated,
+  no leading slash, no `./` prefix.
+- **Two consumers, two different mechanisms** — this function itself is only used by S005's indexer
+  (which walks the filesystem in plain JS via `readdirSync`, so it needs an in-process matcher to prune
+  the walk and to purge already-indexed rows). S004's `grep` shells out to a real `rg` binary instead,
+  so rather than loading a second copy of the same patterns into JS, it points ripgrep directly at the
+  file with `--ignore-file <vaultRoot>/.mnotesignore` — see S004 for why. Both read the same file, at
+  the same path, with the same gitignore syntax; only the enforcement mechanism differs.
+- **Scope, deliberately**: only S005 (indexing) and S004 (grep) consult `.mnotesignore`. A caller that
+  already knows a note's exact title — `note_read`, `note_write`, `note_edit`, etc. — is never blocked
+  from reading or writing it just because it lives under an ignored path; exclusion only prevents a
+  note from entering the index (and, for `grep`, from surfacing in a vault-wide search) in the first
+  place. This mirrors how dotfile exclusion (S005's `isDotPath`) has always worked here — it gates the
+  indexer, not every `core/` operation.
+
 ## Title resolution
 
 `titleToPath` is a literal join — it has no concept of "close enough." That's correct for a title

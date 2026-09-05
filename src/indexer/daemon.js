@@ -5,8 +5,9 @@ import { execFileSync, spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
+import ignore from 'ignore';
 import { noteRead } from '../core/notes.js';
-import { stripMdExtension } from '../core/note-fs.js';
+import { stripMdExtension, loadIgnoreMatcher } from '../core/note-fs.js';
 import { extractTags, syncNoteTags, pruneOrphanedTags } from '../core/tags.js';
 import { extractLinkTargets, syncNoteLinks } from '../core/links.js';
 import { buildMetadataJson } from '../core/metadata.js';
@@ -235,8 +236,19 @@ function purgeDotPath(db, path) {
     return true;
 }
 
+// Same shape as purgeDotPath, for a path matched by .mnotesignore instead of a dot-segment.
+// Reached the same three ways: a leftover queue row, an explicit `mnotes reindex <title>` naming
+// a now-ignored note, or (this feature's own addition) a live fswatch event for one.
+function purgeIgnoredPath(db, ignoreMatcher, path) {
+    if (!ignoreMatcher.ignores(path)) {
+        return false;
+    }
+    deleteNoteByPath(db, path);
+    return true;
+}
+
 export async function processPath(vaultRoot, db, path, deps) {
-    if (purgeDotPath(db, path)) {
+    if (purgeDotPath(db, path) || purgeIgnoredPath(db, deps.ignoreMatcher ?? ignore(), path)) {
         return { status: 'deleted' };
     }
 
@@ -305,31 +317,48 @@ export function isDotPath(relativePath) {
     return relativePath.split(sep).some(isDotEntryName);
 }
 
-function walkVaultForMarkdown(vaultRoot) {
+// A gitignore-style .mnotesignore at the vault root (loaded via S010's loadIgnoreMatcher) — the
+// Obsidian template-folder case that motivated this (a template's frontmatter placeholders like
+// `id: {{title}}` parse as nested YAML objects, not the literal string they're meant to be, which
+// otherwise pollutes the index). Directories are checked with a trailing slash so a dir-only
+// pattern like "Templates/" prunes the walk before descending, same convention `ignore` itself
+// recommends for directory paths.
+function walkVaultForMarkdown(vaultRoot, ignoreMatcher = ignore()) {
     const results = [];
-    function walk(dir) {
-        for (const entry of readdirSync(dir, { withFileTypes: true })) {
-            if (isDotEntryName(entry.name)) {
-                continue;
-            }
-            const full = join(dir, entry.name);
-            if (entry.isDirectory()) {
+
+    function visitEntry(dir, entry) {
+        if (isDotEntryName(entry.name)) {
+            return;
+        }
+        const full = join(dir, entry.name);
+        const relativePath = toVaultRelativePath(vaultRoot, full);
+        if (entry.isDirectory()) {
+            if (!ignoreMatcher.ignores(`${relativePath}/`)) {
                 walk(full);
-            } else if (entry.isFile() && entry.name.endsWith('.md')) {
-                results.push(full);
             }
+            return;
+        }
+        if (entry.isFile() && entry.name.endsWith('.md') && !ignoreMatcher.ignores(relativePath)) {
+            results.push(full);
         }
     }
+
+    function walk(dir) {
+        for (const entry of readdirSync(dir, { withFileTypes: true })) {
+            visitEntry(dir, entry);
+        }
+    }
+
     walk(vaultRoot);
     return results;
 }
 
-export function watermarkCatchup(db, vaultRoot, now = Date.now()) {
+export function watermarkCatchup(db, vaultRoot, now = Date.now(), ignoreMatcher = ignore()) {
     const row = db.prepare('SELECT MAX(updated_at) AS watermark FROM notes').get();
     const watermark = row.watermark ?? 0;
 
     let enqueuedCount = 0;
-    for (const absPath of walkVaultForMarkdown(vaultRoot)) {
+    for (const absPath of walkVaultForMarkdown(vaultRoot, ignoreMatcher)) {
         const mtimeSec = Math.floor(statSync(absPath).mtimeMs / 1000);
         if (mtimeSec > watermark) {
             enqueuePath(db, toVaultRelativePath(vaultRoot, absPath), now);
@@ -349,6 +378,24 @@ export function existenceCheck(db, vaultRoot) {
         }
     }
     getContextLogger().info('existence check complete', { deleted_count: deletedCount });
+    return deletedCount;
+}
+
+// Retroactive cleanup for a .mnotesignore that starts matching a path already sitting in the
+// index (added after the note was indexed, or a broader pattern than before) — mirrors
+// existenceCheck's sweep-and-purge shape. Run at daemon startup and at the start of a full-vault
+// runReindex, so both "restart the daemon" and "run `mnotes reindex`" self-heal without the
+// caller needing to reason about what was indexed before the pattern existed (CLAUDE.md's
+// idempotent-reindex rule).
+export function ignoredPathsCheck(db, ignoreMatcher) {
+    let deletedCount = 0;
+    for (const row of db.prepare('SELECT path FROM notes').all()) {
+        if (ignoreMatcher.ignores(row.path)) {
+            deleteNoteByPath(db, row.path);
+            deletedCount += 1;
+        }
+    }
+    getContextLogger().info('ignored-paths check complete', { deleted_count: deletedCount });
     return deletedCount;
 }
 
@@ -433,9 +480,14 @@ export async function runReindex(vaultRoot, db, deps, options = {}, onMessage = 
         note_title: noteTitle,
     });
 
+    const ignoreMatcher = deps.ignoreMatcher ?? ignore();
+    if (noteTitle === null) {
+        ignoredPathsCheck(db, ignoreMatcher);
+    }
+
     const paths = noteTitle !== null
         ? [ `${noteTitle}.md` ]
-        : walkVaultForMarkdown(vaultRoot).map((absPath) => toVaultRelativePath(vaultRoot, absPath));
+        : walkVaultForMarkdown(vaultRoot, ignoreMatcher).map((absPath) => toVaultRelativePath(vaultRoot, absPath));
 
     for (const path of paths) {
         enqueuePath(db, path, now);
@@ -527,7 +579,7 @@ async function resolveChunkText(providedChunkText) {
     return (body) => realChunkText(body, (text) => realTokenizeWithOffsets(tokenizer, text));
 }
 
-function defaultCreateWatcher(vaultRoot, db, { debounceMs } = {}) {
+function defaultCreateWatcher(vaultRoot, db, { debounceMs, ignoreMatcher = ignore() } = {}) {
     let stopped = false;
 
     const debouncer = createDebouncer((path) => {
@@ -550,7 +602,7 @@ function defaultCreateWatcher(vaultRoot, db, { debounceMs } = {}) {
             return;
         }
         const relativePath = toVaultRelativePath(vaultRoot, absPath);
-        if (!isDotPath(relativePath)) {
+        if (!isDotPath(relativePath) && !ignoreMatcher.ignores(relativePath)) {
             debouncer.notify(relativePath);
         }
     });
@@ -628,18 +680,21 @@ export async function startDaemon(options = {}) {
     const { db, reindexRequired } = openDb(dbPath);
 
     const chunkText = await resolveChunkText(options.chunkText);
-    const deps = { chunkText, embed, embedQuery, embeddingModel, embeddingVersion, backoffSchedule };
+    const ignoreMatcher = loadIgnoreMatcher(vaultRoot);
+    const deps = { chunkText, embed, embedQuery, embeddingModel, embeddingVersion, backoffSchedule, ignoreMatcher };
 
-    watermarkCatchup(db, vaultRoot);
+    watermarkCatchup(db, vaultRoot, undefined, ignoreMatcher);
     if (!reindexRequired) {
         // A schema rebuild (reindexRequired) resets the watermark to 0, so watermarkCatchup alone
-        // already re-enqueues the entire vault — existenceCheck would find nothing to delete
-        // against a freshly-rebuilt, currently-empty notes table, so it's skipped in that case.
+        // already re-enqueues the entire vault — existenceCheck/ignoredPathsCheck would find
+        // nothing to delete against a freshly-rebuilt, currently-empty notes table, so both are
+        // skipped in that case.
         existenceCheck(db, vaultRoot);
+        ignoredPathsCheck(db, ignoreMatcher);
     }
 
     const gate = createSerialGate();
-    const watcher = createWatcher(vaultRoot, db, { debounceMs });
+    const watcher = createWatcher(vaultRoot, db, { debounceMs, ignoreMatcher });
     const drainTimer = startDrainLoop(vaultRoot, db, deps, drainIntervalMs, gate);
     if (drainTimer === null) {
         await drainQueueOnce(vaultRoot, db, deps);

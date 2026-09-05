@@ -38,17 +38,45 @@ was triggered.
    empty/reset watermark).
 2. **Watermark catch-up**: compute `MAX(notes.updated_at)` across the `notes` table (0 if empty —
    this is what makes first-run naturally index the entire vault, no special-cased "initial index"
-   path needed). Walk the vault, and for every `.md` file whose mtime is newer than the watermark,
-   enqueue its path into `index_queue`. This catches anything changed while the daemon was down
-   (crash, machine sleep, disabled), without a full unconditional walk-and-reprocess of every file.
+   path needed). Walk the vault (skipping excluded paths — see "Path exclusion" below), and for every
+   `.md` file whose mtime is newer than the watermark, enqueue its path into `index_queue`. This
+   catches anything changed while the daemon was down (crash, machine sleep, disabled), without a full
+   unconditional walk-and-reprocess of every file.
 3. **Existence check**: for every path currently in `notes`, verify it still exists on disk (a cheap
    `stat`, not a content read). Delete rows (cascading to `chunks`/`chunk_vectors`/`note_tags`/
    `note_links` per S001's `ON DELETE CASCADE`) for any that don't — catches deletions that happened
    while the daemon was down, which the watermark pass alone can't (a deleted file has no mtime to
    compare).
+3a. **Ignored-paths check**: for every path currently in `notes`, delete the row (same cascade as
+   above) if it now matches `.mnotesignore` (see "Path exclusion"). This is what makes adding a new
+   `.mnotesignore` pattern self-healing — a note indexed before the pattern existed gets purged on the
+   next daemon start, without anyone needing to touch the file itself or reason about what's already in
+   the index. Skipped in the same case existence-check is (a schema rebuild leaves `notes` empty, so
+   there's nothing to sweep).
 4. Start the `fswatch` watcher on the vault directory.
 5. Start the queue drainer (processes `index_queue` continuously — see below).
 6. Start the Unix-socket IPC listener (see below).
+
+### Path exclusion
+
+Two kinds of path never enter the index, checked at every point a path could reach one (the startup
+walk, the live `fswatch` callback, and `processPath` itself, which purges a stray already-indexed row
+for either kind the same way regardless of how it got there — a leftover `index_queue` row from before
+the exclusion existed, or an explicit `mnotes reindex <title>` naming one):
+
+- **Dotfiles and dot-directories** (`.obsidian/`, `.trash/`, `.git/`, `.DS_Store`, ...) — never notes,
+  matched by `isDotPath`/`isDotEntryName`, no configuration involved.
+- **`.mnotesignore`** — a gitignore-style file at the vault root (S010's `loadIgnoreMatcher` owns
+  parsing it; see S010 for why this exists and the exact matcher contract). Loaded once at daemon
+  startup and threaded through `deps.ignoreMatcher` to everywhere a path gets tested — the walk (step
+  2), the `fswatch` callback, `processPath`'s purge check, and a full-vault `mnotes reindex` (which
+  also re-runs the ignored-paths sweep from step 3a before walking, for the same self-healing reason).
+  Editing `.mnotesignore` takes effect on the next daemon restart or full `mnotes reindex`; there's no
+  live file-watch on `.mnotesignore` itself.
+
+A single-title `mnotes reindex <title>` for a path matching either kind of exclusion purges it (if
+already indexed) rather than indexing it — naming a note explicitly doesn't override the exclusion,
+it just triggers the same cleanup a background pass would eventually do anyway.
 
 ## Live file-change handling
 

@@ -1,10 +1,10 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
     titleToPath, pathToTitle, stripMdExtension, countLines, stripCodeRegions,
-    buildTitleIndex, resolveAgainstIndex, resolveTitle, resolveVaultPath,
+    buildTitleIndex, resolveAgainstIndex, resolveTitle, resolveVaultPath, loadIgnoreMatcher,
 } from './note-fs.js';
 import { openDb } from './db.js';
 import { cleanupTempDir } from '../../vitest.helpers.js';
@@ -193,5 +193,38 @@ describe('buildTitleIndex / resolveAgainstIndex / resolveTitle', () => {
         expect(resolveAgainstIndex(index, 'Target')).toBe('X/Target');
         expect(resolveAgainstIndex(index, 'Nope')).toBeNull();
         db.close();
+    });
+});
+
+describe('loadIgnoreMatcher', () => {
+    it('ignores nothing when the vault has no .mnotesignore file', () => {
+        const vaultRoot = makeTempVault();
+        const matcher = loadIgnoreMatcher(vaultRoot);
+
+        expect(matcher.ignores('Templates/Daily Note.md')).toBe(false);
+    });
+
+    it('matches a plain-folder pattern against files nested under it', () => {
+        const vaultRoot = makeTempVault();
+        writeFileSync(join(vaultRoot, '.mnotesignore'), 'Templates/\n');
+
+        const matcher = loadIgnoreMatcher(vaultRoot);
+
+        expect(matcher.ignores('Templates/Daily Note.md')).toBe(true);
+        expect(matcher.ignores(`${'Templates'}/`)).toBe(true);
+        expect(matcher.ignores('Weekly Notes/2026-W32.md')).toBe(false);
+    });
+
+    it('supports gitignore-style comments, blank lines, and negation', () => {
+        const vaultRoot = makeTempVault();
+        writeFileSync(
+            join(vaultRoot, '.mnotesignore'),
+            '# ignore all templates except one\nTemplates/*\n!Templates/Extraction.md\n',
+        );
+
+        const matcher = loadIgnoreMatcher(vaultRoot);
+
+        expect(matcher.ignores('Templates/Daily Note.md')).toBe(true);
+        expect(matcher.ignores('Templates/Extraction.md')).toBe(false);
     });
 });
