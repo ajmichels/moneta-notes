@@ -220,6 +220,15 @@ excluded — matches S001's `chunks.char_start`/`char_end` being offsets into th
 
 ## Embedding pipeline lifecycle
 
+- **Model cache location**: `embed.js` sets `@huggingface/transformers`' `env.cacheDir` to
+  `appSupportDir()/models` (S009's platform abstraction — the same persistent, package-manager-
+  independent directory `index.db` lives in) rather than leaving it at the library default, a path
+  inside `@huggingface/transformers`' own `node_modules` directory. That default gets wiped by any
+  `pnpm install`/reinstall (a pnpm major-version upgrade forcing a fresh `node_modules` layout, a
+  lockfile-forced clean install, etc.), silently forcing a redownload from huggingface.co on next
+  daemon start — which fails outright on a machine without direct internet access to it (see the
+  TLS-interception note in S009's Concept mapping). Pointing `cacheDir` outside `node_modules` makes
+  a once-downloaded model survive any future reinstall.
 - **Precision**: `q8` (8-bit quantized) via `onnx-community/Qwen3-Embedding-0.6B-ONNX`'s `dtype`
   option — smallest memory footprint of the three available options (`fp32`/`fp16`/`q8`), acceptable
   quality tradeoff for a retrieval/similarity use case (not generation).

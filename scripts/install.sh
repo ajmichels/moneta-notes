@@ -96,6 +96,17 @@ else
 fi
 DAEMON_PATH_ENV="$FSWATCH_DIR:/usr/bin:/bin:/usr/sbin:/sbin"
 
+# Same PATH-visibility problem, for a different env var: a TLS-intercepting corporate proxy (e.g.
+# Zscaler) needs its root CA handed to Node via NODE_EXTRA_CA_CERTS, or the daemon's first-ever
+# model download (step 9 below, and any later redownload after a wiped cache) fails with a fetch
+# error. Services run with launchd/systemd's own minimal environment, not the interactive shell's —
+# they never see a shell rc file's `export NODE_EXTRA_CA_CERTS=...` — so carry forward whatever this
+# installer's own environment has at install time, same as the fswatch PATH fix above.
+NODE_EXTRA_CA_CERTS="${NODE_EXTRA_CA_CERTS:-}"
+if [ -n "$NODE_EXTRA_CA_CERTS" ]; then
+    echo "Carrying NODE_EXTRA_CA_CERTS=$NODE_EXTRA_CA_CERTS into the daemon's service environment."
+fi
+
 os_write_service_files "$SERVICE_DIR"
 
 # --- Step 8: activate both services --------------------------------------------
@@ -127,12 +138,19 @@ fi
 MCP_SERVER_NAME="mnotes"
 MCP_SERVER_SCRIPT="$REPO_ROOT/src/mcp/server.js"
 
+# claude mcp add's -e flags, if any — same NODE_EXTRA_CA_CERTS passthrough as the daemon's service
+# environment above, in case Claude Code itself was launched outside a shell that sourced it.
+MCP_ENV_ARGS=()
+if [ -n "$NODE_EXTRA_CA_CERTS" ]; then
+    MCP_ENV_ARGS=(-e "NODE_EXTRA_CA_CERTS=$NODE_EXTRA_CA_CERTS")
+fi
+
 if ! command -v claude >/dev/null 2>&1; then
-    echo "WARNING: \`claude\` CLI not found — skipping MCP server registration. Run \`claude mcp add $MCP_SERVER_NAME -s user -- $NODE_BIN --disable-warning=ExperimentalWarning $MCP_SERVER_SCRIPT\` manually once Claude Code is installed."
+    echo "WARNING: \`claude\` CLI not found — skipping MCP server registration. Run \`claude mcp add $MCP_SERVER_NAME -s user ${MCP_ENV_ARGS[*]:-} -- $NODE_BIN --disable-warning=ExperimentalWarning $MCP_SERVER_SCRIPT\` manually once Claude Code is installed."
 elif claude mcp get "$MCP_SERVER_NAME" >/dev/null 2>&1; then
     echo "MCP server \"$MCP_SERVER_NAME\" already registered with Claude Code — leaving it untouched."
 else
-    claude mcp add "$MCP_SERVER_NAME" -s user -- "$NODE_BIN" --disable-warning=ExperimentalWarning "$MCP_SERVER_SCRIPT"
+    claude mcp add "$MCP_SERVER_NAME" -s user "${MCP_ENV_ARGS[@]}" -- "$NODE_BIN" --disable-warning=ExperimentalWarning "$MCP_SERVER_SCRIPT"
     echo "Registered MCP server \"$MCP_SERVER_NAME\" with Claude Code (user scope)."
 fi
 

@@ -135,6 +135,7 @@ Both hints are static strings, not scripts that shell out to detect anything —
 | Catch-up after sleep/off | `StartCalendarInterval`'s built-in wake catch-up | `Persistent=true` on the `.timer` unit (functionally equivalent) |
 | Background-task identity fix | `launchd/launcher.c` + ad-hoc `codesign`, wrapped in `MonetaNotes.app` — needed because macOS's Background Task Management attributes a LaunchAgent's displayed identity to its launched binary's code signature, which otherwise resolves to Node.js Foundation's | **doesn't exist as a problem.** systemd units carry their own `Description=` string as their identity; nothing attributes identity via a binary's signature, so `ExecStart` just points straight at `node` — no bundle, no signing step, no fallback-wrapper case to speak of |
 | `fswatch` PATH visibility | plist's `EnvironmentVariables` dict (services run with a minimal PATH lacking Homebrew's prefix) | unit's `Environment=PATH=...` line (same underlying problem — a systemd user service's default PATH is similarly minimal) |
+| TLS-intercepting proxy visibility (e.g. Zscaler) | plist's `EnvironmentVariables` dict carries `NODE_EXTRA_CA_CERTS` | unit's `Environment=NODE_EXTRA_CA_CERTS=...` line (same underlying problem as the PATH row above, for a different env var: a corporate proxy's root CA lands in the OS/browser trust store, but Node's `fetch` doesn't consult it, and neither service sees a shell rc file's `export NODE_EXTRA_CA_CERTS=...` — install.sh carries forward whatever value is in its own environment at install time, empty string if unset, which Node treats as a no-op) |
 | Running without an active login session | not supported — LaunchAgents require an active GUI session (`gui/<uid>`) | not supported by default either — a systemd *user* instance normally only runs during an active login session. A headless/always-on Linux box needs `loginctl enable-linger $(whoami)` to keep it running unattended; `scripts/install.sh`'s Linux path prints this as an install-time hint (same "warn and continue" posture as the `rg`/`fswatch` preflight checks), not something it runs automatically |
 
 The native-launcher row is the one place this project has genuinely asymmetric logic between the two
@@ -287,6 +288,11 @@ step 10's `pnpm add --global` links the CLI to this same `node_modules` rather t
      unit line) — services on both platforms run with a minimal PATH that omits wherever `fswatch` was
      installed, so `FSWATCH_DIR` (resolved via `command -v fswatch`, common to both OSes) gets prepended
      either way, just rendered into each platform's own format.
+   - Same mechanism, for `NODE_EXTRA_CA_CERTS`: if set in install.sh's own environment (e.g. a shell rc
+     file exporting it for a TLS-intercepting corporate proxy — see Concept mapping above), its value is
+     rendered into the same plist dict / unit `Environment=` line, empty string otherwise (a harmless
+     no-op for Node). This is an install-time snapshot, same limitation the PATH fix already has —
+     changing the value later means re-running `install.sh` to pick it up.
 8. **Activate both services** (`os_enable_services`): macOS —
    `launchctl bootstrap gui/$(id -u) <plist path>` for both plists. Linux —
    `systemctl --user enable --now <unit>` for both `mnotes.service` and `mnotes-logrotate.timer` (not
@@ -326,7 +332,10 @@ step 10's `pnpm add --global` links the CLI to this same `node_modules` rather t
     service on either OS, so there's no separate identity to fix here (macOS's BTM concern or otherwise),
     only the same `ExperimentalWarning` suppression already applied everywhere else. This step is
     independent of step 10's `mnotes-mcp` having successfully landed on `PATH` — a step 10 failure
-    shouldn't cascade into step 11 also failing.
+    shouldn't cascade into step 11 also failing. If `NODE_EXTRA_CA_CERTS` is set in install.sh's own
+    environment (same check as step 7), it's also passed as `-e NODE_EXTRA_CA_CERTS=...` on this
+    `claude mcp add` call — Claude Code may itself have been launched outside a shell that sourced it,
+    the same visibility gap the background services have.
 
 On macOS, `launchd/launcher.c` and the two `.plist.template` files use a single shared launcher, not one
 compiled binary per agent — the launcher's first argument is always the target script path (`daemon.js`

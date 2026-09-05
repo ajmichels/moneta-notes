@@ -117,6 +117,13 @@ if one of them ever does fill up with repeated warnings.
   `loginctl enable-linger $(whoami)`.
 - **First note write after install seems to hang** — the embedding model may still be downloading if
   step 9 of install didn't finish cleanly; check `indexer.log` for download progress.
+- **`indexer.log` shows `TypeError: fetch failed` / `Cannot read properties of undefined
+  (reading 'tokenizer_class')` trying to download the embedding model, but the same URL works fine in
+  a browser** — you're behind a TLS-intercepting corporate proxy (e.g. Zscaler): the proxy's root CA
+  is trusted by your OS/browser but not by Node. Set `NODE_EXTRA_CA_CERTS` to that root CA's PEM file
+  in your shell profile, then re-run `./scripts/install.sh` (safe to re-run) so it carries the value
+  into the daemon's service definition — a background service never sees a shell rc file's `export`
+  on its own. See [Installation](installation.md#what-the-installer-does) step 7.
 
 See [Installation](installation.md) for initial setup and [Uninstallation](uninstallation.md) for
 tearing everything down.

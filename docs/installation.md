@@ -110,7 +110,13 @@ In order (macOS/Linux differences noted inline — see S009 for the exact per-OS
    `com.ajmichels.mnotes.logrotate.plist` for log rotation). Linux gets three systemd user units in
    `~/.config/systemd/user/` (`mnotes.service`, `mnotes-logrotate.service`, `mnotes-logrotate.timer` —
    systemd splits "what runs" from "when," unlike a single plist), followed by
-   `systemctl --user daemon-reload`.
+   `systemctl --user daemon-reload`. The daemon's service definition also carries forward `PATH` (so
+   its `fswatch` spawn can find it even though services run with a minimal PATH) and, if set in the
+   installer's own environment, `NODE_EXTRA_CA_CERTS` — needed if you're behind a TLS-intercepting
+   corporate proxy (e.g. Zscaler), since a background service never sees a shell rc file's `export
+   NODE_EXTRA_CA_CERTS=...` on its own. If you're on such a network, set it *before* running this
+   installer (`export NODE_EXTRA_CA_CERTS=/path/to/corporate-root-ca.pem` in your shell profile), then
+   re-run `install.sh` to pick it up if you set it afterward.
 8. **Activates both services**: macOS runs `launchctl bootstrap gui/<uid> <plist>` for both plists.
    Linux runs `systemctl --user enable --now` for `mnotes.service` and `mnotes-logrotate.timer` — both
    start running immediately either way.

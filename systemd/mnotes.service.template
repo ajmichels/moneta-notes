@@ -4,6 +4,7 @@ Description=Moneta Notes indexing daemon
 [Service]
 ExecStart=__LAUNCH_EXECUTABLE__ --disable-warning=ExperimentalWarning __DAEMON_SCRIPT_PATH__
 Environment=PATH=__DAEMON_PATH_ENV__
+Environment=NODE_EXTRA_CA_CERTS=__NODE_EXTRA_CA_CERTS__
 Restart=always
 RestartSec=5
 StandardOutput=append:__LOG_DIR__/daemon.stdout.log

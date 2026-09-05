@@ -59,8 +59,8 @@ EOF
 }
 
 # Renders and writes both plists. Expects LAUNCH_EXECUTABLE, DAEMON_SCRIPT, LOG_ROTATOR_SCRIPT,
-# LOG_DIR, DAEMON_PATH_ENV, REPO_ROOT set by the caller. Sets DAEMON_SERVICE_PATH/
-# LOGROTATE_SERVICE_PATH for os_enable_services to use.
+# LOG_DIR, DAEMON_PATH_ENV, NODE_EXTRA_CA_CERTS, REPO_ROOT set by the caller. Sets
+# DAEMON_SERVICE_PATH/LOGROTATE_SERVICE_PATH for os_enable_services to use.
 os_write_service_files() {
     local service_dir="$1"
     mkdir -p "$service_dir"
@@ -74,6 +74,7 @@ os_write_service_files() {
             -e "s#__LOG_ROTATOR_SCRIPT_PATH__#$LOG_ROTATOR_SCRIPT#g" \
             -e "s#__LOG_DIR__#$LOG_DIR#g" \
             -e "s#__DAEMON_PATH_ENV__#$DAEMON_PATH_ENV#g" \
+            -e "s#__NODE_EXTRA_CA_CERTS__#$NODE_EXTRA_CA_CERTS#g" \
             "$1" > "$2"
     }
 
