@@ -9,10 +9,17 @@ function makeTestDb() {
 }
 
 function insertNoteWithMetadata(db, path, metadata) {
+    return insertNoteWithRawMetadataJson(db, path, JSON.stringify(metadata));
+}
+
+// Some tests need a metadata_json string JS can't produce by first building a plain object — e.g.
+// an integer literal larger than Number.MAX_SAFE_INTEGER would already be rounded by the time a JS
+// number literal reached JSON.stringify, before ever exercising the bug under test.
+function insertNoteWithRawMetadataJson(db, path, json) {
     db.prepare(`
         INSERT INTO notes (path, content_hash, line_count, mtime, updated_at, metadata_json)
         VALUES (?, 'abc123', 1, 1000, 1000, ?)
-    `).run(path, JSON.stringify(metadata));
+    `).run(path, json);
     return db.prepare('SELECT id FROM notes WHERE path = ?').get(path).id;
 }
 
@@ -138,6 +145,25 @@ describe('metadataKeys', () => {
         insertNoteWithMetadata(db, 'A.md', {});
 
         expect(metadataKeys(db)).toEqual([]);
+    });
+
+    it('does not crash on an integer larger than Number.MAX_SAFE_INTEGER (e.g. an obsidian.nvim id), '
+        + 'preserving its exact digits as the example instead of a silently-rounded number', () => {
+        const db = makeTestDb();
+        insertNoteWithRawMetadataJson(db, 'A.md', '{"id":20240708102843484}');
+
+        expect(metadataKeys(db)).toEqual([
+            { key: 'id', type: 'number', example: '20240708102843484', notesWithKey: 1 },
+        ]);
+    });
+
+    it('still returns a normal JS number for an in-range integer', () => {
+        const db = makeTestDb();
+        insertNoteWithMetadata(db, 'A.md', { priority: 3 });
+
+        expect(metadataKeys(db)).toEqual([
+            { key: 'priority', type: 'number', example: 3, notesWithKey: 1 },
+        ]);
     });
 });
 

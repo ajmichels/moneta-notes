@@ -39,32 +39,47 @@ function normalizeFullkey(fullkey) {
 // treated as a date both for metadata_keys' sampled `type` hint and for range-comparison binding.
 const DATE_LIKE_PATTERN = /^\d{4}-\d{2}-\d{2}/;
 
-function inferType(sqliteType, atom) {
+function inferType(sqliteType, atomText) {
     if (sqliteType === 'integer' || sqliteType === 'real') {
         return 'number';
     }
     if (sqliteType === 'true' || sqliteType === 'false') {
         return 'boolean';
     }
-    if (sqliteType === 'text' && DATE_LIKE_PATTERN.test(atom)) {
+    if (sqliteType === 'text' && DATE_LIKE_PATTERN.test(atomText)) {
         return 'date';
     }
     return 'string';
 }
 
-function exampleValue(sqliteType, atom) {
+// atomText is always a string (see the CAST in metadataKeys' query below) — an integer like a
+// large obsidian.nvim note id (e.g. 20240708102843484) exceeds Number.MAX_SAFE_INTEGER, and
+// node:sqlite refuses to marshal a SQLite INTEGER that large into a JS number at all (verified: it
+// throws "Value is too large to be represented as a JavaScript number" reading json_tree's own
+// `atom` column directly). Casting to TEXT in SQL sidesteps that crash; here, only convert back to
+// a JS number when the round trip is exact — otherwise the literal digits are a more honest example
+// than a silently-rounded number.
+function exampleValue(sqliteType, atomText) {
     if (sqliteType === 'true') {
         return true;
     }
     if (sqliteType === 'false') {
         return false;
     }
-    return atom;
+    if (sqliteType === 'integer') {
+        const num = Number(atomText);
+        return Number.isSafeInteger(num) ? num : atomText;
+    }
+    if (sqliteType === 'real') {
+        return Number(atomText);
+    }
+    return atomText;
 }
 
 export function metadataKeys(db) {
     const rows = db.prepare(`
-        SELECT n.id AS note_id, jt.fullkey AS fullkey, jt.type AS type, jt.atom AS atom
+        SELECT n.id AS note_id, jt.fullkey AS fullkey, jt.type AS type,
+               CAST(jt.atom AS TEXT) AS atom_text
         FROM notes n, json_tree(n.metadata_json) AS jt
         WHERE jt.type NOT IN ('object', 'array')
     `).all();
@@ -78,8 +93,8 @@ export function metadataKeys(db) {
         const entry = byKey.get(key);
         entry.noteIds.add(row.note_id);
         if (entry.example === undefined && row.type !== 'null') {
-            entry.type = inferType(row.type, row.atom);
-            entry.example = exampleValue(row.type, row.atom);
+            entry.type = inferType(row.type, row.atom_text);
+            entry.example = exampleValue(row.type, row.atom_text);
         }
     }
 
