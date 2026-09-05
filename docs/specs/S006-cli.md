@@ -1,10 +1,13 @@
 # S006 — CLI
 
 Status: **Approved**
-Owns: `src/cli/main.js`, `src/cli/reindex.js`, `src/cli/daemon.js`, `src/cli/stats.js`
+Owns: `src/cli/main.js`, `src/cli/reindex.js`, `src/cli/daemon.js`, `src/cli/stats.js`, `src/cli/logs.js`
 Depends on: `S001-data-model`, `S002-search`, `S003-notes`, `S004-grep-tags`, `S005-indexing-daemon`,
-`S009-config-and-install` (`src/platform` supplies `mnotes daemon`'s service-control functions — see
-below), `S010-shared-utilities`, `S011-links`, `S012-attachments`
+`S008-logging` (`mnotes logs` reads its three log files, parsing `audit.log`'s line format
+specifically), `S009-config-and-install` (`src/platform` supplies `mnotes daemon`'s service-control
+functions — see below; also owns the `launchd`/`systemd` templates whose redirected stdout/stderr
+files `mnotes logs --file=daemon.stdout` etc. read), `S010-shared-utilities`, `S011-links`,
+`S012-attachments`
 Consumed by: (terminal use, `obsidian.nvim` integration)
 
 ## Purpose
@@ -19,8 +22,8 @@ surface.
 
 Node's built-in `util.parseArgs` — no CLI framework dependency. Subcommand routing is a small
 dispatch table keyed on `argv[2]` (`search`, `grep`, `tags`, `links`, `read`, `write`, `edit`, `append`,
-`rename`, `attachment`, `reindex`, `daemon`, `stats`, `vectors`), each parsing its own remaining flags
-via `parseArgs`. This matches the
+`rename`, `attachment`, `reindex`, `daemon`, `stats`, `logs`, `vectors`), each parsing its own remaining
+flags via `parseArgs`. This matches the
 project's minimal-dependency, no-build-step bias — a dozen flat subcommands doesn't need a framework's
 nested-command/auto-help machinery.
 
@@ -146,6 +149,7 @@ exact absolute title — see "Absolute titles for mutating commands" below).
 | `mnotes reindex [title]` | | Talks to the daemon over the S005 Unix socket; hard error if daemon isn't running. Blocks until done, streaming attempt/retry progress for a single-title reindex. |
 | `mnotes daemon <start\|stop\|restart>` | | Controls the OS-service-managed daemon process itself (not the IPC socket) — see below. |
 | `mnotes stats` | `--json` | See below. |
+| `mnotes logs` | `--file=<name>` (7 values, see below), `--source=mcp\|cli`, `--tool=<name>`, `--note=<title>`, `--outcome=success\|error`, `--since=<duration\|ISO8601>`, `--limit=N`, `--follow`, `--json` | `--file` defaults to `audit`; the rest are audit-only — see below. |
 | `mnotes vectors <subcommand>` | (per subcommand) | `compare`/`nearest`/`cluster`/`reduce`/`tag-fit`/`tag-redundancy`/`outliers`/`calibrate` — CLI-only debug/analysis tooling over the raw embedding space, no MCP equivalent (same rationale as `mnotes links`). Fully specified in [S013 — Vector Tools](S013-vector-tools.md), which owns `src/cli/vectors.js` and amends this spec only to add `vectors` to the dispatch table above. |
 
 Every command other than `reindex`/`stats` is a thin wrapper: parse flags, call the corresponding
@@ -274,6 +278,91 @@ is queue-based (S005): a large or growing count means the daemon is behind or st
 a best-effort courtesy check (attempt a socket connection, non-blocking if it fails) — `stats` itself
 never requires the daemon to be up, unlike `reindex`.
 
+### `mnotes logs`
+
+CLI-only, like `links`/`vectors` — no MCP equivalent, since there's no reason an agent would need to
+introspect its own audit trail through a tool call. `--file=<name>` picks which log file, defaulting to
+`audit` — that's the file that actually answers "what has an agent been doing through MCP," which is
+what this command exists for, so it's the default rather than requiring `--file=audit` explicitly every
+time. `<name>` is one of seven values, each mapping mechanically to `<name>.log` under the log
+directory (S008/S009):
+
+- **`audit`** (default) — S008's structured audit trail; the only one this command actually parses.
+- **`indexer`**, **`mcp-server`** — S008's other two logger.js-written files: lifecycle/prose text, not
+  structured per-call records.
+- **`daemon.stdout`**, **`daemon.stderr`**, **`logrotate.stdout`**, **`logrotate.stderr`** — not
+  logger.js output at all. These are the raw stdout/stderr the service manager (`launchd` on macOS,
+  `systemd --user` on Linux) redirects the daemon and log-rotator *processes* to, per
+  `launchd/*.plist.template`/`systemd/*.service.template` (S009's `StandardOutPath`/`StandardErrorPath`
+  and `StandardOutput`/`StandardError` keys) — whatever Node happens to print outside of `logger.js`
+  (an experimental-feature warning, an uncaught exception's stack trace). Normally near-empty; the
+  first place to look when a service fails to start at all, before it's even reached the point of
+  writing its own `indexer.log`/lifecycle line. Unlike the other five, these two processes' output
+  isn't rotated by `src/log-rotator.js` (`LOG_FILE_NAMES` there only covers the three S008 files) — an
+  existing, unrelated gap this spec doesn't attempt to close.
+
+For every value other than `audit`, `mnotes logs` is a `--follow`/`--limit`-over-raw-lines convenience,
+not a parser — it prints each line exactly as stored, with no field extraction and no table formatting.
+**Every audit-specific flag (`--source`, `--tool`, `--note`, `--outcome`, `--since`, `--json`) is a hard
+error when combined with a non-`audit` `--file`** (naming every offending flag in one message, not just
+the first) — these flags presuppose the structured shape only `audit.log` has, and silently ignoring
+them would let a `--file=indexer --outcome=error` typo look like it did something when it didn't.
+
+`src/cli/logs.js` parses each `audit.log` line back into a structured record (`timestamp`, `tool`,
+`source`, `noteTitle`/`attachmentPath`, `reason`, `outcome`, `errorMessage`) by inverting
+`logger.js`'s own line-formatting grammar — not a second, independently-evolving format, so a change to
+`formatLine`/`formatValue` (S008) that isn't mirrored here will show up as a parse failure (a skipped
+line) rather than silently drifting. `--file=indexer`/`mcp-server` skip this parser entirely — they
+never need it, since there's no structured record to extract.
+
+**Filters** (`--source`, `--tool`, `--note`, `--outcome`, `--since`, `--limit`) AND together, and only
+apply to `--file=audit` (see above); there's no `--match=any` here unlike `metadata query`, since
+combining audit fields with OR semantics isn't a usage pattern this command needs to support. `--note`
+matches either `note_title` or `attachment_path` on an entry, whichever that entry actually carries
+(S012's identifier-slot design) — exact match, no resolution, the same as `mnotes attachment`'s
+`<path>`. `--since` accepts a relative shorthand (`30m`, `1h`, `2d` — seconds/minutes/hours/days) or a
+full ISO-8601 timestamp. `--limit` (last N) and `--follow` apply to any of the seven files, since both
+are meaningful over plain lines just as much as over parsed entries.
+
+**Output for `--file=audit`**: default is the same aligned pipe-table convention as
+`search`/`grep`/`tags`/`links`, one column per audit field (`note_title`/`attachment_path` collapsed
+into a single `identifier` column, since an entry only ever carries one of the two). **`--json` is
+NDJSON here — one compact JSON object per line — not the single-array shape every other command's
+`--json` uses.** This is deliberate, not an inconsistency: `--json` has to mean the same thing whether
+or not `--follow` is also given, and `--follow`'s output is inherently an open-ended stream of
+individual lines that can never be wrapped in a closing `]`.
+
+**Output for every other `--file` value**: each line exactly as it appears in the file, joined with
+`\n` — no table, no JSON option (rejected per the audit-only-flags rule above, since there's no
+structured shape to serialize).
+
+With no `--limit`, non-`--follow` mode prints every matching (or, for a non-`audit` file, every) line
+in the file, oldest-first, same as `grep`/`cat` would — no implicit cap.
+
+**`--follow`** tails whichever file `--file` selects like `tail -f` (not `tail -F`): it does not pick a
+file back up after S008's log-rotator renames it away mid-run, matching `tail -f`'s own well-known
+limitation rather than solving log-rotation-awareness as a new feature. This is the one command in the
+CLI that requires a documented exception to the "every command returns one
+`{ stdout, stderr, exitCode }` from `dispatch()`" convention (see "Argument parsing" above): a live
+follow never finishes on its own, so `runLogsCommand` writes each matching line directly to
+`process.stdout` (or `deps.write` under test) as it arrives, rather than accumulating a return value —
+the same behavior `tail -f` itself has, ended by Ctrl-C or by a downstream pipe closing, with no
+special-case code needed for either. This is what makes `mnotes logs --follow | grep ...` (or
+`mnotes logs --file=indexer --follow | grep ERROR`) work as a live filter, which plain buffered command
+output could not support. `followLogFile` (the underlying watcher) is file-format-agnostic — it just
+hands the caller each raw appended line; `--file=audit`'s caller parses/filters that line, every other
+`--file` value's caller prints it straight through.
+
+`--follow` defaults to printing the last **20** matching/available lines as backlog before switching to
+live output (`--limit=N` overrides that backlog size, same flag either way, on any of the seven files)
+— bigger than `tail -f`'s own default of 10, but still bounded rather than "print everything," since
+the goal is recent context, not a full replay. Streamed `--file=audit` output while following uses a
+header-less single-row rendering (`formatLogRow`), not the aligned table `formatLogsTable` produces for
+the backlog/non-follow case — a table header re-printed per arriving line, or inconsistent with the
+already-printed backlog's column widths, would be worse than no header at all for a stream a reader is
+watching scroll by. Every other `--file` value has no such distinction to make — backlog and
+streamed lines are both just the raw line text either way.
+
 ## Logging
 
 Per `S008`, the CLI's *only* use of `src/logger.js` is the audit trail for mutating commands — it
@@ -287,6 +376,9 @@ it does **not** wrap command dispatch in a `runWithLogger` context:
   invoked from the CLI — those lines only exist for the MCP server, which does establish a context
   (`S007`). This matches the README's original "CLI is interactive, doesn't need persistent logging"
   framing for reads.
+- `mnotes logs` — also no logging, for the same "read-only" reason, though it's not a `core/` caller at
+  all (it reads `audit.log` directly, per the `mnotes logs` section above) — mentioned here for
+  completeness, not because it shares the other read commands' code path.
 - `mnotes write`/`edit`/`append`/`rename`/`attachment write` — after the command completes (success or
   a caught thrown error), the CLI calls `logAudit(getAuditLogger(defaultLogDir()), { tool, noteTitle,
   source: 'cli', outcome, errorMessage })` (`S008`) — `reason` is always absent (`source: 'cli'` never

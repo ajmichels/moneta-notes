@@ -20,6 +20,7 @@ import { computeStats, checkDaemonRunning } from './stats.js';
 import { runReindexCommand } from './reindex.js';
 import { runDaemonCommand } from './daemon.js';
 import { runVectorsCommand } from './vectors.js';
+import { runLogsCommand } from './logs.js';
 import {
     formatSearchTable, formatExplain, formatGrepTable, formatTagListTable, formatTagNotesTable,
     formatMetadataKeysTable, formatLinksTable, formatBrokenLinksTable, formatStats, formatJson,
@@ -57,6 +58,7 @@ Commands:
   reindex   Trigger a reindex via the indexing daemon
   daemon    start | stop | restart the indexing daemon
   stats     Show index/daemon stats
+  logs      Filter/tail audit.log (default), or any other log file raw (--file=<name>)
   vectors   compare | nearest | cluster | reduce | tag-fit | tag-redundancy | outliers | calibrate
 
 Run 'mnotes <command> --help' for command-specific flags.
@@ -96,6 +98,14 @@ const COMMAND_USAGE = {
     reindex: 'mnotes reindex [title]',
     daemon: 'mnotes daemon <start|stop|restart>',
     stats: 'mnotes stats [--json]',
+    logs: 'mnotes logs [--file=<name>] [--limit=N] [--follow]\n'
+        + '       mnotes logs [--source=mcp|cli] [--tool=<name>] [--note=<title>] [--outcome=success|error]\n'
+        + '                   [--since=<1h|30m|ISO8601>] [--limit=N] [--follow] [--json]\n'
+        + '       (--file is one of: audit (default), indexer, mcp-server, daemon.stdout, daemon.stderr,\n'
+        + '        logrotate.stdout, logrotate.stderr; --source/--tool/--note/--outcome/--since/--json\n'
+        + '        only apply to --file=audit — every other file prints raw lines, no parsing;\n'
+        + '        --json is one compact object per line, not a single array;\n'
+        + '        --follow streams live and defaults --limit to 20 for its printed backlog)',
     // No entry for 'vectors': unlike every other command here, `vectors` has enough
     // sub-subcommands with distinct flag sets that a single flat usage line doesn't cut it —
     // dispatch() below special-cases 'vectors' to skip this table entirely and let
@@ -684,6 +694,7 @@ export async function runStats(args, deps) {
 registerCommand('reindex', runReindexCommand);
 registerCommand('daemon', runDaemonCommand);
 registerCommand('stats', runStats);
+registerCommand('logs', runLogsCommand);
 registerCommand('vectors', runVectorsCommand);
 
 function buildRealDeps() {
@@ -703,6 +714,7 @@ function buildRealDeps() {
         embeddingModel: DEFAULT_EMBEDDING_MODEL,
         embeddingVersion: DEFAULT_EMBEDDING_VERSION,
         auditLogger: getAuditLogger(defaultLogDir()),
+        logDir: defaultLogDir(),
         socketPath,
     };
 }

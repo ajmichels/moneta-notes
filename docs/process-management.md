@@ -61,27 +61,42 @@ systemctl --user list-timers mnotes-logrotate.timer
 
 ## Logs
 
-All three log files live under one directory — `~/Library/Logs/com.ajmichels.mnotes/` on macOS,
+All log files live under one directory — `~/Library/Logs/com.ajmichels.mnotes/` on macOS,
 `~/.local/state/mnotes/log/` on Linux (respects `$XDG_STATE_HOME`) — plain single-line text (not JSON —
-chosen specifically so `tail -f` / `grep` work directly, no log processor needed):
+chosen specifically so `tail -f` / `grep` work directly, no log processor needed). Three of them are
+this project's own structured logger.js output; four more are the daemon and log-rotator *processes*'
+raw stdout/stderr, redirected there by `launchd`/`systemd` rather than written by `logger.js`:
 
 | File | Contents |
 |---|---|
 | `indexer.log` | Daemon lifecycle (started, schema check, `fswatch` watcher started), queue drain activity, embedding model load/idle-unload, hash mismatches, permanent queue-item failures. |
 | `mcp-server.log` | MCP server lifecycle (started, stdio transport connected/disconnected), protocol-level errors. Tool-call outcomes are **not** here. |
 | `audit.log` | Every note/attachment mutation — MCP tool calls (`note_write`/`note_edit`/`note_append`/`note_rename`/`attachment_write`) and CLI mutating commands (`write`/`edit`/`append`/`rename`/`attachment write`) — with outcome and, for MCP calls, the caller's stated `reason`. |
+| `daemon.stdout.log` / `daemon.stderr.log` | The indexing daemon process's own stdout/stderr — whatever Node prints outside of `logger.js` (an experimental-feature warning, an uncaught exception's stack trace). Normally empty; check `daemon.stderr.log` first if the daemon won't start at all, before it's even reached the point of writing to `indexer.log`. |
+| `logrotate.stdout.log` / `logrotate.stderr.log` | Same idea, for the log-rotation service's own process. |
 
 ```sh
 tail -f <log dir>/indexer.log
 grep ERROR <log dir>/indexer.log
 grep 'outcome=error' <log dir>/audit.log
+
+mnotes logs --file=indexer --follow | grep ERROR
+mnotes logs --file=daemon.stderr
 ```
 
-Rotation (handled by the log-rotation service, not the daemon itself): each file rotates at 10MB or
-7 days, whichever comes first, keeping the last 5 rotated files (`indexer.log.1`, `indexer.log.2`, ...).
-On macOS this runs off `StartCalendarInterval`'s built-in wake catch-up; on Linux, the equivalent is the
-timer unit's `Persistent=true`. Rotation policy is config-backed — see `[logging]` in
-[Configuration](configuration.md#logging).
+`mnotes logs` (see [Usage](usage.md#mnotes-logs)) wraps all seven of these — `--file=audit` (the
+default) parses/filters `audit.log`'s structured fields; every other `--file` value is a
+`--limit`/`--follow`-over-raw-lines convenience layered on plain `tail`/`grep` semantics, since none of
+the other six files have a structured shape to parse.
+
+Rotation (handled by the log-rotation service, not the daemon itself) only covers the three logger.js
+files: each rotates at 10MB or 7 days, whichever comes first, keeping the last 5 rotated files
+(`indexer.log.1`, `indexer.log.2`, ...). On macOS this runs off `StartCalendarInterval`'s built-in wake
+catch-up; on Linux, the equivalent is the timer unit's `Persistent=true`. Rotation policy is
+config-backed — see `[logging]` in [Configuration](configuration.md#logging). **The four
+`daemon.*`/`logrotate.*` stdout/stderr files are not rotated** and can grow unbounded over a long-lived
+install — they're normally near-empty, so this is rarely an issue in practice, but it's worth knowing
+if one of them ever does fill up with repeated warnings.
 
 ## Troubleshooting
 

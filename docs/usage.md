@@ -19,6 +19,10 @@ padded). Mutating commands (`write`/`edit`/`append`/`rename`) are always structu
 `mnotes read` is the one exception: its default output is the raw note body (not JSON), so it pipes
 naturally into `$EDITOR`, `less`, etc. See the table under [`mnotes read`](#mnotes-read-title) below.
 
+`mnotes logs --json` is the other exception: it's NDJSON (one compact object per line), not a single
+JSON array — necessary since `--follow` streams indefinitely and can never close a `]`. See
+[`mnotes logs`](#mnotes-logs) below.
+
 The raw RRF score is never shown in `hybrid`-mode search output — only rank position, since a fused
 score isn't independently meaningful. `fulltext` and `semantic` mode are single-signal, though: their
 native score (`bm25_score` / `cosine_distance`, respectively) is meaningful on its own and appears
@@ -293,6 +297,57 @@ Note/tag/link counts (including `broken_link_count` — see `mnotes links broken
 listing), total/average note length, embedding model + version, count of notes pending re-embedding,
 index file size, last full reindex time, daemon status, and current queue depth. Pure DB
 reads plus a best-effort socket probe — never itself requires the daemon to be running.
+
+### `mnotes logs`
+
+```sh
+mnotes logs                                   # every audit.log entry, oldest-first
+mnotes logs --source=mcp                      # only Claude's tool calls, not your own CLI mutations
+mnotes logs --tool=note_write --outcome=error
+mnotes logs --note="Weekly Notes/2026-W32"
+mnotes logs --since=1h --json
+mnotes logs --follow                          # last 20 matching entries, then streams live
+mnotes logs --follow --source=mcp | grep note_write
+
+mnotes logs --file=indexer                    # raw indexer.log lines, no parsing
+mnotes logs --file=indexer --follow | grep ERROR
+mnotes logs --file=mcp-server --limit=50
+mnotes logs --file=daemon.stderr              # the daemon process's own stderr, not logger.js output
+```
+
+Filters/tails the audit trail (`audit.log`, [S008](specs/S008-logging.md)) by default — every MCP tool
+call and every CLI mutating command (`write`/`edit`/`append`/`rename`/`attachment write`), with `tool`,
+`source` (`mcp`/`cli`), the note title or attachment path, `reason` (MCP calls only), and `outcome`.
+This is CLI-only, like `links`/`vectors` — there's no MCP equivalent.
+
+`--file` selects which log file, one of seven: `audit` (default), `indexer`, `mcp-server` (S008's other
+two logger.js-written files — lifecycle/prose text, not structured per-call records), or
+`daemon.stdout`/`daemon.stderr`/`logrotate.stdout`/`logrotate.stderr` — the daemon and log-rotator
+*processes*' own raw stdout/stderr, redirected there by `launchd`/`systemd` rather than written by
+this project's logger, so they can contain anything the process happened to print (a Node warning, an
+uncaught exception) rather than a guaranteed line format. They're normally empty; check them first when
+a service won't start at all. Unlike the other five files, these two aren't rotated by the log-rotation
+service, so they can grow unbounded over a long-lived install.
+
+For every value other than `audit`, `mnotes logs` just prints raw lines (still with `--limit`/`--follow`
+support) — no parsing or table formatting. **The audit-specific flags (`--source`, `--tool`, `--note`,
+`--outcome`, `--since`, `--json`) only work with `--file=audit`** (the default) — passing any of them
+alongside another `--file` is an error naming the flag(s) that don't apply, rather than silently
+ignoring them.
+
+Flags: `--file=<name>` (default `audit`), `--source=mcp|cli`, `--tool=<name>`,
+`--note=<title>` (exact match against whichever identifier the entry carries — no resolution),
+`--outcome=success|error`, `--since=<30m|1h|2d|ISO-8601>`, `--limit=N` (last N matching entries),
+`--follow`, `--json`.
+
+With no `--limit`, plain `mnotes logs` prints everything matching, oldest-first — no implicit cap.
+`--follow` tails like `tail -f` (not `tail -F`: it won't pick a file back up after the log-rotator
+service, [S008](specs/S008-logging.md), rotates it away mid-run) and prints the last **20** matching
+(or, for a non-`audit` file, available) lines as backlog before switching to live output (`--limit=N`
+overrides that backlog size). Because it writes each line to stdout as it arrives rather than buffering
+a final result, `--follow` pipes into `grep` (or anything else) as a genuine live filter, on any of the
+seven files — end it with Ctrl-C, or just let the downstream command exit and
+close the pipe.
 
 ### `mnotes vectors <subcommand>`
 

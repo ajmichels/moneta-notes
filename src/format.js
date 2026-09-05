@@ -6,7 +6,7 @@ export function formatJsonPretty(data) {
     return `${JSON.stringify(data, null, 2)}\n\n`;
 }
 
-function formatCell(value) {
+export function formatCell(value) {
     if (value === null || value === undefined) {
         return '';
     }
@@ -114,6 +114,47 @@ export function formatLinksTable({ backlinks, links_out: linksOut }, { align = f
 export function formatBrokenLinksTable(results, { align = false } = {}) {
     const rows = results.map((r) => ({ note_title: r.sourceTitle, broken_target: r.targetTitle }));
     return formatTable([ 'note_title', 'broken_target' ], rows, { align });
+}
+
+const LOG_COLUMNS = [ 'timestamp', 'tool', 'source', 'identifier', 'outcome', 'reason', 'error_message' ];
+
+// note_title and attachment_path are mutually exclusive per S008 audit entry (S012) — one
+// "identifier" column instead of two columns that are each empty half the time.
+function logRow(entry) {
+    return {
+        timestamp: entry.timestamp,
+        tool: entry.tool,
+        source: entry.source,
+        identifier: entry.noteTitle ?? entry.attachmentPath,
+        outcome: entry.outcome,
+        reason: entry.reason,
+        error_message: entry.errorMessage,
+    };
+}
+
+export function formatLogsTable(entries, { align = false } = {}) {
+    return formatTable(LOG_COLUMNS, entries.map(logRow), { align });
+}
+
+// Header-less single-row rendering for `mnotes logs --follow`, where each entry is written as it
+// arrives — a table header re-printed per line (or per backlog batch vs. per live line) would be
+// inconsistent, so streamed output is always this flat form regardless of the backlog's table.
+export function formatLogRow(entry) {
+    const row = logRow(entry);
+    return `${LOG_COLUMNS.map((col) => formatCell(row[col])).join('|')}\n`;
+}
+
+export function formatLogEntryJsonLine(entry) {
+    return formatJson({
+        timestamp: entry.timestamp,
+        tool: entry.tool,
+        source: entry.source,
+        note_title: entry.noteTitle,
+        attachment_path: entry.attachmentPath,
+        outcome: entry.outcome,
+        reason: entry.reason,
+        error_message: entry.errorMessage,
+    });
 }
 
 export function formatStats(stats, { json = false, daemonRunning } = {}) {
