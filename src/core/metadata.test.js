@@ -280,6 +280,17 @@ describe('metadataQuery: match combinator', () => {
     });
 });
 
+describe('metadataQuery: boolean values', () => {
+    it('matches a boolean equality (node:sqlite cannot bind a raw JS boolean)', () => {
+        const db = makeTestDb();
+        insertNoteWithMetadata(db, 'A.md', { done: true });
+        insertNoteWithMetadata(db, 'B.md', { done: false });
+
+        const results = metadataQuery(db, { filters: [ { key: 'done', op: 'eq', value: true } ] });
+        expect(titles(results)).toEqual([ 'A' ]);
+    });
+});
+
 describe('metadataQuery: date literals', () => {
     it('canonicalizes a short-form date literal so an exact-midnight match is excluded from gt', () => {
         const db = makeTestDb();

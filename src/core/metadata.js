@@ -135,6 +135,16 @@ function canonicalizeDateLiteral(value) {
     return value;
 }
 
+// node:sqlite refuses to bind a raw JS boolean at all — a stored JSON `true`/`false` also comes
+// back out of json_each/json_extract as native SQLite integer 1/0 (verified), so binding a boolean
+// filter value the same way keeps both sides of the comparison the same storage class.
+function toBindable(value) {
+    if (typeof value === 'boolean') {
+        return value ? 1 : 0;
+    }
+    return value;
+}
+
 const RANGE_OPS = { gt: '>', gte: '>=', lt: '<', lte: '<=' };
 
 function buildJsonCondition({ container, leaf }, op, value) {
@@ -149,13 +159,13 @@ function buildJsonCondition({ container, leaf }, op, value) {
         predicate = `${valueExpr} IS NOT NULL`;
     } else if (op === 'eq') {
         predicate = `${valueExpr} = ?`;
-        params.push(value);
+        params.push(toBindable(value));
     } else if (op in RANGE_OPS) {
         predicate = `${valueExpr} ${RANGE_OPS[op]} ?`;
-        params.push(canonicalizeDateLiteral(value));
+        params.push(toBindable(canonicalizeDateLiteral(value)));
     } else if (op === 'in') {
         predicate = `${valueExpr} IN (${value.map(() => '?').join(', ')})`;
-        params.push(...value);
+        params.push(...value.map(toBindable));
     } else {
         throw validationError(`unknown op "${op}"`);
     }
