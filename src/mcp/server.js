@@ -12,8 +12,9 @@ import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_VERSION, defaultSocketPath }
 import { loadConfig } from '../config.js';
 import { registerPrompts } from './prompts.js';
 import {
-    searchTool, grepTool, tagListTool, tagNotesTool, noteReadTool, noteWriteTool,
-    noteEditTool, noteAppendTool, noteRenameTool, attachmentReadTool, attachmentWriteTool,
+    searchTool, grepTool, tagListTool, tagNotesTool, metadataKeysTool, metadataQueryTool,
+    noteReadTool, noteWriteTool, noteEditTool, noteAppendTool, noteRenameTool, attachmentReadTool,
+    attachmentWriteTool,
 } from './tools.js';
 
 function readStoredSchemaVersion(dbPath) {
@@ -112,6 +113,58 @@ const TOOL_DEFS = [
             idempotentHint: true,
         },
         handler: tagNotesTool,
+    },
+    {
+        name: 'metadata_keys',
+        description: 'Discover which frontmatter fields are currently in use across the vault '
+            + '(every field except tags, which tag_list already covers — see metadata_query for '
+            + 'filtering by tag). One row per distinct field: key, an inferred type (string/number/ '
+            + 'boolean/date, sampled from one non-null value — a hint, not an enforced schema), an '
+            + 'example value, and the count of notes carrying that field.',
+        inputSchema: { reason: z.string() },
+        annotations: {
+            readOnlyHint: true,
+            destructiveHint: false,
+            idempotentHint: true,
+        },
+        handler: metadataKeysTool,
+    },
+    {
+        name: 'metadata_query',
+        description: 'Filter notes by frontmatter field conditions — see metadata_keys for '
+            + 'discovering what fields exist. Each filter is { key, op, value?, negate? }: key is a '
+            + 'bare top-level field ("status") or exactly one level of nesting '
+            + '("depends_on.project" — e.g. one field of an array-of-objects entry, matched '
+            + "independently of that array's other entries); deeper nesting isn't addressable here, "
+            + "only via note_read's raw metadata. op is eq/gt/gte/lt/lte/in/exists — there is no ne; "
+            + "negate: true wraps the whole condition instead (the only version that's correct "
+            + 'against a field with multiple values per note). value is required for every op except '
+            + 'exists; for in, value is an array ("any of these"). A date literal like '
+            + '"2026-01-01" compares correctly against a full-precision stored timestamp regardless '
+            + "of how a caller's literal is written. key: \"tags\" is a special case, routed through "
+            + 'the same tag-matching tag_notes uses (including nested-child matching) instead of '
+            + "frontmatter — only eq/in/exists are valid against it (tags aren't ordered), and it "
+            + 'takes no dot-path nesting. Multiple filters combine via match: "all" (default, AND) '
+            + 'or "any" (OR) — one flat toggle over every filter, not nested boolean grouping.',
+        inputSchema: {
+            filters: z.array(z.object({
+                key: z.string(),
+                op: z.enum([ 'eq', 'gt', 'gte', 'lt', 'lte', 'in', 'exists' ]),
+                value: z.union([
+                    z.string(), z.number(), z.boolean(),
+                    z.array(z.union([ z.string(), z.number(), z.boolean() ])),
+                ]).optional(),
+                negate: z.boolean().optional(),
+            })).min(1),
+            match: z.enum([ 'all', 'any' ]).optional(),
+            reason: z.string(),
+        },
+        annotations: {
+            readOnlyHint: true,
+            destructiveHint: false,
+            idempotentHint: true,
+        },
+        handler: metadataQueryTool,
     },
     {
         name: 'note_read',

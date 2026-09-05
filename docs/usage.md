@@ -456,8 +456,8 @@ Once registered (`claude mcp add mnotes ...` — done automatically by
 [`scripts/install.sh`](installation.md) if `claude` is on `PATH`), the following tools are available to
 Claude in any session:
 
-`search`, `grep`, `tag_list`, `tag_notes`, `note_read`, `note_write`, `note_edit`, `note_append`,
-`note_rename`, `attachment_read`, `attachment_write`
+`search`, `grep`, `tag_list`, `tag_notes`, `metadata_keys`, `metadata_query`, `note_read`,
+`note_write`, `note_edit`, `note_append`, `note_rename`, `attachment_read`, `attachment_write`
 
 These map directly onto the CLI commands above (`note_read` ↔ `mnotes read`, etc.) and share the same
 `core/` logic — same hashing rules, same size-drop guard, same "no raw scores" output, and the same
@@ -465,6 +465,11 @@ title-resolution split: `note_read`/`grep` accept a short or ambiguous title (re
 `mnotes read`'s does) and `note_read` always returns the real absolute title in its response;
 `note_write`/`note_edit`/`note_append`/`note_rename` require the exact absolute title with no
 resolution — each tool's own description states this.
+
+`metadata_query`'s `filters` argument takes the structured `{key, op, value?, negate?}` shape
+directly — no string parsing — the same shape `mnotes metadata query`'s `--filter`/`--exists`/
+`--missing` flags compile down to (see [`mnotes metadata query`](#mnotes-metadata-keys--mnotes-metadata-query)
+above for the full semantics: dot-path keys, operators, `tags` interception, `match: all|any`).
 
 `attachment_read`/`attachment_write` ([S012](specs/S012-attachments.md)) are unindexed, so
 `attachment_path` always requires the exact vault-relative path, on both tools — no short-form

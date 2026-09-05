@@ -7,8 +7,9 @@ import { openDb } from '../core/db.js';
 import { syncNoteTags } from '../core/tags.js';
 import { getAuditLogger, getLogger, getContextLogger } from '../logger.js';
 import {
-    callTool, searchTool, grepTool, tagListTool, tagNotesTool, noteReadTool, noteWriteTool,
-    noteEditTool, noteAppendTool, noteRenameTool, attachmentReadTool, attachmentWriteTool,
+    callTool, searchTool, grepTool, tagListTool, tagNotesTool, metadataKeysTool, metadataQueryTool,
+    noteReadTool, noteWriteTool, noteEditTool, noteAppendTool, noteRenameTool, attachmentReadTool,
+    attachmentWriteTool,
 } from './tools.js';
 import { cleanupTempDir } from '../../vitest.helpers.js';
 
@@ -370,6 +371,72 @@ describe('tagNotesTool', () => {
         );
 
         expect(result.content[0].text).toBe('note_title|file_line_count\nA|3\n');
+    });
+});
+
+function insertNoteWithMetadata(db, path, metadata, lineCount = 5) {
+    db.prepare(`
+        INSERT INTO notes (path, content_hash, line_count, mtime, updated_at, metadata_json)
+        VALUES (?, 'hash', ?, 1000, 1000, ?)
+    `).run(path, lineCount, JSON.stringify(metadata));
+    return db.prepare('SELECT id FROM notes WHERE path = ?').get(path).id;
+}
+
+describe('metadataKeysTool', () => {
+    it('returns a pipe-delimited table of key/type/example/notes_with_key', async () => {
+        const dbPath = makeTempDbPath();
+        const { db } = openDb(dbPath);
+        insertNoteWithMetadata(db, 'A.md', { status: 'active' });
+        db.close();
+
+        const result = await metadataKeysTool(makeDeps({ dbPath }), { reason: 'testing metadata_keys' });
+
+        expect(result.content[0].text).toBe('key|type|example|notes_with_key\nstatus|string|active|1\n');
+    });
+});
+
+describe('metadataQueryTool', () => {
+    it('returns a pipe-delimited table of matching notes for a scalar filter', async () => {
+        const dbPath = makeTempDbPath();
+        const { db } = openDb(dbPath);
+        insertNoteWithMetadata(db, 'A.md', { status: 'active' }, 7);
+        insertNoteWithMetadata(db, 'B.md', { status: 'archived' });
+        db.close();
+
+        const result = await metadataQueryTool(makeDeps({ dbPath }), {
+            filters: [ { key: 'status', op: 'eq', value: 'active' } ],
+            reason: 'testing metadata_query',
+        });
+
+        expect(result.content[0].text).toBe('note_title|file_line_count\nA|7\n');
+    });
+
+    it('filters by tag through the same interception core/metadata.js documents', async () => {
+        const dbPath = makeTempDbPath();
+        const { db } = openDb(dbPath);
+        const noteId = insertNoteWithMetadata(db, 'A.md', {});
+        syncNoteTags(db, noteId, [ 'project/api-migration' ]);
+        db.close();
+
+        const result = await metadataQueryTool(makeDeps({ dbPath }), {
+            filters: [ { key: 'tags', op: 'eq', value: 'project' } ],
+            reason: 'testing metadata_query tags',
+        });
+
+        expect(result.content[0].text).toBe('note_title|file_line_count\nA|5\n');
+    });
+
+    it('surfaces a validation error as an isError result, same as a malformed search query', async () => {
+        const dbPath = makeTempDbPath();
+        openDb(dbPath).db.close();
+
+        const result = await metadataQueryTool(makeDeps({ dbPath }), {
+            filters: [ { key: 'a.b.c', op: 'eq', value: 1 } ],
+            reason: 'testing invalid key',
+        });
+
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toMatch(/more than one dot/);
     });
 });
 

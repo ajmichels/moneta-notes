@@ -100,7 +100,7 @@ function makeTempDbPath() {
 }
 
 describe('createServer', () => {
-    it('registers all 11 tools, listable over a real (in-memory) MCP connection', async () => {
+    it('registers all 13 tools, listable over a real (in-memory) MCP connection', async () => {
         const dbPath = makeTempDbPath();
         openDb(dbPath).db.close();
 
@@ -108,8 +108,9 @@ describe('createServer', () => {
         const { tools } = await client.listTools();
 
         expect(tools.map((t) => t.name).sort()).toEqual([
-            'attachment_read', 'attachment_write', 'grep', 'note_append', 'note_edit', 'note_read',
-            'note_rename', 'note_write', 'search', 'tag_list', 'tag_notes',
+            'attachment_read', 'attachment_write', 'grep', 'metadata_keys', 'metadata_query',
+            'note_append', 'note_edit', 'note_read', 'note_rename', 'note_write', 'search',
+            'tag_list', 'tag_notes',
         ]);
     });
 
@@ -142,6 +143,28 @@ describe('createServer', () => {
 
         expect(result.isError).toBeFalsy();
         expect(result.content[0].text).toMatch(/^note_title\|file_line_count\|bm25_score\nA\|3\|-?\d+(\.\d+)?\n$/);
+    });
+
+    it('round-trips a real metadata_query tool call end-to-end through the client', async () => {
+        const dbPath = makeTempDbPath();
+        const { db } = openDb(dbPath);
+        db.prepare(`
+            INSERT INTO notes (path, content_hash, line_count, mtime, updated_at, metadata_json)
+            VALUES (?, ?, ?, ?, ?, ?)
+        `).run('A.md', 'h', 3, 1000, 1000, JSON.stringify({ status: 'active' }));
+        db.close();
+
+        const client = await connectedClient({ dbPath, ...baseDeps() });
+        const result = await client.callTool({
+            name: 'metadata_query',
+            arguments: {
+                filters: [ { key: 'status', op: 'eq', value: 'active' } ],
+                reason: 'end-to-end test',
+            },
+        });
+
+        expect(result.isError).toBeFalsy();
+        expect(result.content[0].text).toBe('note_title|file_line_count\nA|3\n');
     });
 
     it('round-trips attachment_write then attachment_read, decoding back to the original bytes', async () => {

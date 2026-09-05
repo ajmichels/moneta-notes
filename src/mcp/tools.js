@@ -1,13 +1,15 @@
 import { search } from '../core/search.js';
 import { grep } from '../core/grep.js';
 import { tagList, tagNotes } from '../core/tags.js';
+import { metadataKeys, metadataQuery } from '../core/metadata.js';
 import { noteRead, noteWrite, noteEdit, noteAppend, noteRename } from '../core/notes.js';
 import { readAttachment, writeAttachment } from '../core/attachments.js';
 import { openDb } from '../core/db.js';
 import { logAudit, runWithLogger } from '../logger.js';
 import { resolveConfig } from '../config.js';
 import {
-    formatSearchTable, formatGrepTable, formatTagListTable, formatTagNotesTable, formatJson,
+    formatSearchTable, formatGrepTable, formatTagListTable, formatTagNotesTable,
+    formatMetadataKeysTable, formatJson,
 } from '../format.js';
 
 // Opens a fresh connection per call rather than reusing one held for the life of the process — a
@@ -100,6 +102,20 @@ export async function tagNotesTool(deps, input) {
     const { tag } = input;
     return callTool(deps.auditLogger, deps.mcpLogger, 'tag_notes', input,
         async () => formatTagNotesTable(await withDb(dbPath, (db) => tagNotes(db, tag))));
+}
+
+export async function metadataKeysTool(deps, input) {
+    const { dbPath } = deps;
+    return callTool(deps.auditLogger, deps.mcpLogger, 'metadata_keys', input,
+        async () => formatMetadataKeysTable(await withDb(dbPath, (db) => metadataKeys(db))));
+}
+
+export async function metadataQueryTool(deps, input) {
+    const { dbPath } = deps;
+    const { filters, match = 'all' } = input;
+    return callTool(deps.auditLogger, deps.mcpLogger, 'metadata_query', input, async () => (
+        formatTagNotesTable(await withDb(dbPath, (db) => metadataQuery(db, { filters, match })))
+    ));
 }
 
 export async function noteReadTool(deps, input) {
