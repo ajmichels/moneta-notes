@@ -72,6 +72,7 @@ describe('schema: notes table', () => {
         expect(row.content_hash).toBe('abc123');
         expect(row.line_count).toBe(42);
         expect(row.extraction_version).toBe(0);
+        expect(row.metadata_json).toBe('{}');
         db.close();
     });
 
