@@ -108,6 +108,13 @@ if one of them ever does fill up with repeated warnings.
   hybrid search has no local-model fallback (S005) — it always needs the daemon up.
 - **Daemon not picking up a config change** — `mnotes daemon restart` (config is read once at
   startup).
+- **(macOS) `./scripts/install.sh` fails with `Bootstrap failed: 5: Input/output error`** (possibly
+  suggesting you re-run as root — don't; the daemon needs your user session, not root) — this is
+  launchd's unhelpful way of saying the LaunchAgent label was already loaded from a previous install
+  when the script tried to `bootstrap` it again. Fixed as of the `os_enable_services` bootout-before-
+  bootstrap change; pull latest and re-run. If you're on an older checkout, `launchctl bootout
+  gui/$(id -u)/com.ajmichels.mnotes gui/$(id -u)/com.ajmichels.mnotes.logrotate` (tolerates "not
+  loaded") before re-running `install.sh` works around it.
 - **(macOS) Background Task Management shows "Node.js Foundation" instead of "Moneta Notes"** — the
   native launcher wasn't built at install time (no `clang`). Install Xcode Command Line Tools
   (`xcode-select --install`) and re-run `./scripts/install.sh` — it's safe to re-run. Doesn't apply to

@@ -110,7 +110,7 @@ absent case, so the contract stays a flat list of names both files must define:
 | `os_service_dir` | prints the dir service definition files live in | `~/Library/LaunchAgents` | `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user` |
 | `os_prepare_launch_executable` | builds/resolves the executable the service(s) launch, sets `LAUNCH_EXECUTABLE` | builds+signs the native launcher bundle, or falls back to a wrapper script (unchanged from today) | one-liner: `LAUNCH_EXECUTABLE="$NODE_BIN"` — no bundle/signing concept exists on this path (see below) |
 | `os_write_service_files` | renders and writes both service definitions, given `LAUNCH_EXECUTABLE`, the two script paths, the log dir, and the resolved `fswatch` directory | renders both `.plist.template`s from `launchd/` | renders `mnotes.service`, `mnotes-logrotate.service`, and `mnotes-logrotate.timer` from `systemd/`; also runs `systemctl --user daemon-reload` |
-| `os_enable_services` | activates both services persistently | `launchctl bootstrap gui/<uid> <plist>` ×2 | `systemctl --user enable --now <unit>` ×2 |
+| `os_enable_services` | activates both services persistently | `launchctl bootout gui/<uid> <plist>` ×2 (tolerating "not loaded"), then `bootstrap` ×2 — bootstrapping an already-loaded label fails opaquely, so a re-run always unloads first | `systemctl --user enable --now <unit>` ×2 — already idempotent against a re-run, no bootout-equivalent needed |
 | `os_disable_services` | deactivates both services (uninstall) | `launchctl bootout gui/<uid>/<label>` ×2, tolerating "not loaded" | `systemctl --user disable --now <unit>` ×2, tolerating "not loaded" |
 | `os_remove_service_files` | deletes the service definition files (uninstall) | `rm -f` both plists | `rm -f` all three unit files, then `systemctl --user daemon-reload` |
 | `os_watcher_install_hint` | prints the human-facing install command for the preflight warning | `` `brew install fswatch` `` | generic multi-distro line, no detection (see below) |
@@ -294,7 +294,13 @@ step 10's `pnpm add --global` links the CLI to this same `node_modules` rather t
      no-op for Node). This is an install-time snapshot, same limitation the PATH fix already has —
      changing the value later means re-running `install.sh` to pick it up.
 8. **Activate both services** (`os_enable_services`): macOS —
-   `launchctl bootstrap gui/$(id -u) <plist path>` for both plists. Linux —
+   `launchctl bootout gui/$(id -u) <plist path>` (tolerating "wasn't loaded" — a first-ever install has
+   nothing to boot out) then `launchctl bootstrap gui/$(id -u) <plist path>` for both plists. The
+   bootout-first step exists because `launchctl bootstrap` on an already-loaded label — which a re-run
+   of `install.sh` after a plist change (e.g. a new `EnvironmentVariables` entry, a rebuilt launcher
+   binary) always hits — fails with launchd's notoriously unhelpful `Bootstrap failed: 5: Input/output
+   error` rather than a clear "already loaded" message; unloading first makes the freshly rendered
+   plist actually take effect instead of silently no-op'ing against the stale loaded one. Linux —
    `systemctl --user enable --now <unit>` for both `mnotes.service` and `mnotes-logrotate.timer` (not
    `mnotes-logrotate.service` directly — the timer is what's enabled/persistent; it triggers the service
    on its own schedule). On a machine with no active login session expected to stay logged in (a

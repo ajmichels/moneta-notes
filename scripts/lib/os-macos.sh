@@ -86,6 +86,13 @@ os_write_service_files() {
 }
 
 os_enable_services() {
+    # Bootstrapping an already-loaded label (e.g. a re-run of install.sh picking up a changed
+    # plist — a new EnvironmentVariables entry, a rebuilt launcher binary) fails with launchd's
+    # notoriously unhelpful "Bootstrap failed: 5: Input/output error" rather than a clear "already
+    # loaded" message. Boot out first, tolerating "wasn't loaded" on a first-ever install, so the
+    # freshly rendered plist always actually takes effect.
+    launchctl bootout "gui/$(id -u)" "$DAEMON_SERVICE_PATH" 2>/dev/null || true
+    launchctl bootout "gui/$(id -u)" "$LOGROTATE_SERVICE_PATH" 2>/dev/null || true
     launchctl bootstrap "gui/$(id -u)" "$DAEMON_SERVICE_PATH"
     launchctl bootstrap "gui/$(id -u)" "$LOGROTATE_SERVICE_PATH"
 }
