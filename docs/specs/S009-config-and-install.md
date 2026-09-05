@@ -207,7 +207,9 @@ produce the real file; the real file (if written) only ever contains genuinely-o
 ## Install (`scripts/install.sh`)
 
 Assumes `pnpm install` has already been run (dependency installation is a separate, ordinary dev-setup
-step, not part of this script). Steps, in order:
+step, not part of this script) — `pnpm install --prod` is enough for running the installed app, since
+step 10's `pnpm add --global` links the CLI to this same `node_modules` rather than resolving its own;
+`devDependencies` are only needed if you're modifying the code. Steps, in order:
 
 1. **Preflight check**: `which rg` — if missing, print a clear warning ("ripgrep not found — install
    via `<os_ripgrep_install_hint>` before using `mnotes grep`") and continue (not a hard blocker; every

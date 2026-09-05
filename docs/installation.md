@@ -59,12 +59,15 @@ Optional:
 ```sh
 git clone <this repo>
 cd moneta-notes
-pnpm install
+pnpm install --prod
 ./scripts/install.sh
 ```
 
-`pnpm install` (plain dependency install) is a separate, ordinary step — `install.sh` assumes it's
-already been run and doesn't do it for you.
+`pnpm install` (dependency install) is a separate, ordinary step — `install.sh` assumes it's already
+been run and doesn't do it for you. `--prod` skips `devDependencies` (vitest, eslint, husky, ...),
+which nothing at runtime needs — `pnpm add --global` (step 10 below) links the CLI straight to this
+same `node_modules`, so whatever's installed here is what the running app gets. If you're going to
+modify the code, run plain `pnpm install` (no `--prod`) instead so the test/lint tooling is available.
 
 You'll be prompted for two paths, each with a sensible default (press Enter to accept):
 
