@@ -75,6 +75,14 @@ block at all reads back as `metadata: {}` — but in practice this should be rar
 gets an `id` written at creation time. Malformed YAML in the frontmatter block is a hard parse error
 (fail loudly — not silently treated as empty metadata).
 
+**Exactly one blank line separates the frontmatter's closing `---` from the first line of content**,
+matching `obsidian.nvim`'s `note_frontmatter_func` convention (see `CLAUDE.local.md`). Every write
+path (`note_write` create/update, `note_edit`, `note_append`, `note_rename`) enforces this on the way
+out, regardless of how the note was previously formatted — a note with no blank line, or several,
+gets normalized to exactly one the next time it's touched. This blank line is purely structural: it's
+never counted as part of `content` or `total_lines` at any tool boundary, so `content` is always just
+the note's real body text.
+
 **`note_title` resolves, it isn't just matched literally** (S010): `noteRead(vaultRoot, title,
 { startLine, endLine, db })` now accepts an optional `db`. Resolution order: exact title match first
 (the fast, common path — `titleToPath` + `existsSync`, no `db` needed); if that misses and `db` was

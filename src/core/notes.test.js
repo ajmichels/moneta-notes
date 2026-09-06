@@ -391,6 +391,15 @@ describe('noteWrite (create)', () => {
         );
         expect(noteRead(vaultRoot, 'Existing').content).toBe('already here');
     });
+
+    it('writes exactly one blank line between the frontmatter and the first content line', () => {
+        const vaultRoot = makeTempVault();
+
+        noteWrite(vaultRoot, 'Spaced Note', { content: 'first line\nsecond line' });
+
+        const raw = readFileSync(titleToPath(vaultRoot, 'Spaced Note'), 'utf8');
+        expect(raw).toMatch(/^---\n[\s\S]*?\n---\n\nfirst line\nsecond line\n$/);
+    });
 });
 
 describe('noteWrite (update)', () => {
@@ -481,6 +490,43 @@ describe('noteWrite (update)', () => {
         expect(() => noteWrite(vaultRoot, 'Ghost', { hash: 'abc123', content: 'x' })).toThrow(
             /does not exist/i,
         );
+    });
+
+    it('writes exactly one blank line between the frontmatter and the first content line', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Spaced Update', { content: 'old body' });
+
+        noteWrite(vaultRoot, 'Spaced Update', { hash: created.hash, content: 'new body' });
+
+        const raw = readFileSync(titleToPath(vaultRoot, 'Spaced Update'), 'utf8');
+        expect(raw).toMatch(/^---\n[\s\S]*?\n---\n\nnew body\n$/);
+    });
+
+    it('adds the missing blank line when updating a note that had none', () => {
+        const vaultRoot = makeTempVault();
+        const raw = '---\nid: No Blank Line\n---\noriginal body\n';
+        writeRawNote(vaultRoot, 'No Blank Line', raw);
+
+        noteWrite(vaultRoot, 'No Blank Line', {
+            hash: hashContent(raw), content: 'updated body',
+        });
+
+        const onDisk = readFileSync(titleToPath(vaultRoot, 'No Blank Line'), 'utf8');
+        expect(onDisk).toMatch(/^---\n[\s\S]*?\n---\n\nupdated body\n$/);
+        expect(noteRead(vaultRoot, 'No Blank Line').content).toBe('updated body');
+    });
+
+    it('collapses extra blank lines to exactly one when updating a note that had several', () => {
+        const vaultRoot = makeTempVault();
+        const raw = '---\nid: Too Many Blank Lines\n---\n\n\n\noriginal body\n';
+        writeRawNote(vaultRoot, 'Too Many Blank Lines', raw);
+
+        noteWrite(vaultRoot, 'Too Many Blank Lines', {
+            hash: hashContent(raw), content: 'updated body', force: true,
+        });
+
+        const onDisk = readFileSync(titleToPath(vaultRoot, 'Too Many Blank Lines'), 'utf8');
+        expect(onDisk).toMatch(/^---\n[\s\S]*?\n---\n\nupdated body\n$/);
     });
 });
 

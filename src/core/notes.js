@@ -12,6 +12,35 @@ export function hashContent(content) {
     return createHash('sha1').update(content, 'utf8').digest('hex');
 }
 
+// gray-matter attributes the blank line separating frontmatter from content to `content` itself
+// (e.g. parsing "---\nid: x\n---\n\nHello" yields content "\nHello\n"). Strip exactly one leading
+// blank line here so `content` at every tool-facing boundary (noteRead, size-drop line counts,
+// etc.) is just the note's real body, never the structural separator — the inverse of the blank
+// line stringifyNote always re-adds below. A body with no separator at all (not yet conformant, or
+// created before this convention existed) passes through unchanged rather than losing a real line.
+function stripSeparatorBlankLine(body) {
+    return body.startsWith('\n') ? body.slice(1) : body;
+}
+
+function parseNote(raw) {
+    const { data, content } = matter(raw);
+    return { data, content: stripSeparatorBlankLine(content) };
+}
+
+// gray-matter's own stringify butts the closing `---` straight against the first content line with
+// no blank line, which doesn't match obsidian.nvim's note_frontmatter_func convention (see
+// CLAUDE.local.md). Reuse gray-matter for the YAML block itself (stringify against '' isolates it,
+// independent of body) and unconditionally splice in exactly one blank line before any non-empty
+// body — callers always pass the real body (via parseNote above), never one still carrying the
+// separator, so this never has to guess how many leading blanks are structural.
+function stringifyNote(body, data) {
+    const frontmatter = matter.stringify('', data).trimEnd();
+    if (body === '') {
+        return `${frontmatter}\n`;
+    }
+    return `${frontmatter}\n\n${body}${body.endsWith('\n') ? '' : '\n'}`;
+}
+
 function readRawNote(filePath, title) {
     try {
         return readFileSync(filePath, 'utf8');
@@ -44,7 +73,7 @@ export function noteRead(vaultRoot, title, { startLine, endLine, db = null } = {
     const { resolvedTitle, filePath } = resolveReadTarget(vaultRoot, title, db);
     const raw = readRawNote(filePath, title);
 
-    const { data: metadata, content: body } = matter(raw);
+    const { data: metadata, content: body } = parseNote(raw);
     const totalLines = countLines(body);
     const contentHash = hashContent(raw);
     // Always parsed from the full body, regardless of any start_line/end_line window below — a
@@ -124,7 +153,7 @@ function withCreatedTimestamp(baseMetadata, callerMetadata, title) {
 
 function createNote(filePath, title, metadata, content) {
     const data = withCreatedTimestamp(withComputedId(metadata, metadata, title), metadata, title);
-    const raw = matter.stringify(content, data);
+    const raw = stringifyNote(content, data);
 
     mkdirSync(dirname(filePath), { recursive: true });
     writeFileSync(filePath, raw, 'utf8');
@@ -160,7 +189,7 @@ function updateNote(filePath, title, hash, metadata, content, { force, sizeDropT
         );
     }
 
-    const { data: existingMetadata, content: existingBody } = matter(currentRaw);
+    const { data: existingMetadata, content: existingBody } = parseNote(currentRaw);
     const currentLineCount = countLines(existingBody);
     const newLineCount = countLines(content);
 
@@ -173,7 +202,7 @@ function updateNote(filePath, title, hash, metadata, content, { force, sizeDropT
     }
 
     const data = withComputedId(mergeMetadata(existingMetadata, metadata), metadata, title);
-    const raw = matter.stringify(content, data);
+    const raw = stringifyNote(content, data);
 
     writeFileSync(filePath, raw, 'utf8');
 
@@ -231,7 +260,7 @@ export function noteEdit(vaultRoot, title, {
         );
     }
 
-    const { data: existingMetadata, content: existingBody } = matter(currentRaw);
+    const { data: existingMetadata, content: existingBody } = parseNote(currentRaw);
     const occurrences = countOccurrences(existingBody, oldTxt);
 
     if (occurrences === 0) {
@@ -256,7 +285,7 @@ export function noteEdit(vaultRoot, title, {
     }
 
     const data = withComputedId(mergeMetadata(existingMetadata, metadata), metadata, title);
-    const raw = matter.stringify(newBody, data);
+    const raw = stringifyNote(newBody, data);
 
     writeFileSync(filePath, raw, 'utf8');
 
@@ -290,12 +319,12 @@ export function noteAppend(vaultRoot, title, hash, content) {
         );
     }
 
-    const { data: existingMetadata, content: existingRawBody } = matter(currentRaw);
+    const { data: existingMetadata, content: existingRawBody } = parseNote(currentRaw);
     const existingBody = normalizeBody(existingRawBody);
     const newBody = existingBody === '' ? content : `${existingBody}\n${content}`;
 
     const data = withComputedId(existingMetadata, null, title);
-    const raw = matter.stringify(newBody, data);
+    const raw = stringifyNote(newBody, data);
 
     writeFileSync(filePath, raw, 'utf8');
 
@@ -332,7 +361,7 @@ function applyRenameToIndex(db, oldRelPath, newRelPath, newPath, note) {
 function rewriteLinkCandidate(vaultRoot, candidateTitle, { oldTitle, newTitle, db, titleIndex }) {
     const candidatePath = titleToPath(vaultRoot, candidateTitle);
     const candidateRaw = readFileSync(candidatePath, 'utf8');
-    const { data: candidateMetadata, content: candidateBody } = matter(candidateRaw);
+    const { data: candidateMetadata, content: candidateBody } = parseNote(candidateRaw);
     const { body: newBody, count } = replaceLinkTarget(
         candidateBody, oldTitle, newTitle, { titleIndex },
     );
@@ -341,7 +370,7 @@ function rewriteLinkCandidate(vaultRoot, candidateTitle, { oldTitle, newTitle, d
         return;
     }
 
-    writeFileSync(candidatePath, matter.stringify(newBody, candidateMetadata), 'utf8');
+    writeFileSync(candidatePath, stringifyNote(newBody, candidateMetadata), 'utf8');
 
     if (db !== null) {
         enqueuePath(db, `${candidateTitle}.md`);
@@ -427,9 +456,9 @@ export function noteRename(vaultRoot, oldTitle, newTitle, hash, db = null) {
     // vault (or in a post-rename index) by the time the cascade runs (S003).
     const titleIndex = db !== null ? buildTitleIndex(db) : null;
 
-    const { data: existingMetadata, content: body } = matter(currentRaw);
+    const { data: existingMetadata, content: body } = parseNote(currentRaw);
     const data = withComputedId(existingMetadata, null, newTitle);
-    const raw = matter.stringify(body, data);
+    const raw = stringifyNote(body, data);
 
     mkdirSync(dirname(newPath), { recursive: true });
     writeFileSync(newPath, raw, 'utf8');
@@ -451,7 +480,7 @@ export function noteRename(vaultRoot, oldTitle, newTitle, hash, db = null) {
     // [[oldTitle]] link, and a caller chaining a follow-up mutation off this response needs a hash
     // that matches reality, not the intermediate post-rename-only value (S003).
     const finalRaw = readFileSync(newPath, 'utf8');
-    const { content: finalBody } = matter(finalRaw);
+    const { content: finalBody } = parseNote(finalRaw);
 
     return { title: newTitle, hash: hashContent(finalRaw), line_count: countLines(finalBody) };
 }
