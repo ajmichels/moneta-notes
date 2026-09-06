@@ -530,6 +530,51 @@ describe('noteWrite (update)', () => {
     });
 });
 
+describe('noteWrite metadata shape guard', () => {
+    it('rejects a bare nested object value on create, and does not create the file', () => {
+        const vaultRoot = makeTempVault();
+
+        expect(() => noteWrite(vaultRoot, 'Nested Object', {
+            metadata: { depends_on: { project: 'foo/bar' } },
+            content: 'body',
+        })).toThrow(/nested object/i);
+        expect(existsSync(titleToPath(vaultRoot, 'Nested Object'))).toBe(false);
+    });
+
+    it('rejects an array containing an object on create', () => {
+        const vaultRoot = makeTempVault();
+
+        expect(() => noteWrite(vaultRoot, 'Nested Array', {
+            metadata: { depends_on: [ { project: 'foo/bar' } ] },
+            content: 'body',
+        })).toThrow(/nested object/i);
+    });
+
+    it('allows a flat array of scalars', () => {
+        const vaultRoot = makeTempVault();
+
+        expect(() => noteWrite(vaultRoot, 'Flat Array', {
+            metadata: { tags: [ 'a', 'b' ] },
+            content: 'body',
+        })).not.toThrow();
+    });
+
+    it('rejects a nested object on update, leaving the existing note untouched', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Update Nested', { content: 'original body' });
+
+        expect(() => noteWrite(vaultRoot, 'Update Nested', {
+            hash: created.hash,
+            metadata: { depends_on: { project: 'foo/bar' } },
+            content: 'new body',
+        })).toThrow(/nested object/i);
+
+        const onDisk = noteRead(vaultRoot, 'Update Nested');
+        expect(onDisk.content).toBe('original body');
+        expect(onDisk.metadata).not.toHaveProperty('depends_on');
+    });
+});
+
 describe('noteWrite size-drop guard', () => {
     it('rejects an update that drops body line count below the threshold', () => {
         const vaultRoot = makeTempVault();
@@ -622,6 +667,20 @@ describe('noteEdit', () => {
         expect(noteRead(vaultRoot, 'Edit Meta').metadata).toEqual({
             id: 'Edit Meta', tags: [ 'a' ], created: expect.any(String),
         });
+    });
+
+    it('rejects a nested metadata patch, leaving the note untouched', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Edit Nested', { content: 'original body' });
+
+        expect(() => noteEdit(vaultRoot, 'Edit Nested', {
+            hash: created.hash,
+            oldTxt: 'original',
+            newTxt: 'changed',
+            metadata: { depends_on: [ { project: 'foo/bar' } ] },
+        })).toThrow(/nested object/i);
+
+        expect(noteRead(vaultRoot, 'Edit Nested').content).toBe('original body');
     });
 
     it('throws when old_txt is not found', () => {

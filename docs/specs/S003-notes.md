@@ -62,6 +62,24 @@ ephemeral (rebuildable from scratch, not a system of record).
   `obsidian.nvim` itself uses internally to log "Created" vs "Updated"), only ever stamping `created`
   on the save where the file doesn't exist yet.
 
+## Flat frontmatter only
+
+Obsidian and `obsidian.nvim` don't support nested frontmatter structures in YAML: a bare nested
+object (`depends_on: {project: x}`) or an array containing one (`depends_on: [{project: x}]`)
+parses fine through `gray-matter`, but `obsidian.nvim`'s on-save reformatting mangles it (verified
+empirically by AJ — not hypothetical). Every metadata-accepting write path (`note_write`
+create/update, `note_edit`) rejects a `metadata` patch containing a nested object anywhere — as a
+bare value or as an array element — with a descriptive error, before touching disk. Flat scalars and
+arrays of scalars are the only shapes a caller can write.
+
+This is a write-time guard, not a migration. A note that already has nested frontmatter (from before
+this rule existed, or from something other than `mnotes` writing to the vault) is left alone:
+`mergeMetadata`'s shallow merge only ever touches keys the caller's patch mentions, so a
+`note_write`/`note_edit` call that doesn't reference the offending key carries it forward untouched
+rather than re-validating or stripping it. `metadata_query`/`metadata_keys` (S014) still index and
+query whatever nested structures already exist in the vault — this rule only stops `mnotes` itself
+from writing new ones.
+
 ## Tools
 
 ### `note_read`
@@ -166,6 +184,9 @@ the tool surface correctly, not an implementation detail to leave undocumented.
   untouched. This differs from `content`'s full-replace semantics — a deliberate asymmetry: `content`
   has no natural "patch" representation the way a small metadata tweak does, so replace-whole-content
   vs. merge-metadata are each the natural default for their own field.
+- `metadata` patch values must be flat — a scalar, or an array of scalars — never a nested object,
+  bare or inside an array (see "Flat frontmatter only" above). A patch violating this is a hard error,
+  not a silent flatten or drop, and nothing is written to disk.
 - **`hash` not matching current content_hash** → staleness error.
 - Size-drop guard: if the new `content`'s line count is below ~50% of the current line count, the
   write is rejected unless `force: true` is passed. Applies to updates only (not create, where there's
@@ -183,8 +204,8 @@ tool, so a null hash has no meaningful interpretation), `old_txt<string>`, `new_
 - Replaces `old_txt` with `new_txt` in the note body. Fails if `old_txt` doesn't match exactly once
   (zero matches = error, multiple matches = error — ambiguous edits aren't guessed at).
 - `metadata`, if provided, merges into frontmatter using the same semantics as `note_write` (`null`
-  deletes a key). This closes a gap in the README's current `note_edit` documentation, which has no
-  metadata param at all.
+  deletes a key, and a patch value must be flat — see "Flat frontmatter only" above). This closes a
+  gap in the README's current `note_edit` documentation, which has no metadata param at all.
 - Size-drop guard applies here too (a large `old_txt` → small/empty `new_txt` replacement is just as
   capable of collapsing a note as a bad `note_write` would be).
 - Returns `{ title, hash, line_count }`, same as `note_write`.

@@ -48,6 +48,15 @@ not millions" — S001). If a specific key ever gets hot enough to matter, an ex
 that path is a one-line, additive change (verified: brings a scalar equality check from 1.78ms to
 0.20ms, confirmed via `EXPLAIN QUERY PLAN` using the index) — not built speculatively now.
 
+**Note (S003):** `note_write`/`note_edit` now reject any *new* nested-object frontmatter (bare or
+inside an array, including the `depends_on: [{project: ..., source: ...}]` shape used as the running
+example above) — Obsidian/`obsidian.nvim` can't round-trip that shape through its on-save
+reformatting. That's a write-time guard in `core/notes.js`, not a change here: this query engine and
+its `json_tree`/`json_each` approach still fully apply to whatever nested structures already exist in
+a vault (pre-dating the rule, or written by something other than `mnotes`), so the array-of-objects
+examples below remain accurate reads of legacy or externally-authored data — just not something
+`mnotes` itself will write going forward.
+
 ### What's excluded: `tags`
 
 Every frontmatter key except `tags` is projected into `metadata_json`. `tags` is excluded for two

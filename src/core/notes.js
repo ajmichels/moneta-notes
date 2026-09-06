@@ -161,6 +161,32 @@ function createNote(filePath, title, metadata, content) {
     return { title, hash: hashContent(raw), line_count: countLines(content) };
 }
 
+function isPlainObject(value) {
+    return value !== null && typeof value === 'object' && !Array.isArray(value) && !(value instanceof Date);
+}
+
+// Obsidian and obsidian.nvim don't support nested frontmatter structures in YAML — a bare nested
+// object (`depends_on: {project: x}`) or an array containing one (`depends_on: [{project: x}]`)
+// round-trips fine through gray-matter, but obsidian.nvim's on-save reformatting mangles it
+// (verified empirically). Only a *newly supplied* patch is checked — pre-existing nested
+// frontmatter (written before this rule, or by something other than mnotes) is left alone by
+// mergeMetadata's shallow merge, so untouched keys are never retroactively rejected.
+function assertFlatMetadataPatch(patch, title, toolName) {
+    if (!patch) {
+        return;
+    }
+    for (const [ key, value ] of Object.entries(patch)) {
+        const hasNestedObject = isPlainObject(value) || (Array.isArray(value) && value.some(isPlainObject));
+        if (hasNestedObject) {
+            throw new Error(
+                `${toolName}: metadata key "${key}" for "${title}" contains a nested object — `
+                + 'Obsidian/obsidian.nvim frontmatter only supports flat scalars and arrays of '
+                + 'scalars, never a nested object (bare or inside an array).',
+            );
+        }
+    }
+}
+
 function mergeMetadata(existing, patch) {
     if (!patch) {
         return { ...existing };
@@ -212,6 +238,8 @@ function updateNote(filePath, title, hash, metadata, content, { force, sizeDropT
 export function noteWrite(vaultRoot, title, {
     hash = null, metadata = null, content, force = false, sizeDropThreshold = SIZE_DROP_THRESHOLD,
 } = {}) {
+    assertFlatMetadataPatch(metadata, title, 'note_write');
+
     const filePath = titleToPath(vaultRoot, title);
     const fileExists = existsSync(filePath);
 
@@ -248,6 +276,7 @@ export function noteEdit(vaultRoot, title, {
     if (!hash) {
         throw new Error(`note_edit: hash is required for "${title}"`);
     }
+    assertFlatMetadataPatch(metadata, title, 'note_edit');
 
     const filePath = titleToPath(vaultRoot, title);
     const currentRaw = readRawNote(filePath, title);
