@@ -187,6 +187,28 @@ function assertFlatMetadataPatch(patch, title, toolName) {
     }
 }
 
+// Obsidian's `tags` frontmatter property expects bare names ("project"), never the "#project"
+// syntax that only belongs on an inline body tag — a caller reusing that syntax in frontmatter
+// (plausible since it's the same word in both places) produces a tag that silently fails to merge
+// with the bare-named tag elsewhere in the vault's tag graph: no error, just a fragmented tag
+// index.
+// Only the `tags` key of a newly supplied patch is checked (mirrors assertFlatMetadataPatch's scope
+// and rationale) — pre-existing frontmatter is left alone.
+function assertNoHashPrefixedTags(patch, title, toolName) {
+    if (!patch || !Object.prototype.hasOwnProperty.call(patch, 'tags')) {
+        return;
+    }
+    const values = Array.isArray(patch.tags) ? patch.tags : [ patch.tags ];
+    for (const value of values) {
+        if (typeof value === 'string' && value.startsWith('#')) {
+            throw new Error(
+                `${toolName}: tag "${value}" for "${title}" starts with "#" — frontmatter tags `
+                + 'must be bare names (e.g. "project"), not the inline "#project" body-tag syntax.',
+            );
+        }
+    }
+}
+
 // A wikilink or embed's brackets must stay on one line — `[[Some\nTitle]]` parses in gray-matter/
 // Markdown fine but Obsidian and obsidian.nvim never resolve it (silently: no error, just a dead
 // link), so this can't be caught by round-tripping. Checked against whatever text the caller is
@@ -258,6 +280,7 @@ export function noteWrite(vaultRoot, title, {
     hash = null, metadata = null, content, force = false, sizeDropThreshold = SIZE_DROP_THRESHOLD,
 } = {}) {
     assertFlatMetadataPatch(metadata, title, 'note_write');
+    assertNoHashPrefixedTags(metadata, title, 'note_write');
     assertNoSplitWikilinks(content, title, 'note_write');
 
     const filePath = titleToPath(vaultRoot, title);
@@ -297,6 +320,7 @@ export function noteEdit(vaultRoot, title, {
         throw new Error(`note_edit: hash is required for "${title}"`);
     }
     assertFlatMetadataPatch(metadata, title, 'note_edit');
+    assertNoHashPrefixedTags(metadata, title, 'note_edit');
     assertNoSplitWikilinks(newTxt, title, 'note_edit');
 
     const filePath = titleToPath(vaultRoot, title);

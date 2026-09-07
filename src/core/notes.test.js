@@ -606,6 +606,51 @@ describe('noteWrite split-wikilink guard', () => {
     });
 });
 
+describe('noteWrite tag guard', () => {
+    it('rejects a hash-prefixed tag on create, and does not create the file', () => {
+        const vaultRoot = makeTempVault();
+
+        expect(() => noteWrite(vaultRoot, 'Hash Tag', {
+            metadata: { tags: [ '#project' ] },
+            content: 'body',
+        })).toThrow(/starts with "#"/i);
+        expect(existsSync(titleToPath(vaultRoot, 'Hash Tag'))).toBe(false);
+    });
+
+    it('rejects a hash-prefixed single-string tags value', () => {
+        const vaultRoot = makeTempVault();
+
+        expect(() => noteWrite(vaultRoot, 'Hash Tag String', {
+            metadata: { tags: '#project' },
+            content: 'body',
+        })).toThrow(/starts with "#"/i);
+    });
+
+    it('allows a bare tag name', () => {
+        const vaultRoot = makeTempVault();
+
+        expect(() => noteWrite(vaultRoot, 'Bare Tag', {
+            metadata: { tags: [ 'project' ] },
+            content: 'body',
+        })).not.toThrow();
+    });
+
+    it('rejects a hash-prefixed tag on update, leaving the existing note untouched', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Update Hash Tag', { content: 'original body' });
+
+        expect(() => noteWrite(vaultRoot, 'Update Hash Tag', {
+            hash: created.hash,
+            metadata: { tags: [ '#project' ] },
+            content: 'new body',
+        })).toThrow(/starts with "#"/i);
+
+        const onDisk = noteRead(vaultRoot, 'Update Hash Tag');
+        expect(onDisk.content).toBe('original body');
+        expect(onDisk.metadata).not.toHaveProperty('tags');
+    });
+});
+
 describe('noteWrite size-drop guard', () => {
     it('rejects an update that drops body line count below the threshold', () => {
         const vaultRoot = makeTempVault();
@@ -712,6 +757,20 @@ describe('noteEdit', () => {
         })).toThrow(/nested object/i);
 
         expect(noteRead(vaultRoot, 'Edit Nested').content).toBe('original body');
+    });
+
+    it('rejects a hash-prefixed tag patch, leaving the note untouched', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Edit Hash Tag', { content: 'original body' });
+
+        expect(() => noteEdit(vaultRoot, 'Edit Hash Tag', {
+            hash: created.hash,
+            oldTxt: 'original',
+            newTxt: 'changed',
+            metadata: { tags: [ '#project' ] },
+        })).toThrow(/starts with "#"/i);
+
+        expect(noteRead(vaultRoot, 'Edit Hash Tag').content).toBe('original body');
     });
 
     it('rejects a split wikilink in new_txt, leaving the note untouched', () => {
