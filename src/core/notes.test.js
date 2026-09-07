@@ -575,6 +575,37 @@ describe('noteWrite metadata shape guard', () => {
     });
 });
 
+describe('noteWrite split-wikilink guard', () => {
+    it('rejects a wikilink split across a newline on create, and does not create the file', () => {
+        const vaultRoot = makeTempVault();
+
+        expect(() => noteWrite(vaultRoot, 'Split Link', {
+            content: 'see [[Some\nNote]] for details',
+        })).toThrow(/split across a newline/i);
+        expect(existsSync(titleToPath(vaultRoot, 'Split Link'))).toBe(false);
+    });
+
+    it('rejects a split wikilink on update, leaving the existing note untouched', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Update Split Link', { content: 'original body' });
+
+        expect(() => noteWrite(vaultRoot, 'Update Split Link', {
+            hash: created.hash,
+            content: 'see [[Some\nNote]] for details',
+        })).toThrow(/split across a newline/i);
+
+        expect(noteRead(vaultRoot, 'Update Split Link').content).toBe('original body');
+    });
+
+    it('allows a wikilink that stays on a single line', () => {
+        const vaultRoot = makeTempVault();
+
+        expect(() => noteWrite(vaultRoot, 'Intact Link', {
+            content: 'see [[Some Note]] for details',
+        })).not.toThrow();
+    });
+});
+
 describe('noteWrite size-drop guard', () => {
     it('rejects an update that drops body line count below the threshold', () => {
         const vaultRoot = makeTempVault();
@@ -683,6 +714,19 @@ describe('noteEdit', () => {
         expect(noteRead(vaultRoot, 'Edit Nested').content).toBe('original body');
     });
 
+    it('rejects a split wikilink in new_txt, leaving the note untouched', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Edit Split Link', { content: 'original body' });
+
+        expect(() => noteEdit(vaultRoot, 'Edit Split Link', {
+            hash: created.hash,
+            oldTxt: 'original',
+            newTxt: 'see [[Some\nNote]]',
+        })).toThrow(/split across a newline/i);
+
+        expect(noteRead(vaultRoot, 'Edit Split Link').content).toBe('original body');
+    });
+
     it('throws when old_txt is not found', () => {
         const vaultRoot = makeTempVault();
         const created = noteWrite(vaultRoot, 'No Match', { content: 'hello world' });
@@ -780,6 +824,16 @@ describe('noteAppend', () => {
         noteWrite(vaultRoot, 'No Hash Append', { content: 'x' });
 
         expect(() => noteAppend(vaultRoot, 'No Hash Append', null, 'y')).toThrow(/hash is required/i);
+    });
+
+    it('rejects a split wikilink in the appended content, leaving the note untouched', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Append Split Link', { content: 'original body' });
+
+        expect(() => noteAppend(vaultRoot, 'Append Split Link', created.hash, 'see [[Some\nNote]]'))
+            .toThrow(/split across a newline/i);
+
+        expect(noteRead(vaultRoot, 'Append Split Link').content).toBe('original body');
     });
 
     it('throws a staleness error on hash mismatch', () => {

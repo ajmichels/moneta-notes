@@ -187,6 +187,25 @@ function assertFlatMetadataPatch(patch, title, toolName) {
     }
 }
 
+// A wikilink or embed's brackets must stay on one line — `[[Some\nTitle]]` parses in gray-matter/
+// Markdown fine but Obsidian and obsidian.nvim never resolve it (silently: no error, just a dead
+// link), so this can't be caught by round-tripping. Checked against whatever text the caller is
+// newly supplying (mirrors assertFlatMetadataPatch): the full content on note_write, the inserted
+// new_txt on note_edit, the appended content on note_append — never the pre-existing body, so a
+// note that already had one before this rule existed isn't retroactively rejected by an unrelated
+// write. Non-greedy so `[[A]] .. [[B\nC]]` flags only the second link, not the whole span between.
+function assertNoSplitWikilinks(text, title, toolName) {
+    for (const match of text.matchAll(/\[\[([\s\S]*?)\]\]/g)) {
+        if (match[1].includes('\n')) {
+            throw new Error(
+                `${toolName}: a wikilink in "${title}" is split across a newline — `
+                + `"[[${match[1].replace(/\n/g, '\\n')}]]" must stay on a single line, or `
+                + 'Obsidian/obsidian.nvim will not resolve it.',
+            );
+        }
+    }
+}
+
 function mergeMetadata(existing, patch) {
     if (!patch) {
         return { ...existing };
@@ -239,6 +258,7 @@ export function noteWrite(vaultRoot, title, {
     hash = null, metadata = null, content, force = false, sizeDropThreshold = SIZE_DROP_THRESHOLD,
 } = {}) {
     assertFlatMetadataPatch(metadata, title, 'note_write');
+    assertNoSplitWikilinks(content, title, 'note_write');
 
     const filePath = titleToPath(vaultRoot, title);
     const fileExists = existsSync(filePath);
@@ -277,6 +297,7 @@ export function noteEdit(vaultRoot, title, {
         throw new Error(`note_edit: hash is required for "${title}"`);
     }
     assertFlatMetadataPatch(metadata, title, 'note_edit');
+    assertNoSplitWikilinks(newTxt, title, 'note_edit');
 
     const filePath = titleToPath(vaultRoot, title);
     const currentRaw = readRawNote(filePath, title);
@@ -336,6 +357,7 @@ export function noteAppend(vaultRoot, title, hash, content) {
     if (!hash) {
         throw new Error(`note_append: hash is required for "${title}"`);
     }
+    assertNoSplitWikilinks(content, title, 'note_append');
 
     const filePath = titleToPath(vaultRoot, title);
     const currentRaw = readRawNote(filePath, title);
