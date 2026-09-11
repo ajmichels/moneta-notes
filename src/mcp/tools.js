@@ -28,6 +28,7 @@ async function withDb(dbPath, fn) {
 export async function callTool(auditLogger, mcpLogger, toolName, input, fn) {
     const noteTitle = input.note_title ?? input.old_title ?? null;
     const attachmentPath = input.attachment_path ?? null;
+    const query = input.query ?? null;
     let result;
 
     try {
@@ -39,6 +40,7 @@ export async function callTool(auditLogger, mcpLogger, toolName, input, fn) {
             attachmentPath,
             source: 'mcp',
             reason: input.reason,
+            query,
             outcome: 'error',
             errorMessage: err.message,
         });
@@ -51,6 +53,7 @@ export async function callTool(auditLogger, mcpLogger, toolName, input, fn) {
         attachmentPath,
         source: 'mcp',
         reason: input.reason,
+        query,
         outcome: 'success',
         errorMessage: null,
     });

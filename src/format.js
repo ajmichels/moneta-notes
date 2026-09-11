@@ -116,7 +116,7 @@ export function formatBrokenLinksTable(results, { align = false } = {}) {
     return formatTable([ 'note_title', 'broken_target' ], rows, { align });
 }
 
-const LOG_COLUMNS = [ 'timestamp', 'tool', 'source', 'identifier', 'outcome', 'reason', 'error_message' ];
+const LOG_COLUMNS = [ 'timestamp', 'tool', 'source', 'identifier', 'query', 'outcome', 'reason', 'error_message' ];
 
 // note_title and attachment_path are mutually exclusive per S008 audit entry (S012) — one
 // "identifier" column instead of two columns that are each empty half the time.
@@ -126,6 +126,7 @@ function logRow(entry) {
         tool: entry.tool,
         source: entry.source,
         identifier: entry.noteTitle ?? entry.attachmentPath,
+        query: entry.query,
         outcome: entry.outcome,
         reason: entry.reason,
         error_message: entry.errorMessage,
@@ -151,6 +152,7 @@ export function formatLogEntryJsonLine(entry) {
         source: entry.source,
         note_title: entry.noteTitle,
         attachment_path: entry.attachmentPath,
+        query: entry.query,
         outcome: entry.outcome,
         reason: entry.reason,
         error_message: entry.errorMessage,

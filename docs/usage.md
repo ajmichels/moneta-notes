@@ -317,8 +317,9 @@ mnotes logs --file=daemon.stderr              # the daemon process's own stderr,
 
 Filters/tails the audit trail (`audit.log`, [S008](specs/S008-logging.md)) by default — every MCP tool
 call and every CLI mutating command (`write`/`edit`/`append`/`rename`/`attachment write`), with `tool`,
-`source` (`mcp`/`cli`), the note title or attachment path, `reason` (MCP calls only), and `outcome`.
-This is CLI-only, like `links`/`vectors` — there's no MCP equivalent.
+`source` (`mcp`/`cli`), the note title or attachment path, `query` (the `search` tool's query string,
+MCP calls only), `reason` (MCP calls only), and `outcome`. This is CLI-only, like `links`/`vectors` —
+there's no MCP equivalent.
 
 `--file` selects which log file, one of seven: `audit` (default), `indexer`, `mcp-server` (S008's other
 two logger.js-written files — lifecycle/prose text, not structured per-call records), or

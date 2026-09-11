@@ -69,6 +69,7 @@ export function parseAuditLine(line) {
         noteTitle: context.note_title ?? null,
         attachmentPath: context.attachment_path ?? null,
         source: context.source ?? null,
+        query: context.query ?? null,
         reason: context.reason ?? null,
         outcome: context.outcome ?? null,
         errorMessage: context.error_message ?? null,

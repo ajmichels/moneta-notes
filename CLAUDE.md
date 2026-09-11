@@ -112,7 +112,9 @@ separate namespace entirely (vault content, not code).
 - Log destination and rotation strategy are proposed in README.md but not finalized — don't hardcode
   assumptions about the logging library beyond what's there without checking in.
 - Never log full note content. Tool-call logging captures `tool`, `note_title`, `reason`,
-  `timestamp`, and outcome — not the note body or diff.
+  `timestamp`, and outcome — not the note body or diff. The `search` tool is the one exception with a
+  free-text field of its own: its `query` string is logged alongside `reason`, since a search query
+  isn't note content and auditing what was searched for (and why) is the point.
 
 ## Git
 

@@ -209,13 +209,18 @@ describe('searchTool', () => {
         insertFtsRow(db, noteId, 'Recipe', 'a note about knowledge graphs');
         db.close();
 
+        const deps = makeDeps({ dbPath, embed: fakeEmbed, embeddingModel: 'm', embeddingVersion: 'v1' });
         const result = await searchTool(
-            makeDeps({ dbPath, embed: fakeEmbed, embeddingModel: 'm', embeddingVersion: 'v1' }),
+            deps,
             { query: 'graphs', mode: 'fulltext', limit: 20, reason: 'testing search' },
         );
 
         expect(result.isError).toBeUndefined();
         expect(result.content[0].text).toMatch(/^note_title\|file_line_count\|bm25_score\nRecipe\|5\|-?\d+(\.\d+)?\n$/);
+
+        const [ line ] = await waitForAuditLines(deps.logDir);
+        expect(line).toContain('query="graphs"');
+        expect(line).toContain('reason="testing search"');
     });
 
     it('maps a thrown search() error (malformed FTS5 syntax) to isError: true', async () => {

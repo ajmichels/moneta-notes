@@ -171,6 +171,31 @@ describe('logAudit', () => {
         expect(line).not.toContain('note_title=');
     });
 
+    it('includes the query field for search audit entries and omits it for other tools', async () => {
+        const logDir = makeTempLogDir();
+        const auditLogger = getAuditLogger(logDir);
+
+        await logAudit(auditLogger, {
+            tool: 'search',
+            source: 'mcp',
+            reason: 'looking for related notes',
+            query: 'knowledge graph',
+            outcome: 'success',
+        });
+        await logAudit(auditLogger, {
+            tool: 'write',
+            noteTitle: 'Test.md',
+            source: 'cli',
+            outcome: 'success',
+        });
+
+        const [ searchLine, writeLine ] = readFileSync(join(logDir, 'audit.log'), 'utf8').trim().split('\n');
+        expect(searchLine).toContain('INFO  [audit] search');
+        expect(searchLine).toContain('query="knowledge graph"');
+        expect(searchLine).toContain('reason="looking for related notes"');
+        expect(writeLine).not.toContain('query=');
+    });
+
     it('throws when source is "mcp" and reason is missing', () => {
         const logDir = makeTempLogDir();
         const auditLogger = getAuditLogger(logDir);

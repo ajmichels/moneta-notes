@@ -33,10 +33,20 @@ describe('parseAuditLine', () => {
             noteTitle: 'Weekly Notes/2026-W32',
             attachmentPath: null,
             source: 'mcp',
+            query: null,
             reason: 'testing redaction',
             outcome: 'success',
             errorMessage: null,
         });
+    });
+
+    it('parses the query field on a search audit line', () => {
+        const line = '2026-08-13T18:24:00.113Z INFO  [audit] search '
+            + 'source=mcp query="knowledge graph" reason="looking for related notes" outcome=success';
+
+        const entry = parseAuditLine(line);
+        expect(entry.query).toBe('knowledge graph');
+        expect(entry.reason).toBe('looking for related notes');
     });
 
     it('parses attachment_path in place of note_title', () => {
@@ -196,6 +206,22 @@ describe('runLogsCommand (non-follow)', () => {
 
         const parsed = JSON.parse(result.stdout.trim());
         expect(parsed).toMatchObject({ tool: 'note_write', note_title: 'A.md', source: 'mcp', outcome: 'success' });
+    });
+
+    it('includes the query column for a search audit entry, table and --json alike', async () => {
+        const logDir = makeTempLogDir();
+        const auditLogger = getAuditLogger(logDir);
+        await logAudit(auditLogger, {
+            tool: 'search', source: 'mcp', reason: 'looking for related notes', query: 'knowledge graph', outcome: 'success',
+        });
+
+        const table = await runLogsCommand([], { logDir });
+        expect(table.stdout).toContain('knowledge graph');
+
+        const json = await runLogsCommand([ '--json' ], { logDir });
+        expect(JSON.parse(json.stdout.trim())).toMatchObject({
+            tool: 'search', query: 'knowledge graph', reason: 'looking for related notes',
+        });
     });
 
     it('returns an empty result when audit.log does not exist yet', async () => {
