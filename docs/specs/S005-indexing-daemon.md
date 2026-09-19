@@ -1,13 +1,27 @@
 # S005 — Indexing Daemon
 
 Status: **Approved**
-Owns: `src/indexer/daemon.js`, `src/indexer/embed.js`
-Depends on: `S001-data-model` (including `enqueuePath`, which this file re-exports), `S004-grep-tags`
+Owns: `src/indexer/daemon.js`, `src/indexer/embed.js`, `src/indexer/fswatch-watcher.js`,
+`src/indexer/vault-walk.js`, `src/indexer/live-watcher.js`
+Depends on: `S001-data-model` (including `enqueuePath`, which `daemon.js` re-exports), `S004-grep-tags`
 (tag extraction, invoked here during processing), `S009-config-and-install` (`src/platform` supplies
 this daemon's app-support/log directory paths — see below), `S010-shared-utilities`, `S011-links` (link
 extraction, invoked here during processing)
 Consumed by: `S006-cli` (reindex/stats/search talk to this daemon), `S007-mcp-server` (search talks to
 this daemon), `S009-config-and-install` (new config knobs introduced here)
+
+`daemon.js` is the orchestrator (startup sequence, queue drainer, IPC server, `startDaemon`/`main`) and
+imports from the other three, never the reverse: `fswatch-watcher.js` is generic `fswatch` process
+supervision with zero vault/DB knowledge (`spawnFswatch`, `createResilientWatcher`, the exit-triggered
+backoff respawn — see "Process resilience" below); `vault-walk.js` is pure filesystem traversal
+(`walkVaultForMarkdown`, `buildSymlinkRegistry`, `rewriteEventPath`, `isDotPath`); `live-watcher.js` is
+the DB-aware layer that reconciles live filesystem reality into the index (`createFsWatcher` and the
+note-deletion primitives `deleteNoteByPath`/`deleteNotesByPathPrefix`, since "an indexed note's file is
+gone" is the same reconciliation concern whether triggered by a live `fswatch` event, the queue drainer,
+or a startup sweep). This split exists specifically because of the symlinked-directory work below: a
+single `daemon.js` covering the indexing pipeline, IPC, vault walking, `fswatch` supervision, and live
+reconciliation together comfortably exceeded a maintainable single-file size once per-symlink watcher
+lifecycle and live discovery/teardown were added.
 
 ## Purpose
 
@@ -17,8 +31,8 @@ S009 owns which): startup catch-up, live `fswatch`-driven indexing, the embeddin
 rather than loading their own model copy per invocation/process.
 
 **`fswatch` itself needs no platform branching.** It's a portable CLI binary — kqueue-backed on macOS,
-inotify-backed on Linux — and `daemon.js`'s `spawnFswatch`/`assertFswatchAvailable` shell out to it
-identically on both, no `process.platform` check anywhere in this file. Only `daemon.js`'s two path
+inotify-backed on Linux — and `fswatch-watcher.js`'s `spawnFswatch`/`assertFswatchAvailable` shell out
+to it identically on both, no `process.platform` check anywhere in that file. Only `daemon.js`'s two path
 helpers (`defaultAppSupportDir()`, and `defaultLogDir()` imported from `src/logger.js`) are
 platform-dependent, and both now delegate to `src/platform` (S009) instead of hardcoding
 `~/Library/...` — see S009's platform-abstraction section for the exact `appSupportDir()`/`logDir()`
@@ -117,14 +131,15 @@ main watcher's blindness to symlinked subtrees is total, so no dedup logic is ne
 
 Every per-symlink watcher process reports its events using the **resolved realpath** of the watched
 directory, never the vault-relative alias path it was discovered under — true even when the watch
-root argument passed to `fswatch` was the symlink path itself, not its target. `daemon.js` therefore
-maintains a live registry (`alias vault-relative path → { realpath, childProcess }`) built from
-every symlinked directory found during the walk, and rewrites each per-symlink watcher's reported
-absolute path by substituting its realpath prefix for the corresponding alias prefix *before* that
-path reaches the same `isDotPath`/ignore-matcher/debounce pipeline the main watcher's paths go
-through (`defaultCreateWatcher`) — anything reaching `enqueuePath`/`notes.path` must already be a
-clean vault-relative alias path, never a realpath, per S001's path-is-identity contract. Skipping
-this rewrite would produce `../`-prefixed paths that corrupt `notes.path` and fail
+root argument passed to `fswatch` was the symlink path itself, not its target. `live-watcher.js`
+therefore maintains a live registry (`alias vault-relative path → { realpath, childProcess }`) built
+from every symlinked directory found during the walk (`vault-walk.js`'s `walkVaultForMarkdown`), and
+rewrites each per-symlink watcher's reported absolute path (`vault-walk.js`'s `rewriteEventPath`) by
+substituting its realpath prefix for the corresponding alias prefix *before* that path reaches the
+same `isDotPath`/ignore-matcher/debounce pipeline the main watcher's paths go through
+(`live-watcher.js`'s `createFsWatcher`) — anything reaching `enqueuePath`/`notes.path` must already
+be a clean vault-relative alias path, never a realpath, per S001's path-is-identity contract.
+Skipping this rewrite would produce `../`-prefixed paths that corrupt `notes.path` and fail
 `resolveVaultPath` (S010)'s containment check the next time anyone looks the note up by title.
 
 ### Live discovery and teardown

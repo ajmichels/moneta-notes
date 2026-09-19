@@ -1,24 +1,25 @@
 #!/usr/bin/env -S node --disable-warning=ExperimentalWarning
-import { existsSync, lstatSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs';
-import { join, relative, sep } from 'node:path';
-import { execFileSync, spawn } from 'node:child_process';
-import { createInterface } from 'node:readline';
+import { existsSync, rmSync, statSync, realpathSync } from 'node:fs';
+import { join } from 'node:path';
 import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import ignore from 'ignore';
 import { noteRead } from '../core/notes.js';
 import { stripMdExtension, loadIgnoreMatcher } from '../core/note-fs.js';
-import { extractTags, syncNoteTags, pruneOrphanedTags } from '../core/tags.js';
+import { extractTags, syncNoteTags } from '../core/tags.js';
 import { extractLinkTargets, syncNoteLinks } from '../core/links.js';
 import { buildMetadataJson } from '../core/metadata.js';
 import { openDb, setMeta, enqueuePath } from '../core/db.js';
 import { getLogger, defaultLogDir, runWithLogger, getContextLogger } from '../logger.js';
 import { loadConfig } from '../config.js';
-import { appSupportDir, watcherInstallHint } from '../platform/index.js';
+import { appSupportDir } from '../platform/index.js';
 import {
     chunkText as realChunkText, loadTokenizer, tokenizeWithOffsets as realTokenizeWithOffsets,
     embed as realEmbed, embedQuery as realEmbedQuery, configureEmbedder, buildChunkPrompt,
 } from './embed.js';
+import { walkVaultForMarkdown, toVaultRelativePath, isDotPath, statOrNull } from './vault-walk.js';
+import { DEFAULT_BACKOFF_SCHEDULE_MS } from './fswatch-watcher.js';
+import { deleteNoteByPath, createFsWatcher, DEFAULT_DEBOUNCE_MS } from './live-watcher.js';
 
 // Re-exported for existing callers (this file's own tests, IPC/queue-drain code below) — the
 // implementation lives in core/db.js (S001, alongside the rest of the index_queue table's plain
@@ -26,6 +27,7 @@ import {
 // without core/ reaching back into indexer/, which would create a circular import (daemon.js
 // already imports core/notes.js).
 export { enqueuePath };
+export { DEFAULT_BACKOFF_SCHEDULE_MS };
 
 export function dequeueNextPath(db, now = Date.now()) {
     const row = db.prepare(`
@@ -102,8 +104,6 @@ function replaceFtsRow(db, noteId, title, body) {
     db.prepare('INSERT INTO notes_fts (rowid, title, body) VALUES (?, ?, ?)').run(noteId, title, body);
 }
 
-export const DEFAULT_BACKOFF_SCHEDULE_MS = [ 30 * 1000, 2 * 60 * 1000, 10 * 60 * 1000 ];
-
 // index_queue.next_attempt_at/enqueued_at are epoch milliseconds throughout (matching
 // enqueuePath/dequeueNextPath above) — unlike notes.mtime/updated_at, which are epoch seconds.
 export function recordFailure(db, path, now = Date.now(), backoffSchedule = DEFAULT_BACKOFF_SCHEDULE_MS) {
@@ -174,70 +174,6 @@ export async function drainQueueOnce(vaultRoot, db, deps) {
     }
 
     return counts;
-}
-
-export function deleteNoteByPath(db, path) {
-    const note = db.prepare('SELECT id FROM notes WHERE path = ?').get(path);
-    if (!note) {
-        return;
-    }
-    db.prepare(`
-        DELETE FROM chunk_vectors WHERE rowid IN (SELECT id FROM chunks WHERE note_id = ?)
-    `).run(note.id);
-    db.prepare('DELETE FROM notes_fts WHERE rowid = ?').run(note.id);
-    // cascades chunks, note_tags, note_links (S001 FKs)
-    db.prepare('DELETE FROM notes WHERE id = ?').run(note.id);
-    // The cascade above never goes through syncNoteTags, so a tag this note was the last carrier
-    // of would otherwise linger as a permanent orphan row (#1).
-    pruneOrphanedTags(db);
-}
-
-// A removed or renamed symlinked directory takes its whole indexed subtree with it, unlike a
-// single note's deletion — fetches every note under aliasPrefix and reuses deleteNoteByPath's
-// cascade per row rather than duplicating its DELETE statements.
-export function deleteNotesByPathPrefix(db, aliasPrefix) {
-    const nestedPrefix = `${aliasPrefix}/`;
-    const rows = db.prepare('SELECT path FROM notes').all()
-        .filter((row) => row.path === aliasPrefix || row.path.startsWith(nestedPrefix));
-    for (const row of rows) {
-        deleteNoteByPath(db, row.path);
-    }
-    return rows.length;
-}
-
-function statOrNull(absPath) {
-    try {
-        return statSync(absPath);
-    } catch (err) {
-        if (err.code === 'ENOENT') {
-            return null;
-        }
-        throw err;
-    }
-}
-
-function lstatOrNull(absPath) {
-    try {
-        return lstatSync(absPath);
-    } catch (err) {
-        if (err.code === 'ENOENT') {
-            return null;
-        }
-        throw err;
-    }
-}
-
-// realpathSync throws ENOENT for a dangling symlink (or one that vanished between calls) — treated
-// the same way statOrNull treats a missing file, since both are "nothing there to resolve".
-function realpathOrNull(absPath) {
-    try {
-        return realpathSync(absPath);
-    } catch (err) {
-        if (err.code === 'ENOENT') {
-            return null;
-        }
-        throw err;
-    }
 }
 
 function readNoteOrNull(vaultRoot, title) {
@@ -340,107 +276,6 @@ export async function processPath(vaultRoot, db, path, deps) {
     return { status: 'reindexed' };
 }
 
-function toVaultRelativePath(vaultRoot, absPath) {
-    return relative(vaultRoot, absPath).split(sep).join('/');
-}
-
-// Dotfiles/dot-directories (.obsidian/, .trash/, .git/, .DS_Store, ...) are never notes — skip them
-// everywhere the vault tree is walked or watched, rather than letting them churn the index queue.
-function isDotEntryName(name) {
-    return name.startsWith('.');
-}
-
-export function isDotPath(relativePath) {
-    return relativePath.split(sep).some(isDotEntryName);
-}
-
-// A gitignore-style .mnotesignore at the vault root (loaded via S010's loadIgnoreMatcher) — the
-// Obsidian template-folder case that motivated this (a template's frontmatter placeholders like
-// `id: {{title}}` parse as nested YAML objects, not the literal string they're meant to be, which
-// otherwise pollutes the index). Directories are checked with a trailing slash so a dir-only
-// pattern like "Templates/" prunes the walk before descending, same convention `ignore` itself
-// recommends for directory paths.
-//
-// Symlinked directories (S005) descend via their alias path, never the realpath; a symlinked file
-// or dangling link is skipped. `onSymlinkDir(aliasPath, realpath)` fires for each one found, at any
-// depth — the hook a watcher uses to spawn its `fswatch` process. `visitedRealDirs` guards cycles
-// by realpath; `startDir` scopes the walk while relative paths still resolve via `vaultRoot`.
-function walkVaultForMarkdown(vaultRoot, ignoreMatcher = ignore(), onSymlinkDir = () => {}, startDir = vaultRoot) {
-    const results = [];
-    const visitedRealDirs = new Set([ realpathSync(vaultRoot), realpathSync(startDir) ]);
-
-    function visitEntry(dir, entry) {
-        if (isDotEntryName(entry.name)) {
-            return;
-        }
-        const full = join(dir, entry.name);
-        const relativePath = toVaultRelativePath(vaultRoot, full);
-
-        if (entry.isDirectory()) {
-            if (!ignoreMatcher.ignores(`${relativePath}/`)) {
-                walk(full);
-            }
-            return;
-        }
-
-        if (entry.isSymbolicLink()) {
-            const target = realpathOrNull(full);
-            const stats = target === null ? null : statOrNull(target);
-            if (stats === null || !stats.isDirectory()) {
-                return; // symlinked file, or dangling target — never indexed
-            }
-            if (visitedRealDirs.has(target) || ignoreMatcher.ignores(`${relativePath}/`)) {
-                return;
-            }
-            visitedRealDirs.add(target);
-            onSymlinkDir(relativePath, target);
-            walk(full);
-            return;
-        }
-
-        if (entry.isFile() && entry.name.endsWith('.md') && !ignoreMatcher.ignores(relativePath)) {
-            results.push(full);
-        }
-    }
-
-    function walk(dir) {
-        for (const entry of readdirSync(dir, { withFileTypes: true })) {
-            visitEntry(dir, entry);
-        }
-    }
-
-    walk(startDir);
-    return results;
-}
-
-// Pure view of walkVaultForMarkdown's symlink discovery, testable with no fswatch involved.
-// defaultCreateWatcher builds its live registry by feeding the same hook into its own walk instead
-// of calling this (it also needs to spawn watchers as each one is found, not just record it).
-export function buildSymlinkRegistry(vaultRoot, ignoreMatcher = ignore()) {
-    const registry = new Map();
-    walkVaultForMarkdown(vaultRoot, ignoreMatcher, (aliasPath, realpath) => registry.set(aliasPath, realpath));
-    return registry;
-}
-
-// A per-symlink fswatch child reports realpath-based paths (S005); rewrites one back to its
-// vault-relative alias by longest-prefix match. null (a stale/torn-down watcher's event) must be
-// logged and dropped, never enqueued — a raw realpath would break S001's path-identity rule.
-export function rewriteEventPath(absPath, registry) {
-    let bestAlias = null;
-    let bestRealpath = '';
-    for (const [ aliasPath, realpath ] of registry) {
-        const isMatch = absPath === realpath || absPath.startsWith(`${realpath}${sep}`);
-        if (isMatch && realpath.length > bestRealpath.length) {
-            bestAlias = aliasPath;
-            bestRealpath = realpath;
-        }
-    }
-    if (bestAlias === null) {
-        return null;
-    }
-    return `${bestAlias}${absPath.slice(bestRealpath.length)}`.split(sep).join('/');
-}
-
 export function watermarkCatchup(db, vaultRoot, now = Date.now(), ignoreMatcher = ignore()) {
     const row = db.prepare('SELECT MAX(updated_at) AS watermark FROM notes').get();
     const watermark = row.watermark ?? 0;
@@ -485,143 +320,6 @@ export function ignoredPathsCheck(db, ignoreMatcher) {
     }
     getContextLogger().info('ignored-paths check complete', { deleted_count: deletedCount });
     return deletedCount;
-}
-
-const DEFAULT_DEBOUNCE_MS = 15000;
-
-export function createDebouncer(onSettle, options = {}) {
-    const { debounceMs = DEFAULT_DEBOUNCE_MS, scheduleFn = setTimeout, cancelFn = clearTimeout } = options;
-    const timers = new Map();
-
-    function notify(path) {
-        if (timers.has(path)) {
-            cancelFn(timers.get(path));
-        }
-        const timer = scheduleFn(() => {
-            timers.delete(path);
-            onSettle(path);
-        }, debounceMs);
-        timers.set(path, timer);
-    }
-
-    function cancelAll() {
-        for (const timer of timers.values()) {
-            cancelFn(timer);
-        }
-        timers.clear();
-    }
-
-    return { notify, cancelAll };
-}
-
-export function assertFswatchAvailable(env = process.env) {
-    try {
-        execFileSync('fswatch', [ '--version' ], { env, stdio: 'ignore' });
-    } catch (error) {
-        if (error.code === 'ENOENT') {
-            throw new Error(`fswatch not found — install via \`${watcherInstallHint()}\``, { cause: error });
-        }
-        throw error;
-    }
-}
-
-// `watchedPath` is any directory, not necessarily the vault root — S005's per-symlink-directory
-// watchers pass the symlink's own path here too, one process per currently-known symlinked
-// directory (a single recursive watch on the vault root never sees changes inside one — see S005).
-export function spawnFswatch(watchedPath, onPath) {
-    assertFswatchAvailable();
-    const child = spawn('fswatch', [ '-r', watchedPath ]);
-    getContextLogger().info('fswatch watcher started', { watched_path: watchedPath });
-    const rl = createInterface({ input: child.stdout });
-    rl.on('line', (line) => {
-        const path = line.trim();
-        if (path.length > 0) {
-            onPath(path);
-        }
-    });
-    return child;
-}
-
-// Exit-triggered respawn with exponential backoff (S005), reusing backoffSchedule rather than a
-// second schedule of its own — same as the queue drainer's retries. `isStillValid` lets a
-// per-symlink watcher bow out quietly once its target's gone, deferring to live-removal teardown.
-function createRespawnScheduler({ watchedPath, backoffSchedule, isStillValid, scheduleFn, spawnChild }) {
-    let attemptCount = 0;
-    let timer = null;
-
-    function scheduleNext() {
-        if (!isStillValid()) {
-            return;
-        }
-        if (attemptCount > backoffSchedule.length) {
-            getContextLogger().error('fswatch watcher permanently failed', {
-                watched_path: watchedPath, attempts: attemptCount,
-            });
-            return;
-        }
-        const delay = backoffSchedule[attemptCount - 1];
-        getContextLogger().warn('fswatch watcher exited unexpectedly', {
-            watched_path: watchedPath, attempt: attemptCount, next_attempt_at: Date.now() + delay,
-        });
-        timer = scheduleFn(() => {
-            try {
-                spawnChild();
-            } catch {
-                attemptCount += 1;
-                scheduleNext();
-            }
-        }, delay);
-    }
-
-    return {
-        notifyExit() {
-            attemptCount += 1;
-            scheduleNext();
-        },
-        cancel(cancelFn) {
-            if (timer !== null) {
-                cancelFn(timer);
-            }
-        },
-    };
-}
-
-// Wraps spawnFswatch with the scheduler above so a killed/crashed child (main or per-symlink) no
-// longer leaves the daemon silently blind until a manual restart. `spawnFn`/`scheduleFn`/`cancelFn`
-// are injectable (matching createDebouncer) so tests can drive this without a real binary/timers.
-export function createResilientWatcher(watchedPath, onRawPath, options = {}) {
-    const {
-        backoffSchedule = DEFAULT_BACKOFF_SCHEDULE_MS,
-        isStillValid = () => true,
-        spawnFn = spawnFswatch,
-        scheduleFn = setTimeout,
-        cancelFn = clearTimeout,
-    } = options;
-
-    let stopped = false;
-    let child = null;
-
-    function spawnChild() {
-        child = spawnFn(watchedPath, onRawPath);
-        child.on('exit', () => {
-            if (!stopped) {
-                respawner.notifyExit();
-            }
-        });
-    }
-
-    const respawner = createRespawnScheduler({ watchedPath, backoffSchedule, isStillValid, scheduleFn, spawnChild });
-    spawnChild();
-
-    return {
-        stop() {
-            stopped = true;
-            respawner.cancel(cancelFn);
-            if (child !== null) {
-                child.kill();
-            }
-        },
-    };
 }
 
 async function attemptPathUntilSettled(vaultRoot, db, path, deps, now, onMessage) {
@@ -752,147 +450,6 @@ async function resolveChunkText(providedChunkText) {
     return (body) => realChunkText(body, (text) => realTokenizeWithOffsets(tokenizer, text));
 }
 
-// ctx.registry maps aliasPath (vault-relative, no trailing slash) -> realpath for everything
-// currently registered as a symlinked directory (S005); ctx is a plain mutable bag shared by every
-// function below, built once per defaultCreateWatcher call.
-function registerSymlinkDir(ctx, aliasPath, realpath) {
-    ctx.registry.set(aliasPath, realpath);
-    getContextLogger().info('symlinked directory registered', { alias_path: aliasPath, realpath });
-    ctx.symlinkWatchers.set(aliasPath, createResilientWatcher(
-        join(ctx.vaultRoot, aliasPath),
-        (rawAbsPath) => acceptRawPath(ctx, rawAbsPath, (p) => rewriteEventPath(p, ctx.registry)),
-        { backoffSchedule: ctx.backoffSchedule, isStillValid: () => statOrNull(realpath)?.isDirectory() ?? false },
-    ));
-}
-
-// A removed/renamed symlink takes its subtree with it — nested registrations get torn down too.
-function teardownAlias(ctx, aliasPath) {
-    for (const knownAlias of [ ...ctx.registry.keys() ]) {
-        if (knownAlias === aliasPath || knownAlias.startsWith(`${aliasPath}/`)) {
-            ctx.symlinkWatchers.get(knownAlias)?.stop();
-            ctx.symlinkWatchers.delete(knownAlias);
-            ctx.registry.delete(knownAlias);
-        }
-    }
-    const deletedCount = deleteNotesByPathPrefix(ctx.db, aliasPath);
-    getContextLogger().info('symlinked directory removed', { alias_path: aliasPath, notes_deleted_count: deletedCount });
-}
-
-function acceptRawPath(ctx, rawAbsPath, toRelative) {
-    if (ctx.stopped) {
-        return;
-    }
-    const relativePath = toRelative(rawAbsPath);
-    if (relativePath === null) {
-        getContextLogger().error('fswatch event path did not resolve to a known path', { path: rawAbsPath });
-        return;
-    }
-    if (!isDotPath(relativePath) && !ctx.ignoreMatcher.ignores(relativePath)) {
-        ctx.debouncer.notify(relativePath);
-    }
-}
-
-// Register+index a settled symlink resolving to a not-yet-registered directory, tear down a stale
-// registration if the target changed, or clean up a stray note row for a file/dangling target.
-function handleSettledSymlink(ctx, relativePath, absPath) {
-    const target = realpathOrNull(absPath);
-    const targetStats = target === null ? null : statOrNull(target);
-    const isDirTarget = targetStats !== null && targetStats.isDirectory();
-    const registeredRealpath = ctx.registry.get(relativePath);
-
-    if (registeredRealpath !== undefined && registeredRealpath !== target) {
-        teardownAlias(ctx, relativePath);
-    }
-    if (isDirTarget && !ctx.registry.has(relativePath)) {
-        registerSymlinkDir(ctx, relativePath, target);
-        // A scoped watermark-catch-up rooted at this alias, recursing into any nested symlinks.
-        const onNested = (aliasPath, realpath) => registerSymlinkDir(ctx, aliasPath, realpath);
-        for (const mdPath of walkVaultForMarkdown(ctx.vaultRoot, ctx.ignoreMatcher, onNested, absPath)) {
-            enqueuePath(ctx.db, toVaultRelativePath(ctx.vaultRoot, mdPath));
-        }
-    } else if (!isDirTarget) {
-        deleteNoteByPath(ctx.db, relativePath);
-    }
-}
-
-// "Recheck reality after debounce" (S005) extended to symlink create/remove, not just file changes.
-function handleSettledPath(ctx, relativePath) {
-    const absPath = join(ctx.vaultRoot, relativePath);
-    const lstat = lstatOrNull(absPath);
-
-    if (lstat === null) {
-        if (ctx.registry.has(relativePath)) {
-            teardownAlias(ctx, relativePath);
-        } else {
-            deleteNoteByPath(ctx.db, relativePath);
-        }
-        return;
-    }
-
-    if (lstat.isSymbolicLink()) {
-        handleSettledSymlink(ctx, relativePath, absPath);
-        return;
-    }
-
-    if (ctx.registry.has(relativePath)) {
-        teardownAlias(ctx, relativePath); // a real file/dir replaced what used to be a symlinked alias
-    }
-    if (lstat.isFile()) {
-        enqueuePath(ctx.db, relativePath);
-    } else {
-        // A directory (or other non-regular entry) now sits here — may have previously been an
-        // indexed note (e.g. `rm Note.md && mkdir Note.md`); deleteNoteByPath is a no-op if not.
-        deleteNoteByPath(ctx.db, relativePath);
-    }
-}
-
-export function defaultCreateWatcher(vaultRoot, db, {
-    debounceMs, ignoreMatcher = ignore(), backoffSchedule = DEFAULT_BACKOFF_SCHEDULE_MS,
-} = {}) {
-    const ctx = {
-        vaultRoot, db, ignoreMatcher, backoffSchedule, stopped: false, debouncer: null,
-        registry: new Map(), symlinkWatchers: new Map(),
-    };
-
-    ctx.debouncer = createDebouncer((relativePath) => {
-        // fswatch's stdout can still have buffered lines in flight when child.kill() runs below,
-        // so a debounce timer can settle after stop() — this guard keeps that a no-op instead of
-        // touching a since-closed db.
-        if (!ctx.stopped) {
-            handleSettledPath(ctx, relativePath);
-        }
-    }, { debounceMs });
-
-    // Register every pre-existing symlinked directory before the main watcher starts; markdown
-    // paths this walk also finds are ignored — watermarkCatchup already enqueued them at startup.
-    walkVaultForMarkdown(vaultRoot, ignoreMatcher, (aliasPath, realpath) => registerSymlinkDir(ctx, aliasPath, realpath));
-
-    // fswatch reports absolute paths in canonical (realpath) form regardless of what literal
-    // string was passed as its watch root — so if vaultRoot itself sits behind a symlink hop
-    // (e.g. macOS's /var -> /private/var), matching against the raw vaultRoot here would produce
-    // a bogus `../`-laden relative path for every single event. Canonicalize once for this
-    // comparison only; join()/walkVaultForMarkdown elsewhere in ctx stay on the literal vaultRoot,
-    // which is self-consistent since the OS resolves symlinked path components transparently.
-    const canonicalVaultRoot = realpathSync(vaultRoot);
-    const mainWatcher = createResilientWatcher(
-        vaultRoot,
-        (rawAbsPath) => acceptRawPath(ctx, rawAbsPath, (p) => toVaultRelativePath(canonicalVaultRoot, p)),
-        { backoffSchedule },
-    );
-
-    return {
-        stop() {
-            ctx.stopped = true;
-            ctx.debouncer.cancelAll();
-            mainWatcher.stop();
-            for (const watcher of ctx.symlinkWatchers.values()) {
-                watcher.stop();
-            }
-            ctx.symlinkWatchers.clear();
-        },
-    };
-}
-
 // Serializes drainQueueOnce (the periodic background pass) against runReindex (an IPC-triggered
 // `mnotes reindex`) so the two never call processPath on the same path concurrently. Without this,
 // a manual reindex issued while a background pass is mid-flight could have both re-dequeue/re-embed
@@ -943,7 +500,7 @@ export async function startDaemon(options = {}) {
         embeddingVersion = DEFAULT_EMBEDDING_VERSION,
         embed = realEmbed,
         embedQuery = realEmbedQuery,
-        createWatcher = defaultCreateWatcher,
+        createWatcher = createFsWatcher,
         drainIntervalMs = DEFAULT_DRAIN_INTERVAL_MS,
         debounceMs = DEFAULT_DEBOUNCE_MS,
         backoffSchedule = DEFAULT_BACKOFF_SCHEDULE_MS,
@@ -1010,9 +567,11 @@ export async function main() {
 
 // S005 "Logging": daemon.js is a runWithLogger root — this is the one place in the whole process
 // that establishes the AsyncLocalStorage context, before anything else runs. Every
-// getContextLogger() call anywhere in daemon.js/embed.js, for the lifetime of the process,
-// resolves against this same context. Guarded so `import`ing daemon.js (this test file, and
-// S006's CLI) never triggers a real daemon startup as a side effect of the import.
+// getContextLogger() call anywhere in this process for its lifetime — daemon.js, embed.js, and the
+// indexer/* helper modules it imports (fswatch-watcher.js, vault-walk.js, live-watcher.js) —
+// resolves against this same context, since AsyncLocalStorage propagates through the whole call
+// chain regardless of which file makes the call. Guarded so `import`ing daemon.js (this test file,
+// and S006's CLI) never triggers a real daemon startup as a side effect of the import.
 //
 // realpathSync(argv[1]), not a raw string compare — see the identical comment in cli/main.js.
 if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
