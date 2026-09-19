@@ -16,18 +16,23 @@ it, not *what* to build.
 
 ## `docs/*.md` — user-facing guides
 
-`docs/installation.md`, `docs/usage.md`, `docs/process-management.md`, and `docs/uninstallation.md` are
-living documentation too, same rule as `docs/specs/`: keep them in sync with actual behavior, don't let
-them drift. They're linked from the README's "Documentation" table so they're the first thing a reader
-on GitHub reaches. Update the relevant page(s), in the same change, whenever you touch:
+`docs/installation.md`, `docs/usage.md`, `docs/usage-vectors.md`, `docs/usage-mcp.md`,
+`docs/process-management.md`, and `docs/uninstallation.md` are living documentation too, same rule as
+`docs/specs/`: keep them in sync with actual behavior, don't let them drift. They're linked from the
+README's "Documentation" table so they're the first thing a reader on GitHub reaches. `docs/usage.md`
+was split three ways (core CLI / vectors CLI / MCP) specifically so a change to one surface only needs
+reading and editing its own file, not the whole combined reference — update the relevant page(s), in
+the same change, whenever you touch:
 
 - **`scripts/install.sh` / `scripts/uninstall.sh`** (steps, prompts, what gets created/removed) →
   `docs/installation.md` / `docs/uninstallation.md`.
-- **`src/cli/main.js`'s command surface** (new command, new/changed flag, changed output shape) →
-  `docs/usage.md`.
+- **`src/cli/main.js`'s command surface** (new command, new/changed flag, changed output shape,
+  excluding `vectors` below) → `docs/usage.md`.
+- **`src/cli/vectors.js`'s command surface** (new/changed `mnotes vectors` subcommand or flag) →
+  `docs/usage-vectors.md`.
 - **`src/cli/daemon.js`, `src/indexer/daemon.js`'s launchd wiring, or `launchd/*.plist.template`**
   (daemon control, log file layout, rotation policy) → `docs/process-management.md`.
-- **`src/mcp/tools.js`'s tool list** (added/removed/renamed MCP tool) → `docs/usage.md`'s MCP section.
+- **`src/mcp/tools.js`'s tool list** (added/removed/renamed MCP tool) → `docs/usage-mcp.md`.
 
 These are separate from `docs/specs/S0xx-*.md`: specs are the binding contract for *what* a subsystem
 does and why (implementation-facing); `docs/*.md` guides are *how a user runs the thing*

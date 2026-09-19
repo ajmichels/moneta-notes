@@ -39,7 +39,9 @@ languages. The reminding/advising sense is the one that gave this project its na
 |---|---|
 | [Installation](docs/installation.md) | Prerequisites, running `scripts/install.sh`, what it creates, verifying the install |
 | [Configuration](docs/configuration.md) | Every `config.toml` option: what it does, its default |
-| [Usage](docs/usage.md) | The full `mnotes` CLI command reference plus the MCP tool surface |
+| [Usage](docs/usage.md) | The core `mnotes` CLI command reference |
+| [Vector Tools Usage](docs/usage-vectors.md) | `mnotes vectors` subcommands — the embedding-space debug/analysis tooling |
+| [MCP Server Usage](docs/usage-mcp.md) | The MCP tool surface for Claude Code / Claude Desktop |
 | [Process Management](docs/process-management.md) | Starting/stopping/restarting the indexing daemon, log locations, troubleshooting |
 | [Uninstallation](docs/uninstallation.md) | Running `scripts/uninstall.sh`, what it removes, what it leaves alone |
 
