@@ -1,16 +1,21 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, utimesSync, readFileSync, mkdirSync } from 'node:fs';
+import {
+    mkdtempSync, rmSync, writeFileSync, utimesSync, readFileSync, mkdirSync, symlinkSync, unlinkSync,
+    realpathSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createConnection } from 'node:net';
+import { EventEmitter } from 'node:events';
 import ignore from 'ignore';
 import { openDb, getMeta } from '../core/db.js';
 import { getLogger, runWithLogger } from '../logger.js';
 import {
-    enqueuePath, dequeueNextPath, processPath, deleteNoteByPath, recordFailure, drainQueueOnce,
-    watermarkCatchup, existenceCheck, ignoredPathsCheck, createDebouncer, assertFswatchAvailable,
-    spawnFswatch, runReindex, createIpcServer, defaultSocketPath, startDaemon, createSerialGate,
-    isDotPath, EXTRACTION_VERSION,
+    enqueuePath, dequeueNextPath, processPath, deleteNoteByPath, deleteNotesByPathPrefix,
+    recordFailure, drainQueueOnce, watermarkCatchup, existenceCheck, ignoredPathsCheck,
+    createDebouncer, assertFswatchAvailable, spawnFswatch, createResilientWatcher, runReindex,
+    createIpcServer, defaultSocketPath, startDaemon, defaultCreateWatcher, createSerialGate,
+    isDotPath, buildSymlinkRegistry, rewriteEventPath, EXTRACTION_VERSION,
 } from './daemon.js';
 import { appSupportDir } from '../platform/index.js';
 import { cleanupTempDir } from '../../vitest.helpers.js';
@@ -499,6 +504,42 @@ describe('deleteNoteByPath', () => {
     });
 });
 
+describe('deleteNotesByPathPrefix', () => {
+    function insertNote(db, path) {
+        db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run(path, 'hash', 1, 1000, 1000);
+    }
+
+    it('deletes every note at or nested under the given alias prefix', () => {
+        const db = makeTestDb();
+        insertNote(db, 'Memory/Note.md');
+        insertNote(db, 'Memory/sub/Deep.md');
+        insertNote(db, 'Memory');
+        insertNote(db, 'Other.md');
+
+        const count = deleteNotesByPathPrefix(db, 'Memory');
+
+        expect(count).toBe(3);
+        expect(db.prepare('SELECT path FROM notes').all().map((r) => r.path)).toEqual([ 'Other.md' ]);
+    });
+
+    it('does not match a differently-named path that merely shares the prefix string', () => {
+        const db = makeTestDb();
+        insertNote(db, 'MemoryOverflow.md');
+
+        const count = deleteNotesByPathPrefix(db, 'Memory');
+
+        expect(count).toBe(0);
+        expect(db.prepare('SELECT COUNT(*) AS n FROM notes').get().n).toBe(1);
+    });
+
+    it('is a safe no-op when nothing matches', () => {
+        const db = makeTestDb();
+        expect(deleteNotesByPathPrefix(db, 'Memory')).toBe(0);
+    });
+});
+
 describe('recordFailure', () => {
     it('schedules the first retry 30s out and increments attempts to 1', () => {
         const db = makeTestDb();
@@ -681,6 +722,82 @@ describe('watermarkCatchup', () => {
         expect(count).toBe(1);
         expect(db.prepare('SELECT path FROM index_queue').get().path).toBe('Visible.md');
     });
+
+    it('walks into a symlinked directory, enqueueing its .md files under the alias path', () => {
+        const vaultRoot = makeTempVault();
+        const externalDir = makeTempVault();
+        mkdirSync(join(externalDir, 'sub'));
+        writeNote(externalDir, 'sub/Note.md', 'external content', 1000);
+        symlinkSync(externalDir, join(vaultRoot, 'Memory'));
+        const db = makeTestDb();
+
+        const count = watermarkCatchup(db, vaultRoot, 2000);
+
+        expect(count).toBe(1);
+        expect(db.prepare('SELECT path FROM index_queue').get().path).toBe('Memory/sub/Note.md');
+    });
+
+    it('never enqueues a symlink to a regular file', () => {
+        const vaultRoot = makeTempVault();
+        const externalFile = join(makeTempVault(), 'External.md');
+        writeFileSync(externalFile, 'external file', 'utf8');
+        symlinkSync(externalFile, join(vaultRoot, 'Linked.md'));
+        const db = makeTestDb();
+
+        expect(watermarkCatchup(db, vaultRoot, 2000)).toBe(0);
+    });
+
+    it('skips a dangling symlink without throwing', () => {
+        const vaultRoot = makeTempVault();
+        symlinkSync(join(vaultRoot, 'does-not-exist'), join(vaultRoot, 'Broken'));
+        const db = makeTestDb();
+
+        expect(() => watermarkCatchup(db, vaultRoot, 2000)).not.toThrow();
+        expect(watermarkCatchup(db, vaultRoot, 2000)).toBe(0);
+    });
+
+    it('walks a symlinked directory nested inside another symlinked directory', () => {
+        const vaultRoot = makeTempVault();
+        const outerExternal = makeTempVault();
+        const innerExternal = makeTempVault();
+        writeNote(innerExternal, 'Deep.md', 'deep content', 1000);
+        symlinkSync(innerExternal, join(outerExternal, 'Inner'));
+        symlinkSync(outerExternal, join(vaultRoot, 'Outer'));
+        const db = makeTestDb();
+
+        const count = watermarkCatchup(db, vaultRoot, 2000);
+
+        expect(count).toBe(1);
+        expect(db.prepare('SELECT path FROM index_queue').get().path).toBe('Outer/Inner/Deep.md');
+    });
+
+    it('terminates instead of looping on a symlink cycle', () => {
+        const vaultRoot = makeTempVault();
+        symlinkSync(vaultRoot, join(vaultRoot, 'SelfLoop'));
+        writeNote(vaultRoot, 'Visible.md', 'v', 1000);
+        const db = makeTestDb();
+
+        const count = watermarkCatchup(db, vaultRoot, 2000);
+
+        expect(count).toBe(1);
+        expect(db.prepare('SELECT path FROM index_queue').get().path).toBe('Visible.md');
+    });
+
+    it('excludes paths reached through a symlinked directory when matched by .mnotesignore', () => {
+        const vaultRoot = makeTempVault();
+        const externalDir = makeTempVault();
+        mkdirSync(join(externalDir, 'Templates'));
+        writeNote(externalDir, 'Templates/Daily Note.md', 'id: {{title}}', 1000);
+        writeNote(externalDir, 'Visible.md', 'v', 1000);
+        symlinkSync(externalDir, join(vaultRoot, 'Memory'));
+        const db = makeTestDb();
+        const ignoreMatcher = ignore().add('Memory/Templates/');
+
+        const count = watermarkCatchup(db, vaultRoot, 2000, ignoreMatcher);
+
+        expect(count).toBe(1);
+        expect(db.prepare('SELECT path FROM index_queue').get().path).toBe('Memory/Visible.md');
+    });
 });
 
 describe('isDotPath', () => {
@@ -813,6 +930,178 @@ describe('createDebouncer', () => {
     });
 });
 
+describe('buildSymlinkRegistry', () => {
+    it('maps each symlinked directory\'s alias path to its resolved realpath', () => {
+        const vaultRoot = makeTempVault();
+        const externalDir = makeTempVault();
+        symlinkSync(externalDir, join(vaultRoot, 'Memory'));
+
+        const registry = buildSymlinkRegistry(vaultRoot);
+
+        expect(registry.size).toBe(1);
+        expect(registry.get('Memory')).toBe(realpathSync(externalDir));
+    });
+
+    it('returns an empty registry for a vault with no symlinks', () => {
+        const vaultRoot = makeTempVault();
+        writeNote(vaultRoot, 'A.md', 'a', 1000);
+
+        expect(buildSymlinkRegistry(vaultRoot).size).toBe(0);
+    });
+
+    it('includes nested symlinked directories at any depth', () => {
+        const vaultRoot = makeTempVault();
+        const outerExternal = makeTempVault();
+        const innerExternal = makeTempVault();
+        symlinkSync(innerExternal, join(outerExternal, 'Inner'));
+        symlinkSync(outerExternal, join(vaultRoot, 'Outer'));
+
+        const registry = buildSymlinkRegistry(vaultRoot);
+
+        expect(registry.get('Outer')).toBe(realpathSync(outerExternal));
+        expect(registry.get('Outer/Inner')).toBe(realpathSync(innerExternal));
+    });
+});
+
+describe('rewriteEventPath', () => {
+    it('rewrites an absolute path under a registered realpath to its vault-relative alias', () => {
+        const registry = new Map([ [ 'Memory', '/external/target' ] ]);
+
+        expect(rewriteEventPath('/external/target/sub/Note.md', registry)).toBe('Memory/sub/Note.md');
+    });
+
+    it('rewrites the watched realpath itself (no suffix) to the bare alias', () => {
+        const registry = new Map([ [ 'Memory', '/external/target' ] ]);
+
+        expect(rewriteEventPath('/external/target', registry)).toBe('Memory');
+    });
+
+    it('picks the longest-matching realpath when one is nested inside another', () => {
+        const registry = new Map([
+            [ 'Outer', '/external/outer' ],
+            [ 'Outer/Inner', '/external/outer/inner-target' ],
+        ]);
+
+        expect(rewriteEventPath('/external/outer/inner-target/Deep.md', registry)).toBe('Outer/Inner/Deep.md');
+        expect(rewriteEventPath('/external/outer/Other.md', registry)).toBe('Outer/Other.md');
+    });
+
+    it('returns null when nothing in the registry matches', () => {
+        const registry = new Map([ [ 'Memory', '/external/target' ] ]);
+
+        expect(rewriteEventPath('/somewhere/else/Note.md', registry)).toBeNull();
+    });
+});
+
+describe('createResilientWatcher', () => {
+    function fakeChild() {
+        const child = new EventEmitter();
+        child.kill = vi.fn();
+        return child;
+    }
+
+    it('spawns once immediately via spawnFn', () => {
+        const spawnFn = vi.fn(() => fakeChild());
+
+        createResilientWatcher('/some/path', () => {}, { spawnFn, scheduleFn: () => {}, cancelFn: () => {} });
+
+        expect(spawnFn).toHaveBeenCalledWith('/some/path', expect.any(Function));
+        expect(spawnFn).toHaveBeenCalledTimes(1);
+    });
+
+    it('schedules a respawn on the backoff schedule after an unexpected exit', () => {
+        let currentChild = fakeChild();
+        const spawnFn = vi.fn(() => currentChild);
+        const scheduled = [];
+        const scheduleFn = (fn, ms) => { scheduled.push({ fn, ms }); return scheduled.length; };
+
+        createResilientWatcher('/p', () => {}, {
+            spawnFn, scheduleFn, cancelFn: () => {}, backoffSchedule: [ 100, 200, 300 ],
+        });
+        currentChild.emit('exit');
+
+        expect(scheduled).toEqual([ { fn: expect.any(Function), ms: 100 } ]);
+        expect(spawnFn).toHaveBeenCalledTimes(1);
+
+        currentChild = fakeChild();
+        scheduled[0].fn();
+        expect(spawnFn).toHaveBeenCalledTimes(2);
+    });
+
+    it('escalates through the full backoff schedule then gives up without spawning again', () => {
+        let currentChild = fakeChild();
+        const spawnFn = vi.fn(() => currentChild);
+        const scheduled = [];
+        const scheduleFn = (fn, ms) => { scheduled.push({ fn, ms }); return scheduled.length; };
+
+        createResilientWatcher('/p', () => {}, {
+            spawnFn, scheduleFn, cancelFn: () => {}, backoffSchedule: [ 10, 20, 30 ],
+        });
+
+        for (let i = 0; i < 3; i += 1) {
+            currentChild.emit('exit');
+            const next = scheduled[scheduled.length - 1];
+            currentChild = fakeChild();
+            next.fn();
+        }
+        expect(spawnFn).toHaveBeenCalledTimes(4); // initial spawn + 3 respawns
+        expect(scheduled.map((s) => s.ms)).toEqual([ 10, 20, 30 ]);
+
+        currentChild.emit('exit'); // 4th death — schedule exhausted, gives up
+        expect(scheduled).toHaveLength(3);
+        expect(spawnFn).toHaveBeenCalledTimes(4);
+    });
+
+    it('treats a synchronous spawnFn throw (e.g. fswatch missing) as another failed attempt', () => {
+        let attempt = 0;
+        const spawnFn = vi.fn(() => {
+            attempt += 1;
+            if (attempt === 1) {
+                return fakeChild();
+            }
+            throw new Error('fswatch not found');
+        });
+        const scheduled = [];
+        const scheduleFn = (fn, ms) => { scheduled.push({ fn, ms }); return scheduled.length; };
+
+        createResilientWatcher('/p', () => {}, {
+            spawnFn, scheduleFn, cancelFn: () => {}, backoffSchedule: [ 10, 20 ],
+        });
+        spawnFn.mock.results[0].value.emit('exit');
+        expect(scheduled).toHaveLength(1);
+
+        scheduled[0].fn(); // spawnFn throws synchronously here
+        expect(scheduled).toHaveLength(2);
+        expect(scheduled[1].ms).toBe(20);
+    });
+
+    it('does not respawn after stop(), even if the child exits afterward', () => {
+        const child = fakeChild();
+        const spawnFn = vi.fn(() => child);
+        const scheduleFn = vi.fn();
+
+        const watcher = createResilientWatcher('/p', () => {}, { spawnFn, scheduleFn, cancelFn: vi.fn() });
+        watcher.stop();
+        child.emit('exit');
+
+        expect(scheduleFn).not.toHaveBeenCalled();
+        expect(child.kill).toHaveBeenCalled();
+    });
+
+    it('stops trying once isStillValid reports the target is gone, without scheduling a retry', () => {
+        const child = fakeChild();
+        const spawnFn = vi.fn(() => child);
+        const scheduleFn = vi.fn();
+
+        createResilientWatcher('/p', () => {}, {
+            spawnFn, scheduleFn, cancelFn: () => {}, isStillValid: () => false,
+        });
+        child.emit('exit');
+
+        expect(scheduleFn).not.toHaveBeenCalled();
+    });
+});
+
 describe('assertFswatchAvailable', () => {
     it('does not throw when fswatch is resolvable on PATH', () => {
         expect(() => assertFswatchAvailable()).not.toThrow();
@@ -848,6 +1137,71 @@ describe('spawnFswatch (real binary)', () => {
         });
 
         expect(seenPaths.length).toBeGreaterThan(0);
+    }, 10000);
+});
+
+describe('defaultCreateWatcher (real binary): symlinked directories', () => {
+    async function waitForQueuedPath(db, path) {
+        await vi.waitFor(() => {
+            expect(db.prepare('SELECT path FROM index_queue WHERE path = ?').get(path)).toBeDefined();
+        }, { timeout: 5000, interval: 50 });
+    }
+
+    it('registers a pre-existing symlinked directory and live-watches its contents', async () => {
+        const vaultRoot = makeTempVault();
+        const externalDir = makeTempVault();
+        mkdirSync(join(externalDir, 'sub'));
+        symlinkSync(externalDir, join(vaultRoot, 'Memory'));
+        const db = makeTestDb();
+
+        const watcher = defaultCreateWatcher(vaultRoot, db, { debounceMs: 300 });
+        try {
+            // Lets the per-symlink fswatch child actually start before we write — same reasoning
+            // as the "spawnFswatch (real binary)" test's own settle delay above.
+            await new Promise((resolve) => setTimeout(resolve, 500));
+            writeNote(externalDir, 'sub/New.md', 'content', undefined);
+            await waitForQueuedPath(db, 'Memory/sub/New.md');
+        } finally {
+            watcher.stop();
+        }
+    }, 10000);
+
+    it('discovers a symlinked directory created after the watcher has already started', async () => {
+        const vaultRoot = makeTempVault();
+        const externalDir = makeTempVault();
+        writeNote(externalDir, 'Existing.md', 'content', 1000);
+        const db = makeTestDb();
+
+        const watcher = defaultCreateWatcher(vaultRoot, db, { debounceMs: 300 });
+        try {
+            await new Promise((resolve) => setTimeout(resolve, 500));
+            symlinkSync(externalDir, join(vaultRoot, 'Memory'));
+            await waitForQueuedPath(db, 'Memory/Existing.md');
+        } finally {
+            watcher.stop();
+        }
+    }, 10000);
+
+    it('purges indexed notes when a registered symlink is removed live', async () => {
+        const vaultRoot = makeTempVault();
+        const externalDir = makeTempVault();
+        writeNote(externalDir, 'Note.md', 'content', 1000);
+        symlinkSync(externalDir, join(vaultRoot, 'Memory'));
+        const db = makeTestDb();
+        db.prepare(
+            'INSERT INTO notes (path, content_hash, line_count, mtime, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ).run('Memory/Note.md', 'hash', 1, 1000, 1000);
+
+        const watcher = defaultCreateWatcher(vaultRoot, db, { debounceMs: 300 });
+        try {
+            await new Promise((resolve) => setTimeout(resolve, 500));
+            unlinkSync(join(vaultRoot, 'Memory'));
+            await vi.waitFor(() => {
+                expect(db.prepare('SELECT COUNT(*) AS n FROM notes').get().n).toBe(0);
+            }, { timeout: 5000, interval: 50 });
+        } finally {
+            watcher.stop();
+        }
     }, 10000);
 });
 

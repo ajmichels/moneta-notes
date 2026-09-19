@@ -1,5 +1,5 @@
 #!/usr/bin/env -S node --disable-warning=ExperimentalWarning
-import { existsSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
@@ -192,9 +192,46 @@ export function deleteNoteByPath(db, path) {
     pruneOrphanedTags(db);
 }
 
+// A removed or renamed symlinked directory takes its whole indexed subtree with it, unlike a
+// single note's deletion — fetches every note under aliasPrefix and reuses deleteNoteByPath's
+// cascade per row rather than duplicating its DELETE statements.
+export function deleteNotesByPathPrefix(db, aliasPrefix) {
+    const nestedPrefix = `${aliasPrefix}/`;
+    const rows = db.prepare('SELECT path FROM notes').all()
+        .filter((row) => row.path === aliasPrefix || row.path.startsWith(nestedPrefix));
+    for (const row of rows) {
+        deleteNoteByPath(db, row.path);
+    }
+    return rows.length;
+}
+
 function statOrNull(absPath) {
     try {
         return statSync(absPath);
+    } catch (err) {
+        if (err.code === 'ENOENT') {
+            return null;
+        }
+        throw err;
+    }
+}
+
+function lstatOrNull(absPath) {
+    try {
+        return lstatSync(absPath);
+    } catch (err) {
+        if (err.code === 'ENOENT') {
+            return null;
+        }
+        throw err;
+    }
+}
+
+// realpathSync throws ENOENT for a dangling symlink (or one that vanished between calls) — treated
+// the same way statOrNull treats a missing file, since both are "nothing there to resolve".
+function realpathOrNull(absPath) {
+    try {
+        return realpathSync(absPath);
     } catch (err) {
         if (err.code === 'ENOENT') {
             return null;
@@ -323,8 +360,14 @@ export function isDotPath(relativePath) {
 // otherwise pollutes the index). Directories are checked with a trailing slash so a dir-only
 // pattern like "Templates/" prunes the walk before descending, same convention `ignore` itself
 // recommends for directory paths.
-function walkVaultForMarkdown(vaultRoot, ignoreMatcher = ignore()) {
+//
+// Symlinked directories (S005) descend via their alias path, never the realpath; a symlinked file
+// or dangling link is skipped. `onSymlinkDir(aliasPath, realpath)` fires for each one found, at any
+// depth — the hook a watcher uses to spawn its `fswatch` process. `visitedRealDirs` guards cycles
+// by realpath; `startDir` scopes the walk while relative paths still resolve via `vaultRoot`.
+function walkVaultForMarkdown(vaultRoot, ignoreMatcher = ignore(), onSymlinkDir = () => {}, startDir = vaultRoot) {
     const results = [];
+    const visitedRealDirs = new Set([ realpathSync(vaultRoot), realpathSync(startDir) ]);
 
     function visitEntry(dir, entry) {
         if (isDotEntryName(entry.name)) {
@@ -332,12 +375,29 @@ function walkVaultForMarkdown(vaultRoot, ignoreMatcher = ignore()) {
         }
         const full = join(dir, entry.name);
         const relativePath = toVaultRelativePath(vaultRoot, full);
+
         if (entry.isDirectory()) {
             if (!ignoreMatcher.ignores(`${relativePath}/`)) {
                 walk(full);
             }
             return;
         }
+
+        if (entry.isSymbolicLink()) {
+            const target = realpathOrNull(full);
+            const stats = target === null ? null : statOrNull(target);
+            if (stats === null || !stats.isDirectory()) {
+                return; // symlinked file, or dangling target — never indexed
+            }
+            if (visitedRealDirs.has(target) || ignoreMatcher.ignores(`${relativePath}/`)) {
+                return;
+            }
+            visitedRealDirs.add(target);
+            onSymlinkDir(relativePath, target);
+            walk(full);
+            return;
+        }
+
         if (entry.isFile() && entry.name.endsWith('.md') && !ignoreMatcher.ignores(relativePath)) {
             results.push(full);
         }
@@ -349,8 +409,36 @@ function walkVaultForMarkdown(vaultRoot, ignoreMatcher = ignore()) {
         }
     }
 
-    walk(vaultRoot);
+    walk(startDir);
     return results;
+}
+
+// Pure view of walkVaultForMarkdown's symlink discovery, testable with no fswatch involved.
+// defaultCreateWatcher builds its live registry by feeding the same hook into its own walk instead
+// of calling this (it also needs to spawn watchers as each one is found, not just record it).
+export function buildSymlinkRegistry(vaultRoot, ignoreMatcher = ignore()) {
+    const registry = new Map();
+    walkVaultForMarkdown(vaultRoot, ignoreMatcher, (aliasPath, realpath) => registry.set(aliasPath, realpath));
+    return registry;
+}
+
+// A per-symlink fswatch child reports realpath-based paths (S005); rewrites one back to its
+// vault-relative alias by longest-prefix match. null (a stale/torn-down watcher's event) must be
+// logged and dropped, never enqueued — a raw realpath would break S001's path-identity rule.
+export function rewriteEventPath(absPath, registry) {
+    let bestAlias = null;
+    let bestRealpath = '';
+    for (const [ aliasPath, realpath ] of registry) {
+        const isMatch = absPath === realpath || absPath.startsWith(`${realpath}${sep}`);
+        if (isMatch && realpath.length > bestRealpath.length) {
+            bestAlias = aliasPath;
+            bestRealpath = realpath;
+        }
+    }
+    if (bestAlias === null) {
+        return null;
+    }
+    return `${bestAlias}${absPath.slice(bestRealpath.length)}`.split(sep).join('/');
 }
 
 export function watermarkCatchup(db, vaultRoot, now = Date.now(), ignoreMatcher = ignore()) {
@@ -437,10 +525,13 @@ export function assertFswatchAvailable(env = process.env) {
     }
 }
 
-export function spawnFswatch(vaultRoot, onPath) {
+// `watchedPath` is any directory, not necessarily the vault root — S005's per-symlink-directory
+// watchers pass the symlink's own path here too, one process per currently-known symlinked
+// directory (a single recursive watch on the vault root never sees changes inside one — see S005).
+export function spawnFswatch(watchedPath, onPath) {
     assertFswatchAvailable();
-    const child = spawn('fswatch', [ '-r', vaultRoot ]);
-    getContextLogger().info('fswatch watcher started');
+    const child = spawn('fswatch', [ '-r', watchedPath ]);
+    getContextLogger().info('fswatch watcher started', { watched_path: watchedPath });
     const rl = createInterface({ input: child.stdout });
     rl.on('line', (line) => {
         const path = line.trim();
@@ -449,6 +540,88 @@ export function spawnFswatch(vaultRoot, onPath) {
         }
     });
     return child;
+}
+
+// Exit-triggered respawn with exponential backoff (S005), reusing backoffSchedule rather than a
+// second schedule of its own — same as the queue drainer's retries. `isStillValid` lets a
+// per-symlink watcher bow out quietly once its target's gone, deferring to live-removal teardown.
+function createRespawnScheduler({ watchedPath, backoffSchedule, isStillValid, scheduleFn, spawnChild }) {
+    let attemptCount = 0;
+    let timer = null;
+
+    function scheduleNext() {
+        if (!isStillValid()) {
+            return;
+        }
+        if (attemptCount > backoffSchedule.length) {
+            getContextLogger().error('fswatch watcher permanently failed', {
+                watched_path: watchedPath, attempts: attemptCount,
+            });
+            return;
+        }
+        const delay = backoffSchedule[attemptCount - 1];
+        getContextLogger().warn('fswatch watcher exited unexpectedly', {
+            watched_path: watchedPath, attempt: attemptCount, next_attempt_at: Date.now() + delay,
+        });
+        timer = scheduleFn(() => {
+            try {
+                spawnChild();
+            } catch {
+                attemptCount += 1;
+                scheduleNext();
+            }
+        }, delay);
+    }
+
+    return {
+        notifyExit() {
+            attemptCount += 1;
+            scheduleNext();
+        },
+        cancel(cancelFn) {
+            if (timer !== null) {
+                cancelFn(timer);
+            }
+        },
+    };
+}
+
+// Wraps spawnFswatch with the scheduler above so a killed/crashed child (main or per-symlink) no
+// longer leaves the daemon silently blind until a manual restart. `spawnFn`/`scheduleFn`/`cancelFn`
+// are injectable (matching createDebouncer) so tests can drive this without a real binary/timers.
+export function createResilientWatcher(watchedPath, onRawPath, options = {}) {
+    const {
+        backoffSchedule = DEFAULT_BACKOFF_SCHEDULE_MS,
+        isStillValid = () => true,
+        spawnFn = spawnFswatch,
+        scheduleFn = setTimeout,
+        cancelFn = clearTimeout,
+    } = options;
+
+    let stopped = false;
+    let child = null;
+
+    function spawnChild() {
+        child = spawnFn(watchedPath, onRawPath);
+        child.on('exit', () => {
+            if (!stopped) {
+                respawner.notifyExit();
+            }
+        });
+    }
+
+    const respawner = createRespawnScheduler({ watchedPath, backoffSchedule, isStillValid, scheduleFn, spawnChild });
+    spawnChild();
+
+    return {
+        stop() {
+            stopped = true;
+            respawner.cancel(cancelFn);
+            if (child !== null) {
+                child.kill();
+            }
+        },
+    };
 }
 
 async function attemptPathUntilSettled(vaultRoot, db, path, deps, now, onMessage) {
@@ -579,39 +752,143 @@ async function resolveChunkText(providedChunkText) {
     return (body) => realChunkText(body, (text) => realTokenizeWithOffsets(tokenizer, text));
 }
 
-function defaultCreateWatcher(vaultRoot, db, { debounceMs, ignoreMatcher = ignore() } = {}) {
-    let stopped = false;
+// ctx.registry maps aliasPath (vault-relative, no trailing slash) -> realpath for everything
+// currently registered as a symlinked directory (S005); ctx is a plain mutable bag shared by every
+// function below, built once per defaultCreateWatcher call.
+function registerSymlinkDir(ctx, aliasPath, realpath) {
+    ctx.registry.set(aliasPath, realpath);
+    getContextLogger().info('symlinked directory registered', { alias_path: aliasPath, realpath });
+    ctx.symlinkWatchers.set(aliasPath, createResilientWatcher(
+        join(ctx.vaultRoot, aliasPath),
+        (rawAbsPath) => acceptRawPath(ctx, rawAbsPath, (p) => rewriteEventPath(p, ctx.registry)),
+        { backoffSchedule: ctx.backoffSchedule, isStillValid: () => statOrNull(realpath)?.isDirectory() ?? false },
+    ));
+}
 
-    const debouncer = createDebouncer((path) => {
+// A removed/renamed symlink takes its subtree with it — nested registrations get torn down too.
+function teardownAlias(ctx, aliasPath) {
+    for (const knownAlias of [ ...ctx.registry.keys() ]) {
+        if (knownAlias === aliasPath || knownAlias.startsWith(`${aliasPath}/`)) {
+            ctx.symlinkWatchers.get(knownAlias)?.stop();
+            ctx.symlinkWatchers.delete(knownAlias);
+            ctx.registry.delete(knownAlias);
+        }
+    }
+    const deletedCount = deleteNotesByPathPrefix(ctx.db, aliasPath);
+    getContextLogger().info('symlinked directory removed', { alias_path: aliasPath, notes_deleted_count: deletedCount });
+}
+
+function acceptRawPath(ctx, rawAbsPath, toRelative) {
+    if (ctx.stopped) {
+        return;
+    }
+    const relativePath = toRelative(rawAbsPath);
+    if (relativePath === null) {
+        getContextLogger().error('fswatch event path did not resolve to a known path', { path: rawAbsPath });
+        return;
+    }
+    if (!isDotPath(relativePath) && !ctx.ignoreMatcher.ignores(relativePath)) {
+        ctx.debouncer.notify(relativePath);
+    }
+}
+
+// Register+index a settled symlink resolving to a not-yet-registered directory, tear down a stale
+// registration if the target changed, or clean up a stray note row for a file/dangling target.
+function handleSettledSymlink(ctx, relativePath, absPath) {
+    const target = realpathOrNull(absPath);
+    const targetStats = target === null ? null : statOrNull(target);
+    const isDirTarget = targetStats !== null && targetStats.isDirectory();
+    const registeredRealpath = ctx.registry.get(relativePath);
+
+    if (registeredRealpath !== undefined && registeredRealpath !== target) {
+        teardownAlias(ctx, relativePath);
+    }
+    if (isDirTarget && !ctx.registry.has(relativePath)) {
+        registerSymlinkDir(ctx, relativePath, target);
+        // A scoped watermark-catch-up rooted at this alias, recursing into any nested symlinks.
+        const onNested = (aliasPath, realpath) => registerSymlinkDir(ctx, aliasPath, realpath);
+        for (const mdPath of walkVaultForMarkdown(ctx.vaultRoot, ctx.ignoreMatcher, onNested, absPath)) {
+            enqueuePath(ctx.db, toVaultRelativePath(ctx.vaultRoot, mdPath));
+        }
+    } else if (!isDirTarget) {
+        deleteNoteByPath(ctx.db, relativePath);
+    }
+}
+
+// "Recheck reality after debounce" (S005) extended to symlink create/remove, not just file changes.
+function handleSettledPath(ctx, relativePath) {
+    const absPath = join(ctx.vaultRoot, relativePath);
+    const lstat = lstatOrNull(absPath);
+
+    if (lstat === null) {
+        if (ctx.registry.has(relativePath)) {
+            teardownAlias(ctx, relativePath);
+        } else {
+            deleteNoteByPath(ctx.db, relativePath);
+        }
+        return;
+    }
+
+    if (lstat.isSymbolicLink()) {
+        handleSettledSymlink(ctx, relativePath, absPath);
+        return;
+    }
+
+    if (ctx.registry.has(relativePath)) {
+        teardownAlias(ctx, relativePath); // a real file/dir replaced what used to be a symlinked alias
+    }
+    if (lstat.isFile()) {
+        enqueuePath(ctx.db, relativePath);
+    } else {
+        // A directory (or other non-regular entry) now sits here — may have previously been an
+        // indexed note (e.g. `rm Note.md && mkdir Note.md`); deleteNoteByPath is a no-op if not.
+        deleteNoteByPath(ctx.db, relativePath);
+    }
+}
+
+export function defaultCreateWatcher(vaultRoot, db, {
+    debounceMs, ignoreMatcher = ignore(), backoffSchedule = DEFAULT_BACKOFF_SCHEDULE_MS,
+} = {}) {
+    const ctx = {
+        vaultRoot, db, ignoreMatcher, backoffSchedule, stopped: false, debouncer: null,
+        registry: new Map(), symlinkWatchers: new Map(),
+    };
+
+    ctx.debouncer = createDebouncer((relativePath) => {
         // fswatch's stdout can still have buffered lines in flight when child.kill() runs below,
         // so a debounce timer can settle after stop() — this guard keeps that a no-op instead of
         // touching a since-closed db.
-        if (stopped) {
-            return;
-        }
-        const absPath = join(vaultRoot, path);
-        if (existsSync(absPath)) {
-            enqueuePath(db, path);
-        } else {
-            deleteNoteByPath(db, path);
+        if (!ctx.stopped) {
+            handleSettledPath(ctx, relativePath);
         }
     }, { debounceMs });
 
-    const child = spawnFswatch(vaultRoot, (absPath) => {
-        if (stopped) {
-            return;
-        }
-        const relativePath = toVaultRelativePath(vaultRoot, absPath);
-        if (!isDotPath(relativePath) && !ignoreMatcher.ignores(relativePath)) {
-            debouncer.notify(relativePath);
-        }
-    });
+    // Register every pre-existing symlinked directory before the main watcher starts; markdown
+    // paths this walk also finds are ignored — watermarkCatchup already enqueued them at startup.
+    walkVaultForMarkdown(vaultRoot, ignoreMatcher, (aliasPath, realpath) => registerSymlinkDir(ctx, aliasPath, realpath));
+
+    // fswatch reports absolute paths in canonical (realpath) form regardless of what literal
+    // string was passed as its watch root — so if vaultRoot itself sits behind a symlink hop
+    // (e.g. macOS's /var -> /private/var), matching against the raw vaultRoot here would produce
+    // a bogus `../`-laden relative path for every single event. Canonicalize once for this
+    // comparison only; join()/walkVaultForMarkdown elsewhere in ctx stay on the literal vaultRoot,
+    // which is self-consistent since the OS resolves symlinked path components transparently.
+    const canonicalVaultRoot = realpathSync(vaultRoot);
+    const mainWatcher = createResilientWatcher(
+        vaultRoot,
+        (rawAbsPath) => acceptRawPath(ctx, rawAbsPath, (p) => toVaultRelativePath(canonicalVaultRoot, p)),
+        { backoffSchedule },
+    );
 
     return {
         stop() {
-            stopped = true;
-            debouncer.cancelAll();
-            child.kill();
+            ctx.stopped = true;
+            ctx.debouncer.cancelAll();
+            mainWatcher.stop();
+            for (const watcher of ctx.symlinkWatchers.values()) {
+                watcher.stop();
+            }
+            ctx.symlinkWatchers.clear();
         },
     };
 }
@@ -694,7 +971,7 @@ export async function startDaemon(options = {}) {
     }
 
     const gate = createSerialGate();
-    const watcher = createWatcher(vaultRoot, db, { debounceMs, ignoreMatcher });
+    const watcher = createWatcher(vaultRoot, db, { debounceMs, ignoreMatcher, backoffSchedule });
     const drainTimer = startDrainLoop(vaultRoot, db, deps, drainIntervalMs, gate);
     if (drainTimer === null) {
         await drainQueueOnce(vaultRoot, db, deps);

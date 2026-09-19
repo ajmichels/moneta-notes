@@ -431,6 +431,12 @@ the actual `getContextLogger()` call sites and levels:
   `warn`, `"fswatch watcher exited unexpectedly"`, context `{ watched_path, attempt, next_attempt_at }`.
 - **`fswatch` watcher permanently failed to respawn** (final backoff attempt exhausted) — `error`,
   `"fswatch watcher permanently failed"`, context `{ watched_path, attempts }`.
+- **An `fswatch` event's path didn't resolve to a known vault-relative path** (a per-symlink
+  watcher's realpath-based event that no longer matches any registry entry — should only happen for
+  a stale event racing an already-torn-down watcher) — `error`, `"fswatch event path did not
+  resolve to a known path"`, context `{ path }`. Dropped rather than enqueued either way, per the
+  fail-loud rule — a raw realpath reaching `notes.path` would violate S001's path-is-identity
+  contract.
 - **Queue drainer, per dequeued path**:
   - Skip-unchanged (mtime or content hash unchanged) — `debug`, `"skipping unchanged path"`, context
     `{ note_title }` — high-frequency, low-value outside active debugging, so not `info`.
