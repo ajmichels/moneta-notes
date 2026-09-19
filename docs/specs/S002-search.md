@@ -3,6 +3,7 @@
 Status: **Approved**
 Owns: `src/core/search.js`
 Depends on: `S001-data-model`, `S010-shared-utilities`
+Amended by: `S015-readonly-paths` (`readonly` output field, optional `vaultRoot` input)
 Consumed by: `S006-cli`, `S007-mcp-server`
 
 ## Purpose
@@ -15,7 +16,9 @@ cosine distance) alongside rank, since that number is meaningful on its own in t
 
 ## Input
 
-`query<string>`, `?mode<fulltext|semantic|hybrid>=hybrid`, `?limit<int>=20>` (max `100`).
+`query<string>`, `?mode<fulltext|semantic|hybrid>=hybrid`, `?limit<int>=20>` (max `100`),
+`?vaultRoot<string>` (S015 — see "Output" below; `db`-only callers get no `readonly` field, same
+additive-only posture S010's optional-`db` title-resolution parameters already established).
 
 This adds `limit` to what's currently documented in the README's `search` tool section — flagged as
 a deviation to reconcile there.
@@ -128,6 +131,13 @@ without reading the whole thing first. This is the point of exposing them: `sear
 collapse (above) already throws away *which part* of a note matched — for a short note that's fine,
 but for a long one it forces a full read to relocate the hit. See S001 for why this is body-only line
 numbers, not `grep`'s raw-file-including-frontmatter convention.
+
+**`readonly<bool>` (S015)**: present only when `vaultRoot` is given and the result's note matches a
+`.mnotesreadonly` pattern, omitted otherwise (including whenever `vaultRoot` is omitted entirely). A
+real boolean at this layer — `format.js`'s `formatSearchTable` is what renders it as the pipe-delimited
+`readonly` column's `read-only`/empty-cell convention for the tool-facing table output; `--json`
+callers (S006) see the boolean directly. Checked via `loadReadonlyMatcher(vaultRoot)` loaded once per
+`search()` call, then `checkReadonly` per result row — not once per row.
 
 ## Logging
 

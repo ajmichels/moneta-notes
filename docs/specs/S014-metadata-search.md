@@ -5,6 +5,8 @@ Owns: `src/core/metadata.js`
 Depends on: `S001-data-model` (schema change: `notes.metadata_json`), `S003-notes` (frontmatter
 parsing, the `id`/`created` fields), `S004-grep-tags` (tag matching, reused not duplicated),
 `S010-shared-utilities`
+Amended by: `S015-readonly-paths` (`readonly` output field on `metadata_query`, optional `vaultRoot`
+input)
 Consumed by: `S005-indexing-daemon` (extraction during reindex), `S006-cli`, `S007-mcp-server`
 
 ## Purpose
@@ -242,7 +244,14 @@ as before this preference existed.
 
 **Input**: `filters<array>` (each `{ key<string>, op<'eq'|'gt'|'gte'|'lt'|'lte'|'in'|'exists'>,
 value?<string|number|boolean|array>, negate?<bool> }`, non-empty), `match?<'all'|'any'>='all'`,
-`reason<string>`. **Output**: `note_title<string>`, `file_line_count<int>` — same shape as `tag_notes`.
+`?vaultRoot<string>` (S015), `reason<string>`. **Output**: `note_title<string>`,
+`file_line_count<int>` — same shape as `tag_notes`.
+
+**`readonly<bool>` (S015)**: same treatment as `tag_notes` (S004) — `metadataQuery(db, options)` gains
+an optional `vaultRoot`; when given, each row gains `readonly: true` present only when the note matches
+a `.mnotesreadonly` pattern, checked via a `loadReadonlyMatcher(vaultRoot)` loaded once per call. A
+real boolean at this layer; `format.js` renders it as the `read-only`/empty-cell column convention
+(`formatTagNotesTable`, already shared with `tag_notes` per the note above).
 
 ## CLI (`mnotes metadata keys` / `mnotes metadata query`)
 

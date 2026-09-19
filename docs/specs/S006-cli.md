@@ -8,6 +8,8 @@ specifically), `S009-config-and-install` (`src/platform` supplies `mnotes daemon
 functions — see below; also owns the `launchd`/`systemd` templates whose redirected stdout/stderr
 files `mnotes logs --file=daemon.stdout` etc. read), `S010-shared-utilities`, `S011-links`,
 `S012-attachments`
+Amended by: `S015-readonly-paths` (read-only rejection on every mutating command, `readonly` column on
+every list-style command including the CLI-only `links`/`links broken`)
 Consumed by: (terminal use, `obsidian.nvim` integration)
 
 ## Purpose
@@ -70,6 +72,16 @@ structured output is more convenient than parsing pipe-delimited columns. `write
 `rename` are already JSON by default (per the README and S003's `{ title, hash, line_count }` return
 shape), so `--json` is a no-op / not offered on those. **`read` is the one exception** — see below,
 its default output is deliberately not JSON.
+
+## Read-only rejection and reporting (S015)
+
+Every mutating command (`write`/`edit`/`append`/`rename`/`attachment write`) inherits the
+`assertWritable` guard automatically, since each is a thin wrapper over the same `core/` function the
+MCP tool calls — a target matching `.mnotesreadonly` fails with the same message either surface would
+show, no CLI-specific handling needed. `search`/`grep`/`tags notes`/`metadata query`/`read`/
+`attachment read` inherit the `readonly` field/column the same way, via the shared `format.js`
+functions — `--json` mode shows the real boolean, default table mode shows the `read-only`/empty-cell
+column. See S015 for the full mechanism.
 
 ## No `reason` flag
 
@@ -189,6 +201,15 @@ CLI-only — there's no MCP equivalent (S011 deliberately keeps the link graph o
 - **`mnotes links broken`** — every dangling `[[wikilink]]` in the vault (a `target_title` with no
   matching note), via `core/links.js`'s `getBrokenLinks` (S011). Table columns `note_title` (the note
   containing the link) and `broken_target` (the unresolved title it points at).
+
+**`readonly` column (S015), both forms**: `core/links.js`'s `getBacklinks`/`getBrokenLinks` return
+plain title strings/objects with no such field, by design (S003's "no extra fields beyond what's
+needed to navigate" rule for `backlinks`/`links_out`, which `getBacklinks` also backs) — `core/links.js`
+itself is unchanged. Instead, `cli/main.js`'s handlers for these two commands compute it directly:
+`loadReadonlyMatcher(vaultRoot)` loaded once, then `checkReadonly` per row, before handing rows to
+`formatLinksTable`/`formatBrokenLinksTable`. This is CLI-layer composition of an existing
+`core/note-fs.js` primitive, not a second copy of the read-only check — there is no other copy to
+diverge from.
 
 **`broken` is a reserved subcommand keyword**, the same tradeoff `tags list`/`tags notes` already makes
 — a note literally titled "broken" can't be looked up via `mnotes links broken` (it'll run the broken-

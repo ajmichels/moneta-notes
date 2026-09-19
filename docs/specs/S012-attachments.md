@@ -5,6 +5,8 @@ Owns: `src/core/attachments.js`
 Amends: `S010-shared-utilities` (extracts a generic containment-checked path-join primitive that
 `titleToPath` and this spec's own path resolution both build on)
 Depends on: `S010-shared-utilities`
+Amended by: `S015-readonly-paths` (write guard on `writeAttachment`, `readonly` field on
+`readAttachment`)
 Consumed by: `S006-cli`, `S007-mcp-server`
 
 ## Purpose
@@ -99,6 +101,10 @@ extension is not a reason to fail a read).
   worrying about the size cap.
 - Throws if `attachment_path` doesn't resolve to a real file (`"Attachment not found: <path>"`) or
   resolves to a directory rather than a file.
+- **`readonly<bool>` (S015)** — present only when `attachment_path` matches a pattern in the vault's
+  `.mnotesreadonly` file, omitted otherwise. Same top-level-sibling-field, present-only-when-true
+  convention `note_read`'s equivalent field uses (S003) — checked via `checkReadonly` against the
+  resolved path, no new parameter needed (`readAttachment` already takes `vaultRoot`).
 
 **`start_page`/`end_page` (PDF only)** — 1-indexed, inclusive, mirroring `note_read`'s
 `start_line`/`end_line` convention rather than any external tool's own range-string syntax, for
@@ -152,6 +158,9 @@ genuinely being a valid, page-addressable PDF is load-bearing for fulfilling the
 
 Returns `{ path, size_bytes, mime_type }`.
 
+- **Read-only guard (S015)**: `assertWritable(vaultRoot, attachment_path)` runs first, before the
+  parent-directory creation or the atomic write below — throws naming the matched
+  `.mnotesreadonly` pattern if `attachment_path` is protected.
 - **Create-or-overwrite, unconditionally — no hash guard.** CLAUDE.md's "every mutating operation on an
   existing note requires a matching content hash" is scoped to *notes*: the rule protects a caller
   across a read/decide/write round trip against clobbering a concurrent *text* edit it can't otherwise

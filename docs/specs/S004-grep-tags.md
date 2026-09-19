@@ -3,6 +3,8 @@
 Status: **Approved**
 Owns: `src/core/grep.js`, `src/core/tags.js`
 Depends on: `S001-data-model`, `S010-shared-utilities`
+Amended by: `S015-readonly-paths` (`readonly` output field on `grep` and `tag_notes`, optional
+`vaultRoot` input on `tag_notes`)
 Consumed by: `S005-indexing-daemon` (tag extraction, invoked during reindex), `S006-cli`,
 `S007-mcp-server`
 
@@ -31,6 +33,12 @@ cheap, already parsed out of ripgrep's own JSON output, and `core/` has no opini
 does with it. Whether match text actually reaches an output surface is a formatting decision made
 above `core/`, per-surface (see S006/S007): the CLI can opt into showing it via a flag, the MCP tool
 never does.
+
+**`readonly<bool>` (S015)**: `grep` already takes `vaultRoot`, so no new parameter is needed — each
+result row gains `readonly: true`, present only when the note's path matches a `.mnotesreadonly`
+pattern, checked against a `loadReadonlyMatcher(vaultRoot)` instance loaded once per `grep()` call (not
+per row). Same real-boolean-at-core-layer, sentinel-string-at-format-layer split S002 uses for
+`search`.
 
 ### Implementation
 
@@ -182,7 +190,15 @@ their own counts.
 
 ### `tag_notes`
 
-**Input**: `tag<string>`, `reason<string>`. **Output**: `note_title<string>`, `file_line_count<int>`.
+**Input**: `tag<string>`, `?vaultRoot<string>` (S015), `reason<string>`. **Output**:
+`note_title<string>`, `file_line_count<int>`.
+
+**`readonly<bool>` (S015)**: `tagNotes(db, tagName)` currently takes no `vaultRoot` — this adds one,
+optional, additive-only (omitted → no `readonly` field, same posture S010's optional-`db` parameters
+already established elsewhere). When given, each row gains `readonly: true` present only when true,
+checked the same way `grep`'s is above. `metadata_query` (S014) reuses this same output shape
+("same shape as `tag_notes`") and gains the identical field/parameter independently, since it's a
+separate function over a separate query.
 
 **Parent-includes-child matching**: `tag_notes("project")` returns notes tagged exactly `project` OR
 any nested child (`project/api-migration`, `project/website`, ...) — a case-insensitive prefix match

@@ -4,6 +4,8 @@ Status: **Approved**
 Owns: `src/core/notes.js`
 Depends on: `S001-data-model`, `S004-grep-tags` (`note_rename`'s cascade reuses `core/grep.js` for
 candidate discovery), `S010-shared-utilities`, `S011-links` (extraction/backlink/rewrite primitives)
+Amended by: `S015-readonly-paths` (write guard on all four mutators, `note_read`'s `readonly` field,
+the link-cascade's carve-out from that guard)
 Consumed by: `S006-cli`, `S007-mcp-server`
 
 ## Purpose
@@ -133,7 +135,13 @@ which notes it points *at* itself.
   reduced-capability-without-`db` shape as `backlinks`.
 - Both are deduplicated arrays of note titles, not objects — no rank, no score, nothing else to carry
   per CLAUDE.md's "no raw scores" spirit extended to "no extra fields beyond what's needed to
-  navigate."
+  navigate." This rule is unchanged by S015 below — `readonly` status is *not* attached to individual
+  `backlinks`/`links_out` entries, only to the note actually being read (see next paragraph).
+
+**`readonly<bool>`** (S015) — present only when the resolved title matches a pattern in the vault's
+`.mnotesreadonly` file, omitted otherwise. A top-level sibling field, not folded into `metadata`
+(S015 explains why: `metadata` means "this note's own frontmatter," and `readonly` is neither stored
+in the file nor caller-settable, unlike `id`/`created`).
 
 ## Title resolution and the read/write split
 
@@ -174,6 +182,10 @@ the tool surface correctly, not an implementation detail to leave undocumented.
 
 `note_title<string>`, `hash<null|string>`, `?metadata<json>`, `content<string>`, `reason<string>`.
 
+- **Read-only guard (S015)**: the very first check, before anything below — `assertWritable(vaultRoot,
+  `${note_title}.md`)` throws if the target matches a `.mnotesreadonly` pattern, naming the pattern.
+  Applies to the create path exactly as much as the update path — a read-only glob blocks new notes
+  from being created under it, not just edits to existing ones.
 - **No `hash` + new title** → create. `metadata` (if provided) becomes the note's frontmatter, with
   `id` and `created` computed and injected (each overwritten if the caller included one). No
   `metadata` provided on create → frontmatter contains only the computed `id` and `created`.
@@ -201,6 +213,8 @@ the tool surface correctly, not an implementation detail to leave undocumented.
 tool, so a null hash has no meaningful interpretation), `old_txt<string>`, `new_txt<string>`,
 `?metadata<json>`, `reason<string>`.
 
+- **Read-only guard (S015)**: same as `note_write` — `assertWritable` runs first, before the hash
+  check, against `${note_title}.md`.
 - Replaces `old_txt` with `new_txt` in the note body. Fails if `old_txt` doesn't match exactly once
   (zero matches = error, multiple matches = error — ambiguous edits aren't guessed at).
 - `metadata`, if provided, merges into frontmatter using the same semantics as `note_write` (`null`
@@ -217,6 +231,8 @@ exempted append from the hash guard; on reflection, append is still a mutation o
 and gets no special exemption, consistent with CLAUDE.md's "no exceptions" rule), `content<string>`,
 `reason<string>`.
 
+- **Read-only guard (S015)**: same as `note_write`/`note_edit` — `assertWritable` runs first, against
+  `${note_title}.md`.
 - Appends `content` to the end of the note body. No `metadata` param — append stays content-only and
   single-purpose; a caller wanting to change metadata alongside an append makes two calls.
 - No size-drop guard (append can only grow line count — the guard is structurally unreachable here).
@@ -227,6 +243,12 @@ and gets no special exemption, consistent with CLAUDE.md's "no exceptions" rule)
 `old_title<string>`, `new_title<string>`, `hash<string>` (must match `old_title`'s current
 content_hash), `reason<string>`.
 
+- **Read-only guard (S015)**: `assertWritable` runs against **both** `${old_title}.md` and
+  `${new_title}.md`, before the hash comparison or the `new_title`-already-exists check below —
+  renaming a read-only note is blocked (protects existing content), and renaming an ordinary note
+  *onto* a path matching a read-only pattern is also blocked (protects the zone from new arrivals).
+  The link cascade's own per-candidate rewrites are a deliberate, narrow exception to this — see
+  "Concurrency model" below.
 - Renames (moves) the note file from `old_title`'s path to `new_title`'s path.
 - **Fails hard if `new_title` already refers to an existing note** — no `force` override, consistent
   with the rest of this tool set's no-silent-overwrite stance. Renaming onto an existing title is
@@ -359,6 +381,15 @@ writing it, with the same accepted race window this section already grants the r
 model. This isn't a precedent for relaxing the guard elsewhere; it applies narrowly to this one
 system-internal, read-immediately-adjacent-to-write sequence.
 
+**The cascade's per-candidate rewrites are the same kind of deliberate, scoped exception to the S015
+read-only guard** — they never call `assertWritable`, even against a candidate that matches a
+`.mnotesreadonly` pattern. The reasoning: a read-only note left with a dangling `[[wikilink]]` after a
+rename elsewhere is a worse outcome than the cascade silently fixing it (Obsidian shows a broken link
+with no indication of where the target moved, and may prompt to create a wrong note at the stale name).
+Protecting a read-only note's *content* from a direct caller-initiated write, and keeping its
+*outbound links* correct as an automatic consequence of a rename elsewhere, are different concerns —
+only the first is what `.mnotesreadonly` protects. See S015 for the full reasoning.
+
 ## Logging
 
 Every tool here is a mutation, and per `S008`, mutations are already fully covered by `logAudit` at
@@ -390,6 +421,13 @@ rest of the cascade. Both are `warn`, not `debug`, unlike the `id`-overwrite cas
 means a note is left with a stale link the caller has no other way of finding out about (the overall
 `note_rename` call still succeeds and returns normally), which is worth a durable trail even though it
 isn't itself a thrown error.
+
+A third exception, new here (S015): when the link cascade rewrites a candidate that matches a
+`.mnotesreadonly` pattern — the carve-out described in "Concurrency model" above — `core/notes.js`
+calls `getContextLogger().debug('link cascade: rewrote read-only candidate', { note_title: new_title,
+candidate_title })`. `debug`, not `warn`, since nothing failed here; this is purely a visibility trail
+for "why did a read-only file's content change," matching the `id`/`created`-overwrite lines' tier
+rather than the failure-tier lines directly above.
 
 ## Explicitly out of scope here
 

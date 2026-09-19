@@ -3,6 +3,8 @@
 Status: **Approved**
 Owns: `src/mcp/server.js`, `src/mcp/tools.js`, `src/mcp/prompts.js` (stub only — see Prompts)
 Depends on: `S001-data-model`, `S002-search`, `S003-notes`, `S004-grep-tags`, `S012-attachments`
+Amended by: `S015-readonly-paths` (write-guard rejection + `readonly` field/column on every affected
+tool's description, per tool below)
 Consumed by: Claude Code / Claude Desktop
 
 ## Purpose
@@ -77,14 +79,26 @@ other two per their actual semantics rather than a blanket "any mutation is dest
   `new_title` that must not already exist) on each call, so a second identical call fails rather than
   being a no-op — `idempotentHint: false`.
 
+### Read-only guard and reporting (S015)
+
+Two shared tool-description snippets, appended per tool below (same pattern as `TAG_ESCAPE_NOTE`
+further down this spec — one string, reused, not independently reworded per tool):
+
+- **`READONLY_WRITE_NOTE`** (on `note_write`, `note_edit`, `note_append`, `note_rename`,
+  `attachment_write`): *"Fails if the target path matches a pattern in the vault's `.mnotesreadonly`
+  file — the error names the specific pattern that matched."*
+- **`READONLY_READ_NOTE`** (on `note_read`, `search`, `grep`, `tag_notes`, `attachment_read`; also on
+  `metadata_query`, in its own S014 tool description): *"A `readonly` field/column is present when the
+  note matches a read-only pattern — check it before attempting to write."*
+
 ### `search`
 
 **Input**: `query<string>`, `?mode<fulltext|semantic|hybrid>=hybrid`, `?limit<int>=20` (max `100`,
 both config-backed per S002), `reason<string>`.
 **Output**: `note_title`, `file_line_count`, `?fulltext_rank`, `?semantic_rank`, `?chunk_line_start`,
-`?chunk_line_end`, `?bm25_score` (`fulltext` mode only), `?cosine_distance` (`semantic` mode only) —
-`hybrid` mode is rank position only, never a raw RRF score; `fulltext`/`semantic` mode also carries its
-native single-signal score (CLAUDE.md, S002).
+`?chunk_line_end`, `?bm25_score` (`fulltext` mode only), `?cosine_distance` (`semantic` mode only),
+`?readonly` (S015, `READONLY_READ_NOTE`) — `hybrid` mode is rank position only, never a raw RRF score;
+`fulltext`/`semantic` mode also carries its native single-signal score (CLAUDE.md, S002).
 
 `chunk_line_start`/`chunk_line_end` (S001/S002) are present only when the result has a semantic-side
 match — always in `semantic` mode, and in `hybrid` mode only for notes that matched (at least partly)
@@ -103,7 +117,8 @@ about to use `search` reliably, not an implementation detail to hide.
 
 **Input**: `pattern<string>`, `?regex<bool>=false`, `?note_title<string>`, `reason<string>`.
 **Output**: `note_title`, `file_line_count`, `line_matches` (capped at 10 per note + `(+N more)`, per
-S004) — **line numbers only** (`L2, L5`), never the matched line's text. Unlike the CLI (S006), the
+S004), `?readonly` (S015, `READONLY_READ_NOTE`) — **line numbers only** (`L2, L5`), never the matched
+line's text. Unlike the CLI (S006), the
 MCP tool has no input for opting into match text — grep is meant to help Claude locate *which* notes
 and *which lines* are worth a closer look, not to substitute for reading them. Returning matched text
 inline would burn context on content Claude hasn't decided it needs yet, especially for a broad
@@ -120,16 +135,16 @@ via a `[[wikilink]]` reference needs to know that's supported.
 
 ### `tag_notes`
 
-**Input**: `tag<string>`, `reason<string>`. **Output**: `note_title`, `file_line_count`
-(parent-includes-child matching, per S004).
+**Input**: `tag<string>`, `reason<string>`. **Output**: `note_title`, `file_line_count`, `?readonly`
+(S015, `READONLY_READ_NOTE`) (parent-includes-child matching, per S004).
 
 ### `note_read`
 
 **Input**: `note_title<string>`, `?start_line<int>`, `?end_line<int>`, `reason<string>`.
 **Output**: `{ title, start_line, end_line, total_lines, content_hash, metadata, content, backlinks,
-links_out }` — always structured JSON (unlike the CLI's `read`, which defaults to plain text; MCP has
-no equivalent of the CLI's `--raw` mode since Claude always wants the structured shape, never a reason
-to strip it).
+links_out, ?readonly }` (S015, `READONLY_READ_NOTE`) — always structured JSON (unlike the CLI's `read`,
+which defaults to plain text; MCP has no equivalent of the CLI's `--raw` mode since Claude always wants
+the structured shape, never a reason to strip it).
 
 `backlinks`/`links_out` (S003/S011) are the two wikilink traversal directions — titles of notes
 linking *to* this one, and titles this note links *to* — each a plain array of note titles, `[]` when
@@ -161,11 +176,13 @@ backslash only escapes the one `#` it precedes, not a whole run.
 ### `note_write`
 
 **Input**: `note_title<string>`, `hash<null|string>`, `?metadata<json>`, `content<string>`,
-`?force<bool>=false`, `reason<string>`.
+`?force<bool>=false`, `reason<string>`. Tool description carries `READONLY_WRITE_NOTE` (S015).
 **Output**: `{ title, hash, line_count }`.
 
 No hash + new title = create. No hash + existing title = error. Hash matching = full content replace
 + metadata merge (`null` value deletes a key). `force: true` bypasses the size-drop guard (S003).
+Fails first, before any of the above, if `note_title` matches a `.mnotesreadonly` pattern (S015) —
+applies to the create path too.
 
 **`note_title` requires the exact absolute title — no resolution fallback** (S003/S010), unlike
 `note_read`/`grep`. This matters more here than on the other mutating tools: whether `note_title`
@@ -177,9 +194,11 @@ ambiguous wikilink reference."*
 ### `note_edit`
 
 **Input**: `note_title<string>`, `hash<string>` (required, non-nullable per S003), `old_txt<string>`,
-`new_txt<string>`, `?metadata<json>`, `reason<string>`.
+`new_txt<string>`, `?metadata<json>`, `reason<string>`. Tool description carries `READONLY_WRITE_NOTE`
+(S015).
 **Output**: `{ title, hash, line_count }`.
 
+Fails first if `note_title` matches a `.mnotesreadonly` pattern (S015), before the hash check.
 Errors unless `old_txt` matches exactly once. `metadata` uses the same merge semantics as
 `note_write` — this is new relative to the README's current documentation (S003 closed this gap).
 
@@ -189,9 +208,10 @@ S010) — tool description states this the same way.
 ### `note_append`
 
 **Input**: `note_title<string>`, `hash<string>` (required per S003), `content<string>`,
-`reason<string>`.
+`reason<string>`. Tool description carries `READONLY_WRITE_NOTE` (S015).
 **Output**: `{ title, hash, line_count }`.
 
+Fails first if `note_title` matches a `.mnotesreadonly` pattern (S015), before the hash check.
 No `metadata` param (append stays content-only, per S003).
 
 Same as `note_write`/`note_edit`: `note_title` requires the exact absolute title, no resolution
@@ -199,11 +219,19 @@ fallback (S003/S010).
 
 ### `note_rename` (new — not in the README's current tool table)
 
-**Input**: `old_title<string>`, `new_title<string>`, `hash<string>`, `reason<string>`.
+**Input**: `old_title<string>`, `new_title<string>`, `hash<string>`, `reason<string>`. Tool description
+carries `READONLY_WRITE_NOTE` (S015), noting it applies to **both** `old_title` and `new_title`.
 **Output**: `{ title, hash, line_count }` (`title` is `new_title`; `hash`/`line_count` reflect the
 rewritten `id` frontmatter field **and** the outcome of the link cascade below, per S003).
 
+Fails first if `old_title` **or** `new_title` matches a `.mnotesreadonly` pattern (S015) — protects an
+existing read-only note from being moved, and protects a read-only-globbed zone from a normal note
+being moved into it. Checked before the hash comparison and the `new_title`-already-exists check below.
 Hard error if `new_title` already exists — no `force` override.
+
+The link cascade below is a deliberate exception to this guard — it rewrites `[[old_title]]` references
+in other notes, including read-only ones, so a rename never leaves a read-only note's link dangling
+(S003/S015 explain why).
 
 Also rewrites `[[old_title]]` references in every other note that links to it, so search/read results
 never point Claude at a stale link after a rename (S003/S011's link cascade) — this happens
@@ -214,8 +242,10 @@ tool, no resolution fallback (S003/S010).
 
 ### `attachment_read` (new — S012)
 
-**Input**: `attachment_path<string>`, `?include_content<bool>=true`, `reason<string>`.
-**Output**: two MCP content blocks when content is included — a `text` block with
+**Input**: `attachment_path<string>`, `?include_content<bool>=true`, `reason<string>`. Tool description
+carries `READONLY_READ_NOTE` (S015).
+**Output**: the metadata `text` block gains `?readonly` (S015) alongside `path`/`size_bytes`/
+`mime_type`/`total_pages?`; two MCP content blocks when content is included — a `text` block with
 `{ path, size_bytes, mime_type, total_pages? }` as JSON, plus a second block carrying the actual
 bytes (see below). `include_content: false`, or an over-cap file, returns only the `text` metadata
 block.
@@ -274,9 +304,12 @@ characters' worth of base64.
 
 ### `attachment_write` (new — S012)
 
-**Input**: `attachment_path<string>`, `content_base64<string>`, `reason<string>`.
+**Input**: `attachment_path<string>`, `content_base64<string>`, `reason<string>`. Tool description
+carries `READONLY_WRITE_NOTE` (S015).
 **Output**: `{ path, size_bytes, mime_type }`.
 
+Fails first if `attachment_path` matches a `.mnotesreadonly` pattern (S015), before the parent-
+directory creation or the atomic write below.
 Create-or-overwrite, unconditional — **no hash guard** (S012: CLAUDE.md's hash-guard rule is scoped to
 notes' diffable text content, which binary attachments have no equivalent of). Same exact-path
 requirement as `attachment_read`, same vault-containment check every path-taking tool in this project

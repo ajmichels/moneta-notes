@@ -5,7 +5,8 @@ Owns: `src/core/note-fs.js`
 Depends on: none
 Consumed by: `S002-search`, `S003-notes`, `S004-grep-tags`, `S005-indexing-daemon`, `S006-cli`,
 `S007-mcp-server`, `S011-links`, `S012-attachments` (extracts `resolveVaultPath`, the containment-check
-primitive `titleToPath` is now built on)
+primitive `titleToPath` is now built on), `S015-readonly-paths` (adds `loadReadonlyMatcher`/
+`checkReadonly`/`assertWritable`, alongside `.mnotesignore`'s existing primitives below)
 
 ## Purpose
 
@@ -124,6 +125,30 @@ This spec was split out after implementing S006 surfaced two real problems with 
   note from entering the index (and, for `grep`, from surfacing in a vault-wide search) in the first
   place. This mirrors how dotfile exclusion (S005's `isDotPath`) has always worked here — it gates the
   indexer, not every `core/` operation.
+
+## `.mnotesreadonly` (S015)
+
+A second, separate gitignore-style file at the vault root, same syntax and same absent-is-empty
+posture as `.mnotesignore` above, but answering a different question: not "is this in the index,"
+but "can the tool surface write to this." Full design in
+[S015](S015-readonly-paths.md); the mechanics living in this module:
+
+- **`loadReadonlyMatcher(vaultRoot) -> matcher`** — identical shape to `loadIgnoreMatcher`, reading
+  `.mnotesreadonly` instead.
+- **`checkReadonly(matcher, relativePath) -> { readonly: boolean, pattern: string|null }`** — wraps
+  `ignore`'s `.test(relativePath)` (available since `ignore@7`, this project's installed version),
+  exposing which pattern matched so a caller can report *why* something is read-only. Takes an
+  already-loaded matcher (not `vaultRoot`) so a caller checking many paths in one call loads the file
+  once, not once per path.
+- **`assertWritable(vaultRoot, relativePath)`** — throws `assertWritable: "<relativePath>" is
+  read-only — matches pattern "<pattern>" in .mnotesreadonly.` when blocked; a no-op otherwise. Loads
+  its own matcher (self-contained, since every call site checks exactly one path). Unwrapped by every
+  caller, same precedent `resolveVaultPath`/`titleToPath` already set for a containment violation.
+
+Unlike `.mnotesignore`, nothing here is table-backed or reindex-cadence-bound — every one of these
+three functions reads `.mnotesreadonly` fresh on every call. See S015 for why that split is safe (in
+short: `.mnotesignore` gates index *membership*, which is inherently tied to when the index was last
+built; `.mnotesreadonly` gates a flag on an already-resolved path, which has no such constraint).
 
 ## Title resolution
 
