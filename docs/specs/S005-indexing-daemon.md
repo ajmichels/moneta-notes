@@ -22,7 +22,11 @@ identically on both, no `process.platform` check anywhere in this file. Only `da
 helpers (`defaultAppSupportDir()`, and `defaultLogDir()` imported from `src/logger.js`) are
 platform-dependent, and both now delegate to `src/platform` (S009) instead of hardcoding
 `~/Library/...` — see S009's platform-abstraction section for the exact `appSupportDir()`/`logDir()`
-contract.
+contract. Symlinked-directory support ("Symlinked directories" below) is the one place this
+invariant is unverified rather than guaranteed: its multi-process/realpath-rewrite design was
+validated empirically against macOS's kqueue/FSEvents backend only. Linux's inotify backend needs
+the same empirical check before this claim can be treated as confirmed cross-platform for symlink
+handling specifically.
 
 `index_queue` (S001) is the **single path for all indexing work**, not just explicit `mnotes reindex`
 calls — every live `fswatch`-triggered change funnels through the same debounce → enqueue → drain
@@ -38,10 +42,11 @@ was triggered.
    empty/reset watermark).
 2. **Watermark catch-up**: compute `MAX(notes.updated_at)` across the `notes` table (0 if empty —
    this is what makes first-run naturally index the entire vault, no special-cased "initial index"
-   path needed). Walk the vault (skipping excluded paths — see "Path exclusion" below), and for every
-   `.md` file whose mtime is newer than the watermark, enqueue its path into `index_queue`. This
-   catches anything changed while the daemon was down (crash, machine sleep, disabled), without a full
-   unconditional walk-and-reprocess of every file.
+   path needed). Walk the vault (skipping excluded paths — see "Path exclusion" below, and descending
+   into symlinked directories — see "Symlinked directories" below), and for every `.md` file whose
+   mtime is newer than the watermark, enqueue its path into `index_queue`. This catches anything
+   changed while the daemon was down (crash, machine sleep, disabled), without a full unconditional
+   walk-and-reprocess of every file.
 3. **Existence check**: for every path currently in `notes`, verify it still exists on disk (a cheap
    `stat`, not a content read). Delete rows (cascading to `chunks`/`chunk_vectors`/`note_tags`/
    `note_links` per S001's `ON DELETE CASCADE`) for any that don't — catches deletions that happened
@@ -77,6 +82,91 @@ the exclusion existed, or an explicit `mnotes reindex <title>` naming one):
 A single-title `mnotes reindex <title>` for a path matching either kind of exclusion purges it (if
 already indexed) rather than indexing it — naming a note explicitly doesn't override the exclusion,
 it just triggers the same cleanup a background pass would eventually do anyway.
+
+## Symlinked directories
+
+Obsidian officially supports symlinked directories inside a vault (not symlinked files), and this
+indexer follows that: content inside a symlinked directory is indexed as if it were native vault
+content, under a title built from the symlink's own name (e.g. a vault-root symlink named `Memory`
+pointing anywhere on disk produces titles like `Memory/some-note`) — never the resolved realpath.
+This is what lets `.mnotesignore`, `resolveVaultPath`'s containment check (S010), and any future
+glob-based path matching apply to symlinked content with no special-casing: as far as every
+path-facing surface is concerned, the symlink's name in the vault tree *is* the note's location.
+
+**Symlinked files are ignored, not indexed** — matching Obsidian, which doesn't support them.
+`walkVaultForMarkdown` and the live-discovery logic below both apply the same three-way check to a
+symlink entry: `realpathSync` + `statSync` it, then descend if the target is a directory, skip if
+it's a regular file, and skip (rather than throw) if the target doesn't exist (a dangling symlink) —
+this must not crash a startup walk or a full `mnotes reindex` over one stale link. Nested symlinked
+directories (a symlinked directory that itself contains further symlinked directories) are walked
+and watched recursively, with realpath-based cycle detection (a set of already-visited realpaths)
+guarding against a symlink loop or a symlink pointing at an ancestor of itself.
+
+### Why a single recursive `fswatch` isn't enough
+
+Empirically (macOS 1.22.0, kqueue/FSEvents backend — see the platform caveat above), a single
+`fswatch -r vaultRoot` never reports events for changes *inside* a symlinked directory nested in
+that tree, with or without `-L`/`--follow-links` — confirmed by direct testing, not assumed from
+fswatch's documentation. It **does** report `Created`/`Removed` for the symlink entry itself (that's
+a normal change to the real, non-symlinked parent directory), which is the mechanism live discovery
+(below) is built on. Watching a symlinked directory's contents at all requires giving `fswatch` that
+directory as its own explicit watch root — which is why this indexer runs **one additional `fswatch`
+process per currently-known symlinked directory**, alongside the one main process that covers the
+rest of the (non-symlinked) vault tree. The two families never double-report the same event: the
+main watcher's blindness to symlinked subtrees is total, so no dedup logic is needed between them.
+
+Every per-symlink watcher process reports its events using the **resolved realpath** of the watched
+directory, never the vault-relative alias path it was discovered under — true even when the watch
+root argument passed to `fswatch` was the symlink path itself, not its target. `daemon.js` therefore
+maintains a live registry (`alias vault-relative path → { realpath, childProcess }`) built from
+every symlinked directory found during the walk, and rewrites each per-symlink watcher's reported
+absolute path by substituting its realpath prefix for the corresponding alias prefix *before* that
+path reaches the same `isDotPath`/ignore-matcher/debounce pipeline the main watcher's paths go
+through (`defaultCreateWatcher`) — anything reaching `enqueuePath`/`notes.path` must already be a
+clean vault-relative alias path, never a realpath, per S001's path-is-identity contract. Skipping
+this rewrite would produce `../`-prefixed paths that corrupt `notes.path` and fail
+`resolveVaultPath` (S010)'s containment check the next time anyone looks the note up by title.
+
+### Live discovery and teardown
+
+Newly created or removed symlinked directories are picked up live, without requiring a daemon
+restart — matching how ordinary file changes are handled, not the restart-required cadence
+`.mnotesignore` edits still use. The mechanism reuses the main watcher's existing debounce-then
+-recheck-reality design (see "Unified per-path debounce" below) rather than branching on
+`fswatch`'s raw event type:
+
+- When a debounced path settles and `lstatSync` shows it's now a symlink, `realpathSync` + `statSync`
+  the target to decide: a directory registers it (adds it to the registry, spawns its `fswatch`
+  child, and enqueues its existing contents via a scoped version of watermark catch-up, recursing
+  into any symlinked directories found within); a file or a dangling target is ignored (tearing down
+  any prior registration at that alias first, in case a directory symlink was replaced in place).
+- When a debounced path settles and no longer exists at all, and it was a registered alias: kill its
+  `fswatch` child, remove it (and any nested registrations under it) from the registry, and bulk
+  -delete every `notes` row whose path starts with that alias prefix — a removed or renamed symlink
+  takes its whole indexed subtree with it, unlike a single note's deletion.
+
+### Process resilience
+
+Because this multiplies the number of long-running `fswatch` children from one to (potentially)
+many, every child — the main watcher included — gets an `'exit'` handler: an unexpected exit (the
+process wasn't killed by this daemon's own teardown/`stop()` logic, tracked with the same kind of
+`stopped`-flag guard `defaultCreateWatcher` already uses to no-op a debounce firing after shutdown)
+triggers a respawn using the same exponential-backoff schedule the queue drainer uses for failed
+reindex attempts (default: 30s, 2m, 10m; 4 attempts total — see Config knobs; no separate config
+knob is introduced for this). Before respawning a per-symlink child specifically, its realpath is
+rechecked: if the target genuinely no longer resolves to a directory, this isn't a crash to recover
+from — it's routed through the same teardown path live-removal detection uses (above), rather than
+retried into a certain-failure loop. A main-watcher exit is always retried on the same schedule (the
+vault root itself never legitimately disappears out from under a running daemon).
+
+Resource overhead of running many `fswatch` processes was measured directly (not assumed): ~5.8MB
+RSS and 8 open file descriptors per process, ~10ms spawn latency each, no OS-imposed ceiling reached
+scaling to 30 concurrent processes on macOS. No artificial cap on the number of symlinked
+directories is imposed by this indexer as a result. Linux's `fs.inotify.max_user_instances`
+(commonly defaulting to 128, one inotify instance per `fswatch` process) is a real platform ceiling
+this design can hit on a vault with many symlinked directories — handled as a clear, fail-loud
+startup/discovery error surfaced to the user (per CLAUDE.md's fail-loudly rule) rather than a
+self-imposed limit.
 
 ## Live file-change handling
 
@@ -331,7 +421,16 @@ the actual `getContextLogger()` call sites and levels:
 - **Watermark catch-up complete** — `info`, `"watermark catch-up complete"`, context
   `{ watermark, enqueued_count }`.
 - **Existence check complete** — `info`, `"existence check complete"`, context `{ deleted_count }`.
-- **`fswatch` watcher started** — `info`, `"fswatch watcher started"`.
+- **`fswatch` watcher started** — `info`, `"fswatch watcher started"`, context `{ watched_path }` —
+  emitted for the main watcher and every per-symlink watcher alike, distinguished by `watched_path`.
+- **Symlinked directory registered** (discovered at startup walk or via live detection) — `info`,
+  `"symlinked directory registered"`, context `{ alias_path, realpath }`.
+- **Symlinked directory removed** (live detection: the symlink itself was deleted or replaced) —
+  `info`, `"symlinked directory removed"`, context `{ alias_path, notes_deleted_count }`.
+- **`fswatch` watcher exited unexpectedly** (main or per-symlink, not an intentional `stop()`) —
+  `warn`, `"fswatch watcher exited unexpectedly"`, context `{ watched_path, attempt, next_attempt_at }`.
+- **`fswatch` watcher permanently failed to respawn** (final backoff attempt exhausted) — `error`,
+  `"fswatch watcher permanently failed"`, context `{ watched_path, attempts }`.
 - **Queue drainer, per dequeued path**:
   - Skip-unchanged (mtime or content hash unchanged) — `debug`, `"skipping unchanged path"`, context
     `{ note_title }` — high-frequency, low-value outside active debugging, so not `info`.
