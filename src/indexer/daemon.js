@@ -1,5 +1,5 @@
 #!/usr/bin/env -S node --disable-warning=ExperimentalWarning
-import { existsSync, rmSync, statSync, realpathSync } from 'node:fs';
+import { existsSync, rmSync, statSync, realpathSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
@@ -387,6 +387,55 @@ export function defaultSocketPath() {
     return join(defaultAppSupportDir(), 'daemon.sock');
 }
 
+export function defaultLockPath() {
+    return join(defaultAppSupportDir(), 'daemon.pid');
+}
+
+function isProcessAlive(pid) {
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch (err) {
+        // ESRCH: no such process — the lock's owner is dead. EPERM: it exists but is owned by
+        // another user, which can't happen for this single-user local tool in practice; treated as
+        // alive anyway to fail loudly rather than risk a real duplicate.
+        return err.code === 'EPERM';
+    }
+}
+
+function readLockedPid(lockPath) {
+    const pid = Number(readFileSync(lockPath, 'utf8').trim());
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+
+// Refuses to start a second live daemon so at most one process ever spawns fswatch children —
+// registerSymlinkDir already guards against double-registering the same alias *within* one
+// instance, so one live daemon is sufficient to guarantee one set of children. A lock file left
+// behind by an unclean exit (crash, SIGKILL, power loss) names a now-dead pid, fails the liveness
+// check below, and is silently reclaimed — no manual cleanup step for that path. This only refuses
+// to start when a second instance is genuinely running, which is the one case it's meant to block.
+export function acquireLock(lockPath) {
+    if (existsSync(lockPath)) {
+        const existingPid = readLockedPid(lockPath);
+        if (existingPid !== null && isProcessAlive(existingPid)) {
+            throw new Error(
+                `mnotes daemon already running (pid ${existingPid}) — refusing to start a second `
+                + 'instance; use `mnotes daemon restart` instead',
+            );
+        }
+    }
+    writeFileSync(lockPath, String(process.pid));
+}
+
+// Only removes a lock this process itself owns, so a stop() running after a newer instance has
+// already reclaimed a stale lock (acquireLock above) can't delete that instance's lock out from
+// under it.
+export function releaseLock(lockPath) {
+    if (existsSync(lockPath) && readLockedPid(lockPath) === process.pid) {
+        rmSync(lockPath);
+    }
+}
+
 function handleIpcRequest(line, socket, ctx) {
     const { vaultRoot, db, deps, gate } = ctx;
     const request = JSON.parse(line);
@@ -496,6 +545,7 @@ export async function startDaemon(options = {}) {
         vaultRoot,
         dbPath,
         socketPath = defaultSocketPath(),
+        lockPath = defaultLockPath(),
         embeddingModel = DEFAULT_EMBEDDING_MODEL,
         embeddingVersion = DEFAULT_EMBEDDING_VERSION,
         embed = realEmbed,
@@ -505,6 +555,10 @@ export async function startDaemon(options = {}) {
         debounceMs = DEFAULT_DEBOUNCE_MS,
         backoffSchedule = DEFAULT_BACKOFF_SCHEDULE_MS,
     } = options;
+
+    // Must happen before any other side effect (DB open, watchers, IPC socket) — a second live
+    // instance should fail before touching any of that, not after.
+    acquireLock(lockPath);
 
     getContextLogger().info('daemon started');
 
@@ -543,9 +597,40 @@ export async function startDaemon(options = {}) {
         watcher.stop();
         await new Promise((resolve) => ipcServer.close(resolve));
         db.close();
+        releaseLock(lockPath);
     }
 
     return { db, stop };
+}
+
+// Wires SIGTERM/SIGINT to the daemon's own stop() so a normal `launchctl stop`/`kill <pid>` runs
+// the real teardown path (watcher.stop(), which kills the main fswatch child and every per-symlink
+// one — see live-watcher.js/fswatch-watcher.js) instead of node's default signal action, which is
+// immediate termination with no handler run at all. That default action previously left every
+// spawned fswatch child orphaned rather than killed; injectable onSignal/exitFn so this is testable
+// without touching the real process object or actually exiting the test runner.
+export function registerShutdownHandlers(stop, {
+    signals = [ 'SIGTERM', 'SIGINT' ], onSignal = process.on, exitFn = process.exit,
+} = {}) {
+    let shuttingDown = false;
+
+    function handleSignal(signal) {
+        if (shuttingDown) {
+            return;
+        }
+        shuttingDown = true;
+        getContextLogger().info('daemon shutting down', { signal });
+        stop()
+            .then(() => exitFn(0))
+            .catch((err) => {
+                getContextLogger().error('daemon shutdown failed', { error_message: err.message });
+                exitFn(1);
+            });
+    }
+
+    for (const signal of signals) {
+        onSignal(signal, () => handleSignal(signal));
+    }
 }
 
 // The actual process entry point — everything above is built as an importable, independently
@@ -557,12 +642,14 @@ export async function main() {
         dtype: config.index.embedding_dtype,
         idleTimeoutMs: config.index.model_idle_unload_minutes * 60 * 1000,
     });
-    return startDaemon({
+    const daemon = await startDaemon({
         vaultRoot: config.vault_path,
         dbPath: config.db_path,
         debounceMs: config.index.debounce_ms,
         backoffSchedule: config.index.retry_backoff_seconds.map((seconds) => seconds * 1000),
     });
+    registerShutdownHandlers(daemon.stop);
+    return daemon;
 }
 
 // S005 "Logging": daemon.js is a runWithLogger root — this is the one place in the whole process
@@ -576,5 +663,10 @@ export async function main() {
 // realpathSync(argv[1]), not a raw string compare — see the identical comment in cli/main.js.
 if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
     process.title = 'mnotes-indexer';
-    runWithLogger(getLogger('indexer', defaultLogDir()), () => main());
+    // Without this catch, a rejection from main() — most notably acquireLock() refusing a second
+    // live instance — would be an unhandled promise rejection instead of a clean, logged exit.
+    runWithLogger(getLogger('indexer', defaultLogDir()), () => main()).catch((err) => {
+        getContextLogger().error('daemon failed to start', { error_message: err.message });
+        process.exitCode = 1;
+    });
 }

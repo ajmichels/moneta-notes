@@ -69,7 +69,7 @@ raw stdout/stderr, redirected there by `launchd`/`systemd` rather than written b
 
 | File | Contents |
 |---|---|
-| `indexer.log` | Daemon lifecycle (started, schema check, `fswatch` watcher started), queue drain activity, embedding model load/idle-unload, hash mismatches, permanent queue-item failures. |
+| `indexer.log` | Daemon lifecycle (started, schema check, `fswatch` watcher started, graceful shutdown on SIGTERM/SIGINT), queue drain activity, embedding model load/idle-unload, hash mismatches, permanent queue-item failures. |
 | `mcp-server.log` | MCP server lifecycle (started, stdio transport connected/disconnected), protocol-level errors. Tool-call outcomes are **not** here. |
 | `audit.log` | Every note/attachment mutation — MCP tool calls (`note_write`/`note_edit`/`note_append`/`note_rename`/`attachment_write`) and CLI mutating commands (`write`/`edit`/`append`/`rename`/`attachment write`) — with outcome and, for MCP calls, the caller's stated `reason`. |
 | `daemon.stdout.log` / `daemon.stderr.log` | The indexing daemon process's own stdout/stderr — whatever Node prints outside of `logger.js` (an experimental-feature warning, an uncaught exception's stack trace). Normally empty; check `daemon.stderr.log` first if the daemon won't start at all, before it's even reached the point of writing to `indexer.log`. |
@@ -108,6 +108,12 @@ if one of them ever does fill up with repeated warnings.
   hybrid search has no local-model fallback (S005) — it always needs the daemon up.
 - **Daemon not picking up a config change** — `mnotes daemon restart` (config is read once at
   startup).
+- **`indexer.log` shows `daemon failed to start` / "mnotes daemon already running (pid ...)"** — the
+  daemon refuses to start a second live instance against the same lock file (normally only reachable
+  by running `node src/indexer/daemon.js` manually while the real launchd/systemd-managed one is
+  already up). Stop whichever instance you didn't mean to run; a lock file left behind by a genuine
+  crash is detected as stale and reclaimed automatically on the next start, so this never requires
+  manually deleting the lock file yourself.
 - **(macOS) `./scripts/install.sh` fails with `Bootstrap failed: 5: Input/output error`** (possibly
   suggesting you re-run as root — don't; the daemon needs your user session, not root) — this is
   launchd's unhelpful way of saying the LaunchAgent label was already loaded from a previous install

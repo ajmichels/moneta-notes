@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
-    mkdtempSync, rmSync, writeFileSync, utimesSync, readFileSync, mkdirSync, symlinkSync,
+    mkdtempSync, rmSync, writeFileSync, utimesSync, readFileSync, mkdirSync, symlinkSync, existsSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,6 +12,7 @@ import {
     enqueuePath, dequeueNextPath, processPath,
     recordFailure, drainQueueOnce, watermarkCatchup, existenceCheck, ignoredPathsCheck,
     runReindex, createIpcServer, defaultSocketPath, startDaemon, createSerialGate, EXTRACTION_VERSION,
+    registerShutdownHandlers, acquireLock, releaseLock,
 } from './daemon.js';
 import { appSupportDir } from '../platform/index.js';
 import { cleanupTempDir } from '../../vitest.helpers.js';
@@ -966,11 +967,13 @@ describe('startDaemon', () => {
         writeNote(vaultRoot, 'Preexisting.md', 'already on disk', 1000);
         const socketDir = makeTempVault();
         const socketPath = join(socketDir, 'daemon.sock');
+        const lockPath = join(socketDir, 'daemon.pid');
 
         const daemon = await startDaemon({
             vaultRoot,
             dbPath: ':memory:',
             socketPath,
+            lockPath,
             createWatcher: () => ({ stop() {} }), // fswatch itself is covered by Task 16's real-binary test
             chunkText: fakeChunkText,
             embed: fakeEmbed,
@@ -1013,11 +1016,13 @@ describe('startDaemon', () => {
         writeFileSync(join(vaultRoot, '.mnotesignore'), 'Templates/\n');
         const socketDir = makeTempVault();
         const socketPath = join(socketDir, 'daemon.sock');
+        const lockPath = join(socketDir, 'daemon.pid');
 
         const daemon = await startDaemon({
             vaultRoot,
             dbPath: ':memory:',
             socketPath,
+            lockPath,
             createWatcher: () => ({ stop() {} }),
             chunkText: fakeChunkText,
             embed: fakeEmbed,
@@ -1039,11 +1044,13 @@ describe('startDaemon', () => {
         const dbPath = join(makeTempVault(), 'index.db');
         const socketDir = makeTempVault();
         const socketPath = join(socketDir, 'daemon.sock');
+        const lockPath = join(socketDir, 'daemon.pid');
 
         const first = await startDaemon({
             vaultRoot,
             dbPath,
             socketPath,
+            lockPath,
             createWatcher: () => ({ stop() {} }),
             chunkText: fakeChunkText,
             embed: fakeEmbed,
@@ -1060,6 +1067,7 @@ describe('startDaemon', () => {
             vaultRoot,
             dbPath,
             socketPath,
+            lockPath,
             createWatcher: () => ({ stop() {} }),
             chunkText: fakeChunkText,
             embed: fakeEmbed,
@@ -1077,6 +1085,7 @@ describe('startDaemon', () => {
         const vaultRoot = makeTempVault();
         const socketDir = makeTempVault();
         const socketPath = join(socketDir, 'daemon.sock');
+        const lockPath = join(socketDir, 'daemon.pid');
         const logDir = mkdtempSync(join(tmpdir(), 'mnotes-daemon-test-log-'));
         const logger = getLogger('indexer', logDir);
 
@@ -1084,6 +1093,7 @@ describe('startDaemon', () => {
             vaultRoot,
             dbPath: ':memory:',
             socketPath,
+            lockPath,
             createWatcher: () => ({ stop() {} }),
             chunkText: fakeChunkText,
             embed: fakeEmbed,
@@ -1106,6 +1116,7 @@ describe('startDaemon', () => {
         writeNote(vaultRoot, 'Slow.md', 'content', 1000);
         const socketDir = makeTempVault();
         const socketPath = join(socketDir, 'daemon.sock');
+        const lockPath = join(socketDir, 'daemon.pid');
 
         let embedCalls = 0;
         let releaseEmbed;
@@ -1120,6 +1131,7 @@ describe('startDaemon', () => {
             vaultRoot,
             dbPath: ':memory:',
             socketPath,
+            lockPath,
             createWatcher: () => ({ stop() {} }),
             chunkText: fakeChunkText,
             embed: slowEmbed,
@@ -1147,6 +1159,7 @@ describe('startDaemon', () => {
         writeNote(vaultRoot, 'Slow.md', 'content', 1000);
         const socketDir = makeTempVault();
         const socketPath = join(socketDir, 'daemon.sock');
+        const lockPath = join(socketDir, 'daemon.pid');
 
         let embedCalls = 0;
         let releaseEmbed;
@@ -1161,6 +1174,7 @@ describe('startDaemon', () => {
             vaultRoot,
             dbPath: ':memory:',
             socketPath,
+            lockPath,
             createWatcher: () => ({ stop() {} }),
             chunkText: fakeChunkText,
             embed: slowEmbed,
@@ -1216,6 +1230,7 @@ describe('startDaemon', () => {
         writeNote(vaultRoot, 'Slow.md', 'content', 1000);
         const socketDir = makeTempVault();
         const socketPath = join(socketDir, 'daemon.sock');
+        const lockPath = join(socketDir, 'daemon.pid');
 
         let embedCalls = 0;
         let releaseEmbed;
@@ -1230,6 +1245,7 @@ describe('startDaemon', () => {
             vaultRoot,
             dbPath: ':memory:',
             socketPath,
+            lockPath,
             createWatcher: () => ({ stop() {} }),
             chunkText: fakeChunkText,
             embed: slowEmbed,
@@ -1263,12 +1279,14 @@ describe('startDaemon', () => {
         const vaultRoot = makeTempVault();
         const socketDir = makeTempVault();
         const socketPath = join(socketDir, 'daemon.sock');
+        const lockPath = join(socketDir, 'daemon.pid');
 
         let receivedDebounceMs;
         const daemon = await startDaemon({
             vaultRoot,
             dbPath: ':memory:',
             socketPath,
+            lockPath,
             createWatcher: (root, db, { debounceMs } = {}) => {
                 receivedDebounceMs = debounceMs;
                 return { stop() {} };
@@ -1290,6 +1308,7 @@ describe('startDaemon', () => {
         writeNote(vaultRoot, 'AlwaysFails.md', 'content', 1000);
         const socketDir = makeTempVault();
         const socketPath = join(socketDir, 'daemon.sock');
+        const lockPath = join(socketDir, 'daemon.pid');
 
         const failingEmbed = async () => { throw new Error('embed failed'); };
 
@@ -1297,6 +1316,7 @@ describe('startDaemon', () => {
             vaultRoot,
             dbPath: ':memory:',
             socketPath,
+            lockPath,
             createWatcher: () => ({ stop() {} }),
             chunkText: fakeChunkText,
             embed: failingEmbed,
@@ -1318,5 +1338,140 @@ describe('startDaemon', () => {
         });
 
         await daemon.stop();
+    });
+
+    it('refuses to start a second instance against the same lock file while the first is running, '
+        + 'then allows a fresh start once it stops', async () => {
+        const vaultRoot = makeTempVault();
+        const socketDir = makeTempVault();
+        const lockPath = join(socketDir, 'daemon.pid');
+
+        const first = await startDaemon({
+            vaultRoot,
+            dbPath: ':memory:',
+            socketPath: join(socketDir, 'daemon.sock'),
+            lockPath,
+            createWatcher: () => ({ stop() {} }),
+            chunkText: fakeChunkText,
+            embed: fakeEmbed,
+            embeddingModel: 'test-model',
+            embeddingVersion: 'v1',
+            drainIntervalMs: null,
+        });
+
+        await expect(startDaemon({
+            vaultRoot,
+            dbPath: ':memory:',
+            socketPath: join(socketDir, 'second.sock'),
+            lockPath,
+            createWatcher: () => ({ stop() {} }),
+            chunkText: fakeChunkText,
+            embed: fakeEmbed,
+            embeddingModel: 'test-model',
+            embeddingVersion: 'v1',
+            drainIntervalMs: null,
+        })).rejects.toThrow(/already running/);
+
+        await first.stop();
+
+        const second = await startDaemon({
+            vaultRoot,
+            dbPath: ':memory:',
+            socketPath: join(socketDir, 'second.sock'),
+            lockPath,
+            createWatcher: () => ({ stop() {} }),
+            chunkText: fakeChunkText,
+            embed: fakeEmbed,
+            embeddingModel: 'test-model',
+            embeddingVersion: 'v1',
+            drainIntervalMs: null,
+        });
+        await second.stop();
+    });
+});
+
+describe('acquireLock / releaseLock', () => {
+    function tempLockPath() {
+        return join(makeTempVault(), 'daemon.pid');
+    }
+
+    it('acquires an unheld lock, writing this process\'s own pid', () => {
+        const lockPath = tempLockPath();
+        acquireLock(lockPath);
+        expect(readFileSync(lockPath, 'utf8').trim()).toBe(String(process.pid));
+    });
+
+    it('refuses to acquire a lock held by a still-alive pid', () => {
+        const lockPath = tempLockPath();
+        writeFileSync(lockPath, String(process.pid)); // this test process is definitely alive
+        expect(() => acquireLock(lockPath)).toThrow(/already running/);
+    });
+
+    it('reclaims a stale lock left by a pid that no longer exists, with no manual cleanup needed', () => {
+        const lockPath = tempLockPath();
+        writeFileSync(lockPath, '999999'); // implausible as a real pid in a test environment
+        acquireLock(lockPath);
+        expect(readFileSync(lockPath, 'utf8').trim()).toBe(String(process.pid));
+    });
+
+    it('releaseLock only removes a lock this process owns', () => {
+        const lockPath = tempLockPath();
+        writeFileSync(lockPath, '999999');
+        releaseLock(lockPath);
+        expect(existsSync(lockPath)).toBe(true); // untouched — owned by a different pid
+
+        writeFileSync(lockPath, String(process.pid));
+        releaseLock(lockPath);
+        expect(existsSync(lockPath)).toBe(false);
+    });
+
+    it('releaseLock on a missing lock file is a no-op', () => {
+        expect(() => releaseLock(tempLockPath())).not.toThrow();
+    });
+});
+
+describe('registerShutdownHandlers', () => {
+    function fakeSignalRegistry() {
+        const handlers = new Map();
+        return {
+            onSignal: (signal, handler) => handlers.set(signal, handler),
+            fire: (signal) => handlers.get(signal)(),
+        };
+    }
+
+    it('calls stop() and exits 0 when a registered signal fires', async () => {
+        const { onSignal, fire } = fakeSignalRegistry();
+        const stop = vi.fn().mockResolvedValue();
+        const exitFn = vi.fn();
+
+        registerShutdownHandlers(stop, { signals: [ 'SIGTERM' ], onSignal, exitFn });
+        fire('SIGTERM');
+        await vi.waitFor(() => expect(exitFn).toHaveBeenCalledWith(0));
+
+        expect(stop).toHaveBeenCalledOnce();
+    });
+
+    it('exits 1 if stop() rejects', async () => {
+        const { onSignal, fire } = fakeSignalRegistry();
+        const stop = vi.fn().mockRejectedValue(new Error('boom'));
+        const exitFn = vi.fn();
+
+        registerShutdownHandlers(stop, { signals: [ 'SIGTERM' ], onSignal, exitFn });
+        fire('SIGTERM');
+        await vi.waitFor(() => expect(exitFn).toHaveBeenCalledWith(1));
+    });
+
+    it('only runs stop() once across repeated or multiple signals', async () => {
+        const { onSignal, fire } = fakeSignalRegistry();
+        const stop = vi.fn().mockResolvedValue();
+        const exitFn = vi.fn();
+
+        registerShutdownHandlers(stop, { signals: [ 'SIGTERM', 'SIGINT' ], onSignal, exitFn });
+        fire('SIGTERM');
+        fire('SIGINT');
+        fire('SIGTERM');
+        await vi.waitFor(() => expect(exitFn).toHaveBeenCalledOnce());
+
+        expect(stop).toHaveBeenCalledOnce();
     });
 });
