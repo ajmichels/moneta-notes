@@ -6,7 +6,7 @@ Depends on: `S001-data-model` (schema change: `notes.metadata_json`), `S003-note
 parsing, the `id`/`created` fields), `S004-grep-tags` (tag matching, reused not duplicated),
 `S010-shared-utilities`
 Amended by: `S015-readonly-paths` (`readonly` output field on `metadata_query`, optional `vaultRoot`
-input)
+input), `S009-config-and-install` (multi-vault support: optional `vault` argument on both tools)
 Consumed by: `S005-indexing-daemon` (extraction during reindex), `S006-cli`, `S007-mcp-server`
 
 ## Purpose
@@ -221,8 +221,9 @@ error — tags is a flat vocabulary, not a nested structure).
 
 ### `metadata_keys`
 
-**Input**: `reason<string>`. **Output**: `key<string>`, `type<'string'|'number'|'boolean'|'date'>`,
-`example<any>`, `notes_with_key<int>`.
+**Input**: `?vault<string>` (S009, resolved via `resolveVault(config, name)` same as every other
+vault-scoped tool — see S007), `reason<string>`. **Output**: `key<string>`,
+`type<'string'|'number'|'boolean'|'date'>`, `example<any>`, `notes_with_key<int>`.
 
 Discovery: walks every note's `metadata_json` via `json_tree`, normalizes each `fullkey` (strips the
 `$.` prefix, strips array-index segments like `[0]`, strips SQLite's quoting around irregular key
@@ -244,8 +245,8 @@ fallback).
 
 **Input**: `filters<array>` (each `{ key<string>, op<'eq'|'gt'|'gte'|'lt'|'lte'|'in'|'exists'>,
 value?<string|number|boolean|array>, negate?<bool> }`, non-empty), `match?<'all'|'any'>='all'`,
-`?vaultRoot<string>` (S015), `reason<string>`. **Output**: `note_title<string>`,
-`file_line_count<int>` — same shape as `tag_notes`.
+`?vaultRoot<string>` (S015), `?vault<string>` (S009), `reason<string>`. **Output**:
+`note_title<string>`, `file_line_count<int>` — same shape as `tag_notes`.
 
 **`readonly<bool>` (S015)**: same treatment as `tag_notes` (S004) — `metadataQuery(db, options)` gains
 an optional `vaultRoot`; when given, each row gains `readonly: true` present only when the note matches
@@ -255,9 +256,10 @@ real boolean at this layer; `format.js` renders it as the `read-only`/empty-cell
 
 ## CLI (`mnotes metadata keys` / `mnotes metadata query`)
 
-`mnotes metadata keys [--json]` mirrors `mnotes tags list`.
+`mnotes metadata keys [--vault=<name>] [--json]` mirrors `mnotes tags list`.
 
-`mnotes metadata query [--filter=...]... [--exists=key]... [--missing=key]... [--match=any] [--json]`:
+`mnotes metadata query [--filter=...]... [--exists=key]... [--missing=key]... [--match=any]
+[--vault=<name>] [--json]`:
 each `--filter` is a small friendly string (`"status=active"`, `"priority>3"`, `"due<2026-01-01"`,
 `"depends_on.project=foo/bar"`, `"status in draft,review"`, `"status!=active"`), parsed into the exact
 same `{key, op, value, negate}` shape the MCP tool takes directly — `=`/`!=`/`>`/`>=`/`<`/`<=` map to

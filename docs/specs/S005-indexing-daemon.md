@@ -5,7 +5,8 @@ Owns: `src/indexer/daemon.js`, `src/indexer/embed.js`, `src/indexer/fswatch-watc
 `src/indexer/vault-walk.js`, `src/indexer/live-watcher.js`
 Depends on: `S001-data-model` (including `enqueuePath`, which `daemon.js` re-exports), `S004-grep-tags`
 (tag extraction, invoked here during processing), `S009-config-and-install` (`src/platform` supplies
-this daemon's app-support/log directory paths — see below), `S010-shared-utilities`, `S011-links` (link
+this daemon's app-support/log directory paths, and `resolveVault`/`listVaults` supply the set of vaults
+this daemon watches — see "Multi-vault daemon" below), `S010-shared-utilities`, `S011-links` (link
 extraction, invoked here during processing)
 Consumed by: `S006-cli` (reindex/stats/search talk to this daemon), `S007-mcp-server` (search talks to
 this daemon), `S009-config-and-install` (new config knobs introduced here)
@@ -48,6 +49,40 @@ pipeline as an explicit reindex request. This is what gives the system its resil
 activity (a flurry of saves, a bulk file operation, a big `git checkout`): everything lands in one
 durable, serially-drained queue rather than being handled by different code paths depending on how it
 was triggered.
+
+## Multi-vault daemon
+
+Per S009, a machine can configure more than one vault. There is still exactly **one** daemon process —
+running one per vault was explicitly rejected as a resource-usage concern — so this daemon watches
+every configured vault concurrently inside that single process, sharing only what's actually shared
+across vaults and keeping the rest fully isolated:
+
+- **Shared, once per process**: the embedding pipeline (a single lazily-loaded, idle-unloaded singleton
+  per "Embedding pipeline lifecycle" below — this is the entire point of one daemon instead of N; a
+  query or chunk embed from *any* vault reuses the same loaded model) and the Unix-socket IPC listener
+  (one socket, `daemon.sock`, per "IPC" below — every request now names which vault it targets).
+- **Independent, once per configured vault**: everything else this spec otherwise describes as
+  singular — the SQLite connection (each vault's own `dbPath`, per S001's per-vault-file design), the
+  main `fswatch` process over that vault's root (plus any of its own per-symlink watchers, see
+  "Symlinked directories" below — symlink registries are never shared across vaults), the debounce
+  state, the `index_queue` table (native to each vault's own DB file already, so no extra work needed
+  there), and the serial gate (`createSerialGate()`) guarding that vault's own queue drain against its
+  own IPC-triggered reindexes. A vault's serial gate is scoped to that vault specifically — an IPC
+  reindex against `dnd` never waits behind a background drain tick for `notes`, and a crash or
+  permanent `fswatch` failure in one vault's watcher (per "Process resilience" below) doesn't affect any
+  other vault's watcher, queue, or connection.
+- **Startup**: `daemon.js`'s `main()` calls `loadConfig()` then `listVaults(config)` (S009) to get every
+  configured vault, resolves each via `resolveVault(config, name)`, and runs the full "Startup sequence"
+  below **independently, once per vault** — one schema check, one watermark catch-up, one existence
+  check, one ignored-paths check, one `fswatch` watcher start, each against that vault's own connection
+  and root. `acquireLock`/the daemon PID file stay singular (one daemon process, one lock), so a second
+  `mnotes daemon start` still refuses to start a duplicate instance regardless of how many vaults are
+  configured.
+- **Logging**: every log line this spec defines below gains a `vault` context field (the vault's
+  configured name) alongside whatever fields it already carries, since `indexer.log` is now shared
+  across every vault's activity and a line with no vault attribution would be ambiguous the moment more
+  than one vault is configured. A single-vault setup still gets this field — it's just always the same
+  value — rather than making the log line shape itself conditional on vault count.
 
 ## Startup sequence
 
@@ -370,42 +405,54 @@ excluded — matches S001's `chunks.char_start`/`char_end` being offsets into th
 
 ## IPC: CLI/MCP ↔ daemon
 
-A Unix domain socket at `daemon.sock` inside `src/platform`'s `appSupportDir()` (`~/Library/Application
-Support/mnotes/daemon.sock` on macOS, `${XDG_DATA_HOME:-~/.local/share}/mnotes/daemon.sock` on Linux —
-S009), so `mnotes reindex`, query
-embedding for `search --mode semantic|hybrid` (CLI and MCP alike), and any other command needing
-daemon-backed work reuse the daemon's warm model instead of loading their own.
+A **single** Unix domain socket at `daemon.sock` inside `src/platform`'s `appSupportDir()`
+(`~/Library/Application Support/mnotes/daemon.sock` on macOS,
+`${XDG_DATA_HOME:-~/.local/share}/mnotes/daemon.sock` on Linux — S009), shared across every configured
+vault (per "Multi-vault daemon" above) — not one socket per vault — so `mnotes reindex`, query embedding
+for `search --mode semantic|hybrid` (CLI and MCP alike), and any other command needing daemon-backed
+work reuse the daemon's warm model instead of loading their own.
 
-- **Protocol**: newline-delimited JSON messages over the socket connection.
-- **`{ action: "embed", text }`**: used by `core/search.js`'s semantic/hybrid path (via `embed.js`'s
-  `embedQueryOverSocket`, injected as `deps.embed` in both `cli/main.js`'s `buildRealDeps()` and
-  `mcp/server.js`'s `main()`) to embed query text without loading a local model copy. Daemon calls its
-  own `embedQuery()` (the same shared pipeline instance document embedding uses) and responds with a
-  single `{ vector: [...] }` message, or `{ error: message }` on failure, then closes the connection —
-  request/response, not a stream, unlike `reindex` below. Deliberately **not** run under
-  `createSerialGate()`: that gate exists to keep `processPath` from running on the same path twice
-  concurrently (a DB-mutation correctness concern), and embedding a query touches no shared queue/DB
-  state — so an interactive search isn't forced to wait behind an in-flight bulk reindex.
-- **`mnotes reindex` (no title)**: CLI connects, sends `{ action: "reindex" }`. Daemon walks the vault
-  and enqueues every `.md` file's path (not just changed ones — this is the ad hoc "safe to run
-  anytime" full-vault command from the README; unchanged-and-current files are still cheap since the
+- **Protocol**: newline-delimited JSON messages over the socket connection. Every request carries an
+  optional `vault<string>` field naming which configured vault it targets — the daemon resolves it via
+  the same `resolveVault(config, name)` order S009 defines (explicit name → `default_vault` → sole
+  vault → error), so a caller that only ever has one vault configured can omit `vault` entirely and get
+  identical behavior to before this feature existed. An unresolvable `vault` name is a hard error
+  (`{ error: message }`, connection closed) — the same fail-loud posture `resolveVault` already has at
+  the config layer, just surfaced over the socket instead of thrown in-process.
+- **`{ action: "embed", vault?, text }`**: used by `core/search.js`'s semantic/hybrid path (via
+  `embed.js`'s `embedQueryOverSocket`, injected as `deps.embed` in both `cli/main.js`'s
+  `buildRealDeps()` and `mcp/server.js`'s `main()`) to embed query text without loading a local model
+  copy. `vault` selects nothing about *how* the embed happens (the pipeline is shared process-wide, per
+  "Multi-vault daemon" above) — it exists on this action only for symmetry and future-proofing (e.g. a
+  per-vault embedding model override, not currently supported); today the daemon ignores it for
+  `embed` specifically and always uses the one shared pipeline. Daemon calls its own `embedQuery()`
+  and responds with a single `{ vector: [...] }` message, or `{ error: message }` on failure, then
+  closes the connection — request/response, not a stream, unlike `reindex` below. Deliberately **not**
+  run under any vault's `createSerialGate()`: that gate exists to keep `processPath` from running on
+  the same path twice concurrently (a DB-mutation correctness concern), and embedding a query touches
+  no shared queue/DB state — so an interactive search isn't forced to wait behind an in-flight bulk
+  reindex, for its own vault or any other.
+- **`{ action: "reindex", vault?, noteTitle? }` (no `noteTitle`)**: CLI connects, sends
+  `{ action: "reindex", vault: "dnd" }` (or omits `vault` for the default). Daemon walks the *resolved*
+  vault's root and enqueues every `.md` file's path (not just changed ones — this is the ad hoc "safe to
+  run anytime" full-vault command from the README; unchanged-and-current files are still cheap since the
   skip-unchanged check in the drainer handles them — but a file with stale chunks, per the
-  embedding-version check above, does get re-embedded even with no content change). Daemon streams
-  one JSON
-  message per completed path (including per-attempt failure messages as they happen, per the retry
-  behavior above) back over the same connection, then a final summary message
+  embedding-version check above, does get re-embedded even with no content change), running entirely
+  against that vault's own connection and gate, with no effect on any other vault's queue or state.
+  Daemon streams one JSON message per completed path (including per-attempt failure messages as they
+  happen, per the retry behavior above) back over the same connection, then a final summary message
   (`{ reindexed, skipped, failed }` counts) once every enqueued path has reached a final state
   (success or exhausted retries), then closes the connection.
-- **`mnotes reindex <title>`**: same, but scoped to one path. The connection stays open through that
-  path's full attempt/backoff cycle if it fails — the CLI blocks and prints each attempt's outcome as
-  it happens, up through final success or final failure. This is a deliberate choice: watching retries
-  happen in real time is more useful for an interactively-run debug command than either hiding them
-  (fire-and-forget) or returning after just the first attempt.
-- **Daemon not running**: both `mnotes reindex` and an `embed` request (so `search
-  --mode=semantic|hybrid` from either the CLI or the MCP `search` tool) are a **hard error** — no
-  fallback to a locally-loaded model. Keeps exactly one code path for embedding work (the daemon's),
-  rather than maintaining a second standalone-embedding path used only when the daemon happens to be
-  down.
+- **`{ action: "reindex", vault?, noteTitle }`**: same, but scoped to one path within the resolved
+  vault. The connection stays open through that path's full attempt/backoff cycle if it fails — the CLI
+  blocks and prints each attempt's outcome as it happens, up through final success or final failure.
+  This is a deliberate choice: watching retries happen in real time is more useful for an
+  interactively-run debug command than either hiding them (fire-and-forget) or returning after just the
+  first attempt.
+- **Daemon not running**: both `reindex` and an `embed` request (so `search --mode=semantic|hybrid`
+  from either the CLI or the MCP `search` tool) are a **hard error** — no fallback to a locally-loaded
+  model. Keeps exactly one code path for embedding work (the daemon's), rather than maintaining a
+  second standalone-embedding path used only when the daemon happens to be down.
 
 ## Config knobs introduced here (flagged for S009)
 

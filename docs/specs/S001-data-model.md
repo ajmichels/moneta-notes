@@ -4,6 +4,8 @@ Status: **Approved**
 Owns: `src/core/db.js`
 Consumed by: `S002-search`, `S003-notes`, `S004-grep-tags`, `S005-indexing-daemon`, `S006-cli`,
 `S011-links`
+Amended by: `S009-config-and-install` (multi-vault support: one SQLite file per configured vault,
+each with this exact schema — see "Scope: per-vault, not per-machine" below)
 
 ## Purpose
 
@@ -12,6 +14,19 @@ Defines the SQLite schema that backs the index: full-text search (FTS5), semanti
 swaps detectable. This is a pure *cache* of the vault — every row here is reconstructable from the
 files on disk via `mnotes reindex`. Nothing in this database is a source of truth; the vault files
 are.
+
+## Scope: per-vault, not per-machine
+
+Per S009, a machine can configure multiple named vaults, each backed by its own SQLite file at its
+own `db_path` — this schema is what each of those files contains, independently. There is no
+`vault_id` column anywhere below and no cross-vault table: two vaults' databases share no rows, no
+FTS5 index, and no `chunk_vectors` table, so **`notes.path` (and therefore note title) is unique
+within a vault, not across every vault on the machine** — the same title can exist in two different
+vaults without collision, since they're different databases entirely. A daemon watching multiple
+vaults (S005) opens one connection per vault and runs every operation below against whichever
+connection matches the path being processed; nothing in this file changes to support that — from
+`core/db.js`'s perspective, multi-vault is "the same schema, opened more than once," not a new
+concept this schema needs to represent.
 
 `core/db.js` owns schema creation, migration (version-check-and-rebuild), and low-level connection
 setup. It exposes plain functions that `core/notes.js`, `core/search.js`, and `core/tags.js` call —

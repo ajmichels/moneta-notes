@@ -4,15 +4,28 @@ Status: **Approved**
 Owns: `src/mcp/server.js`, `src/mcp/tools.js`, `src/mcp/prompts.js` (stub only — see Prompts)
 Depends on: `S001-data-model`, `S002-search`, `S003-notes`, `S004-grep-tags`, `S012-attachments`
 Amended by: `S015-readonly-paths` (write-guard rejection + `readonly` field/column on every affected
-tool's description, per tool below)
+tool's description, per tool below), `S009-config-and-install` (multi-vault support: `vault` argument
+on every vault-scoped tool, plus the new `list_vaults` tool)
 Consumed by: Claude Code / Claude Desktop
 
 ## Purpose
 
 Defines the finalized MCP tool set — superseding the README's tool section, updated per S002/S003
 decisions (`note_rename` is new, `note_edit` gains `metadata`, `search` gains `limit`; S012 adds
-`attachment_read`/`attachment_write`) — plus server bootstrap and how `core/` errors map to MCP tool
+`attachment_read`/`attachment_write`; S009 adds an optional `vault` argument to every vault-scoped tool
+plus the new `list_vaults` tool) — plus server bootstrap and how `core/` errors map to MCP tool
 responses. Prompts are out of scope (see below).
+
+## `vault` argument and vault resolution
+
+Every vault-scoped tool below (every tool except `list_vaults` itself) gains an optional
+`vault<string>` input argument, resolved the same way S006's `--vault` flag is: `resolveVault(config,
+name)` (`src/config.js`, S009) — explicit `vault` wins, else `default_vault`, else the sole configured
+vault, else a hard error naming every configured vault. An unresolvable `vault` name surfaces as a
+normal thrown error, handled by the existing "Error mapping" rule below with no special-casing. A
+single-vault setup (the common case, including every config predating this feature) never requires a
+caller to pass `vault` at all — Claude only needs to reach for it once `list_vaults` shows more than one
+vault configured.
 
 ## Transport
 
@@ -47,7 +60,8 @@ generic failure with the specific reason lost.
 Two response shapes, chosen per tool for token efficiency (per the README's design principles):
 
 - **Pipe-delimited columnar plain text** for every list-style tool — `search`, `grep`, `tag_list`,
-  `tag_notes`. A header row plus one row per result, no JSON object/array wrapper, no per-field key
+  `tag_notes`, `list_vaults`. A header row plus one row per result, no JSON object/array wrapper, no
+  per-field key
   repetition across rows. Deliberately **not JSON**: a JSON array of objects repeats every field name
   once per row, pure token overhead for tabular data Claude scans down a column at a time — the header
   row already documents the shape once.
@@ -60,11 +74,13 @@ Two response shapes, chosen per tool for token efficiency (per the README's desi
 ## Tool set
 
 Every tool takes `reason<string>` (required) — logged per S008, not used to gate behavior (CLAUDE.md).
+Every tool except `list_vaults` also takes an optional `vault<string>` — see "`vault` argument and
+vault resolution" above.
 
 Every tool's `tools/list` registration also carries a standard MCP `annotations` block
 (`readOnlyHint`/`destructiveHint`/`idempotentHint`) so a client can reason about a tool's effects
 before calling it, independent of the tool description's prose. Read-only tools (`search`, `grep`,
-`tag_list`, `tag_notes`, `note_read`, `attachment_read`) all get `{ readOnlyHint: true,
+`tag_list`, `tag_notes`, `note_read`, `attachment_read`, `list_vaults`) all get `{ readOnlyHint: true,
 destructiveHint: false, idempotentHint: true }`. Mutating tools get `readOnlyHint: false` and set the
 other two per their actual semantics rather than a blanket "any mutation is destructive":
 
@@ -107,7 +123,7 @@ independently reworded per tool:
 ### `search`
 
 **Input**: `query<string>`, `?mode<fulltext|semantic|hybrid>=hybrid`, `?limit<int>=20` (max `100`,
-both config-backed per S002), `reason<string>`.
+both config-backed per S002), `?vault<string>`, `reason<string>`.
 **Output**: `note_title`, `file_line_count`, `?fulltext_rank`, `?semantic_rank`, `?chunk_line_start`,
 `?chunk_line_end`, `?bm25_score` (`fulltext` mode only), `?cosine_distance` (`semantic` mode only),
 `?readonly` (S015, `READONLY_READ_NOTE`) — `hybrid` mode is rank position only, never a raw RRF score;
@@ -128,7 +144,8 @@ about to use `search` reliably, not an implementation detail to hide.
 
 ### `grep`
 
-**Input**: `pattern<string>`, `?regex<bool>=false`, `?note_title<string>`, `reason<string>`.
+**Input**: `pattern<string>`, `?regex<bool>=false`, `?note_title<string>`, `?vault<string>`,
+`reason<string>`.
 **Output**: `note_title`, `file_line_count`, `line_matches` (capped at 10 per note + `(+N more)`, per
 S004), `?readonly` (S015, `READONLY_READ_NOTE`) — **line numbers only** (`L2, L5`), never the matched
 line's text. Unlike the CLI (S006), the MCP tool has no input for opting into match text — grep is
@@ -144,16 +161,17 @@ via a `[[wikilink]]` reference needs to know that's supported.
 
 ### `tag_list`
 
-**Input**: `reason<string>`. **Output**: `tag`, `notes_with_tag` (exact-match count, per S004).
+**Input**: `?vault<string>`, `reason<string>`. **Output**: `tag`, `notes_with_tag` (exact-match count,
+per S004).
 
 ### `tag_notes`
 
-**Input**: `tag<string>`, `reason<string>`. **Output**: `note_title`, `file_line_count`, `?readonly`
-(S015, `READONLY_READ_NOTE`) (parent-includes-child matching, per S004).
+**Input**: `tag<string>`, `?vault<string>`, `reason<string>`. **Output**: `note_title`,
+`file_line_count`, `?readonly` (S015, `READONLY_READ_NOTE`) (parent-includes-child matching, per S004).
 
 ### `note_read`
 
-**Input**: `note_title<string>`, `?start_line<int>`, `?end_line<int>`, `reason<string>`.
+**Input**: `note_title<string>`, `?start_line<int>`, `?end_line<int>`, `?vault<string>`, `reason<string>`.
 **Output**: `{ title, start_line, end_line, total_lines, content_hash, metadata, content, backlinks,
 links_out, ?readonly }` (S015, `READONLY_READ_NOTE`) — always structured JSON (unlike the CLI's `read`,
 which defaults to plain text; MCP has no equivalent of the CLI's `--raw` mode since Claude always wants
@@ -178,7 +196,8 @@ just to a spec reader.
 ### `note_write`
 
 **Input**: `note_title<string>`, `hash<null|string>`, `?metadata<json>`, `content<string>`,
-`?force<bool>=false`, `reason<string>`. Tool description carries `READONLY_WRITE_NOTE` (S015) and
+`?force<bool>=false`, `?vault<string>`, `reason<string>`. Tool description carries
+`READONLY_WRITE_NOTE` (S015) and
 `NO_INLINE_FRONTMATTER_NOTE` (issue #13).
 **Output**: `{ title, hash, line_count }`.
 
@@ -197,7 +216,8 @@ ambiguous wikilink reference."*
 ### `note_edit`
 
 **Input**: `note_title<string>`, `hash<string>` (required, non-nullable per S003), `old_txt<string>`,
-`new_txt<string>`, `?metadata<json>`, `reason<string>`. Tool description carries `READONLY_WRITE_NOTE`
+`new_txt<string>`, `?metadata<json>`, `?vault<string>`, `reason<string>`. Tool description carries
+`READONLY_WRITE_NOTE`
 (S015) and `NO_INLINE_FRONTMATTER_NOTE` (issue #13).
 **Output**: `{ title, hash, line_count }`.
 
@@ -211,7 +231,7 @@ Same as `note_write`: `note_title` requires the exact absolute title, no resolut
 ### `note_append`
 
 **Input**: `note_title<string>`, `hash<string>` (required per S003), `content<string>`,
-`reason<string>`. Tool description carries `READONLY_WRITE_NOTE` (S015) and
+`?vault<string>`, `reason<string>`. Tool description carries `READONLY_WRITE_NOTE` (S015) and
 `NO_INLINE_FRONTMATTER_NOTE` (issue #13).
 **Output**: `{ title, hash, line_count }`.
 
@@ -223,7 +243,8 @@ fallback (S003/S010).
 
 ### `note_rename` (new — not in the README's current tool table)
 
-**Input**: `old_title<string>`, `new_title<string>`, `hash<string>`, `reason<string>`. Tool description
+**Input**: `old_title<string>`, `new_title<string>`, `hash<string>`, `?vault<string>`, `reason<string>`.
+Tool description
 carries `READONLY_WRITE_NOTE` (S015), noting it applies to **both** `old_title` and `new_title`.
 **Output**: `{ title, hash, line_count }` (`title` is `new_title`; `hash`/`line_count` reflect the
 rewritten `id` frontmatter field **and** the outcome of the link cascade below, per S003).
@@ -243,8 +264,8 @@ as every other mutating tool, no resolution fallback (S003/S010).
 
 ### `attachment_read` (new — S012)
 
-**Input**: `attachment_path<string>`, `?include_content<bool>=true`, `reason<string>`. Tool description
-carries `READONLY_READ_NOTE` (S015).
+**Input**: `attachment_path<string>`, `?include_content<bool>=true`, `?vault<string>`, `reason<string>`.
+Tool description carries `READONLY_READ_NOTE` (S015).
 **Output**: the metadata `text` block gains `?readonly` (S015) alongside `path`/`size_bytes`/
 `mime_type`/`total_pages?`; two MCP content blocks when content is included — a `text` block with
 `{ path, size_bytes, mime_type, total_pages? }` as JSON, plus a second block carrying the actual
@@ -304,8 +325,8 @@ any `max_read_bytes` configured above 500,000 characters' worth of base64.
 
 ### `attachment_write` (new — S012)
 
-**Input**: `attachment_path<string>`, `content_base64<string>`, `reason<string>`. Tool description
-carries `READONLY_WRITE_NOTE` (S015).
+**Input**: `attachment_path<string>`, `content_base64<string>`, `?vault<string>`, `reason<string>`.
+Tool description carries `READONLY_WRITE_NOTE` (S015).
 **Output**: `{ path, size_bytes, mime_type }`.
 
 Fails first if `attachment_path` matches a `.mnotesreadonly` pattern (S015), before the parent-
@@ -313,6 +334,24 @@ directory creation or the atomic write below. Create-or-overwrite, unconditional
 (S012: CLAUDE.md's hash-guard rule is scoped to notes' diffable text content, which binary attachments
 have no equivalent of). Same exact-path requirement as `attachment_read`, same vault-containment check
 every path-taking tool in this project already has (S010's `resolveVaultPath`).
+
+### `list_vaults` (new — S009)
+
+**Input**: `reason<string>` (no `vault` — this tool isn't scoped to one).
+**Output**: pipe-delimited columnar text, one row per configured vault: `name`, `description` (empty
+cell if unset), `is_default` (`true`/blank).
+
+Lets Claude discover what vaults exist and route a subsequent call's `vault` argument by matching a
+user's request against each vault's `description` (e.g. "add this to my D&D notes" → call
+`list_vaults`, find the entry described as covering D&D campaign content, pass its `name` as `vault` on
+the follow-up `note_write`) — without ever needing to know or reason about where a vault actually lives
+on disk. **Deliberately never returns each vault's `path`** — every other tool in this surface already
+takes titles/vault-relative paths, never absolute filesystem paths, and there's no legitimate reason for
+an agent driven by this MCP server to need a vault's real location; withholding it here keeps that
+boundary intact rather than leaking it through a listing tool that happens to have it available.
+`src/config.js`'s `listVaults(config)` (S009) is the single implementation, shared with `mnotes vaults`
+(S006) — this tool is a thin formatting wrapper over the exact same function, not a second
+vault-listing code path.
 
 ## Prompts — explicitly out of scope here
 
@@ -339,12 +378,14 @@ with the SDK) until that spec lands.
    `S003`'s `id`-overwrite `debug`, `S004`'s ripgrep-not-found `warn`, `S001`'s schema-mismatch `warn`,
    should the MCP server's own connection ever hit it) lands in `mcp-server.log`. Independent of that,
    **every** tool call — unlike the CLI, which per `S006` only audits mutations — also gets a
-   `logAudit(getAuditLogger(defaultLogDir()), { tool, noteTitle, source: 'mcp', reason, outcome,
+   `logAudit(getAuditLogger(defaultLogDir()), { tool, noteTitle, vault, source: 'mcp', reason, outcome,
    errorMessage })` call in `audit.log`, using the tool's own (required, per CLAUDE.md) `reason`
-   argument. This is what "logged per S008, not used to gate behavior" in the Tool set intro above
-   resolves to: every tool call is audited regardless of outcome, `reason` is captured verbatim, and a
-   caught thrown error (per "Error mapping" above) becomes `outcome: 'error'` with the preserved error
-   message as `error_message` — the same message Claude sees in the tool response.
+   argument and the resolved vault's name (per "`vault` argument and vault resolution" above; absent
+   only for `list_vaults`, which isn't scoped to one vault). This is what "logged per S008, not used to
+   gate behavior" in the Tool set intro above resolves to: every tool call is audited regardless of
+   outcome, `reason` is captured verbatim, and a caught thrown error (per "Error mapping" above) becomes
+   `outcome: 'error'` with the preserved error message as `error_message` — the same message Claude sees
+   in the tool response.
 
 The two records serve different purposes and are intentionally redundant rather than something to
 deduplicate: e.g. an MCP-driven `search` that hits `core/search.js`'s malformed-FTS5-query throw

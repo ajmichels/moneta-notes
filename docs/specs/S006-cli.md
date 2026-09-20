@@ -9,15 +9,29 @@ functions — see below; also owns the `launchd`/`systemd` templates whose redir
 files `mnotes logs --file=daemon.stdout` etc. read), `S010-shared-utilities`, `S011-links`,
 `S012-attachments`
 Amended by: `S015-readonly-paths` (read-only rejection on every mutating command, `readonly` column on
-every list-style command including the CLI-only `links`/`links broken`)
+every list-style command including the CLI-only `links`/`links broken`), `S009-config-and-install`
+(multi-vault support: `--vault` on every vault-scoped command, plus the new `vaults` command)
 Consumed by: (terminal use, `obsidian.nvim` integration)
 
 ## Purpose
 
 Defines `mnotes`'s subcommand surface. Per the README, the CLI is "the same underlying functionality
-as the MCP server, with additional flags for debugging" plus two CLI-only commands (`reindex`,
-`stats`). This spec pins down argument parsing, output formatting, and the handful of CLI-specific
-concerns (no `reason`, `--explain`, stdin content input) that don't apply to the MCP surface.
+as the MCP server, with additional flags for debugging" plus three CLI-only commands (`reindex`,
+`stats`, `vaults`). This spec pins down argument parsing, output formatting, and the handful of
+CLI-specific concerns (no `reason`, `--explain`, stdin content input, `--vault`) that don't apply to
+the MCP surface the same way (MCP gets an equivalent `vault` tool argument and `list_vaults` tool per
+S007, just not `--vault`'s flag syntax specifically).
+
+## `--vault <name>` and vault resolution
+
+Every vault-scoped command below (everything except `daemon`, which controls the single daemon process
+itself, not a specific vault) accepts an optional `--vault <name>` flag. Omitted, it resolves per
+S009's order: `default_vault` if set, else the sole configured vault, else a hard error naming every
+configured vault if there's more than one and no default is set. An explicit `--vault` naming an
+unconfigured vault is also a hard error — `resolveVault(config, name)` (`src/config.js`, S009) is the
+single implementation every command handler calls, so this behaves identically everywhere rather than
+being reimplemented per command. A single-vault setup (the common case, including every config
+predating this feature) never needs `--vault` at all.
 
 ## Argument parsing
 
@@ -25,7 +39,8 @@ Node's built-in `util.parseArgs` — no CLI framework dependency, matching the p
 minimal-dependency, no-build-step bias: a dozen flat subcommands doesn't need a framework's
 nested-command/auto-help machinery. Subcommand routing is a small dispatch table keyed on `argv[2]`
 (`search`, `grep`, `tags`, `links`, `read`, `write`, `edit`, `append`, `rename`, `attachment`,
-`reindex`, `daemon`, `stats`, `logs`, `vectors`), each parsing its own remaining flags via `parseArgs`.
+`reindex`, `daemon`, `stats`, `logs`, `vectors`, `vaults`), each parsing its own remaining flags via
+`parseArgs`.
 
 `dispatch()` intercepts `--help`/`-h` itself, before routing to a command handler: `mnotes` (no
 command), `mnotes --help`, or `mnotes -h` prints the full command list; `mnotes <command> --help` (the
@@ -143,31 +158,35 @@ exact absolute title — see "Absolute titles for mutating commands" below).
 
 | Command | Flags | Notes |
 |---|---|---|
-| `mnotes search <query>` | `--mode=hybrid\|fulltext\|semantic`, `--limit=N`, `--explain`, `--json` | See `--explain` below. |
-| `mnotes grep <pattern>` | `--regex`, `--note=<title>`, `--content`, `--json` | `--content` shows each match's line text; omitted by default (line numbers only), matching the MCP tool's output shape unless explicitly opted into. `--note` resolves the same way `read`'s `<title>` does (S010). |
-| `mnotes tags list` | `--json` | |
-| `mnotes tags notes <tag>` | `--json` | |
-| `mnotes links <title>` | `--json` | Backlinks and forward links for one note — see `mnotes links` below. |
-| `mnotes links broken` | `--json` | Every dangling `[[wikilink]]` in the vault — see `mnotes links` below. |
-| `mnotes read <title>` | `--start=N`, `--end=N`, `--raw`, `--json` | See output modes above; default is neither raw nor JSON. |
-| `mnotes write <title>` | `--hash=H`, `--metadata='{...}'`, `--content="..."` | Content from stdin if `--content` omitted. |
-| `mnotes edit <title>` | `--hash=H`, `--old="..."`, `--new="..."`, `--metadata='{...}'` | |
-| `mnotes append <title>` | `--hash=H`, `--content="..."` | Content from stdin if `--content` omitted. |
-| `mnotes rename <old-title> <new-title>` | `--hash=H` | |
-| `mnotes attachment read <path>` | `--raw`, `--metadata`/`--json` | Default action opens the file via the OS default app (`open`); see S012. |
-| `mnotes attachment write <path> [local-file]` | | Reads `<local-file>` off local disk (stdin if omitted), writes it to `<path>` (vault-relative) — see S012. |
-| `mnotes reindex [title]` | | Talks to the daemon over the S005 Unix socket; hard error if daemon isn't running. Blocks until done, streaming attempt/retry progress for a single-title reindex. |
-| `mnotes daemon <start\|stop\|restart>` | | Controls the OS-service-managed daemon process itself (not the IPC socket) — see below. |
-| `mnotes stats` | `--json` | See below. |
-| `mnotes logs` | `--file=<name>` (7 values, see below), `--source=mcp\|cli`, `--tool=<name>`, `--note=<title>`, `--outcome=success\|error`, `--since=<duration\|ISO8601>`, `--limit=N`, `--follow`, `--json` | `--file` defaults to `audit`; the rest are audit-only — see below. |
-| `mnotes vectors <subcommand>` | (per subcommand) | `compare`/`nearest`/`cluster`/`reduce`/`tag-fit`/`tag-redundancy`/`outliers`/`calibrate` — CLI-only debug/analysis tooling over the raw embedding space, no MCP equivalent (same rationale as `mnotes links`). Fully specified in [S013 — Vector Tools](S013-vector-tools.md), which owns `src/cli/vectors.js` and amends this spec only to add `vectors` to the dispatch table above. |
+| `mnotes search <query>` | `--mode=hybrid\|fulltext\|semantic`, `--limit=N`, `--explain`, `--vault=<name>`, `--json` | See `--explain` below. |
+| `mnotes grep <pattern>` | `--regex`, `--note=<title>`, `--content`, `--vault=<name>`, `--json` | `--content` shows each match's line text; omitted by default (line numbers only), matching the MCP tool's output shape unless explicitly opted into. `--note` resolves the same way `read`'s `<title>` does (S010). |
+| `mnotes tags list` | `--vault=<name>`, `--json` | |
+| `mnotes tags notes <tag>` | `--vault=<name>`, `--json` | |
+| `mnotes links <title>` | `--vault=<name>`, `--json` | Backlinks and forward links for one note — see `mnotes links` below. |
+| `mnotes links broken` | `--vault=<name>`, `--json` | Every dangling `[[wikilink]]` in the vault — see `mnotes links` below. |
+| `mnotes read <title>` | `--start=N`, `--end=N`, `--raw`, `--vault=<name>`, `--json` | See output modes above; default is neither raw nor JSON. |
+| `mnotes write <title>` | `--hash=H`, `--metadata='{...}'`, `--content="..."`, `--vault=<name>` | Content from stdin if `--content` omitted. |
+| `mnotes edit <title>` | `--hash=H`, `--old="..."`, `--new="..."`, `--metadata='{...}'`, `--vault=<name>` | |
+| `mnotes append <title>` | `--hash=H`, `--content="..."`, `--vault=<name>` | Content from stdin if `--content` omitted. |
+| `mnotes rename <old-title> <new-title>` | `--hash=H`, `--vault=<name>` | |
+| `mnotes attachment read <path>` | `--raw`, `--metadata`/`--json`, `--vault=<name>` | Default action opens the file via the OS default app (`open`); see S012. |
+| `mnotes attachment write <path> [local-file]` | `--vault=<name>` | Reads `<local-file>` off local disk (stdin if omitted), writes it to `<path>` (vault-relative) — see S012. |
+| `mnotes reindex [title]` | `--vault=<name>` | Talks to the daemon over the S005 Unix socket; hard error if daemon isn't running. Blocks until done, streaming attempt/retry progress for a single-title reindex. |
+| `mnotes daemon <start\|stop\|restart>` | | Controls the OS-service-managed daemon process itself, not any one vault (S009) — no `--vault`, since there's exactly one daemon process regardless of vault count. See below. |
+| `mnotes stats` | `--vault=<name>`, `--json` | See below. |
+| `mnotes logs` | `--file=<name>` (7 values, see below), `--source=mcp\|cli`, `--tool=<name>`, `--note=<title>`, `--outcome=success\|error`, `--vault=<name>`, `--since=<duration\|ISO8601>`, `--limit=N`, `--follow`, `--json` | `--file` defaults to `audit`; the rest are audit-only — see below. `--vault` filters `audit.log` entries by which vault the call targeted (S008); like the other audit-only flags, it's rejected on a non-`audit` `--file`. |
+| `mnotes vectors <subcommand>` | (per subcommand) | `compare`/`nearest`/`cluster`/`reduce`/`tag-fit`/`tag-redundancy`/`outliers`/`calibrate` — CLI-only debug/analysis tooling over the raw embedding space, no MCP equivalent (same rationale as `mnotes links`). Fully specified in [S013 — Vector Tools](S013-vector-tools.md), which owns `src/cli/vectors.js` and amends this spec only to add `vectors` to the dispatch table above; S013 also owns whether/how its subcommands take `--vault`. |
+| `mnotes vaults` | `--json` | Lists every configured vault: `name`, `description` (empty if unset), and whether it's the default — see below. CLI-only, no exact-title/path resolution to speak of. |
 
-Every command other than `reindex`/`stats` is a thin wrapper: parse flags, call the corresponding
+Every command other than `reindex`/`stats`/`vaults` is a thin wrapper: resolve `--vault` (via
+`resolveVault(config, name)`, S009 — done once per invocation, not re-resolved per `core/` call) to get
+that vault's `vaultRoot`/`dbPath`, parse the rest of the command's flags, call the corresponding
 `core/` function directly in-process (`core/search.js`, `core/grep.js`, `core/tags.js`,
 `core/notes.js`, `core/links.js`), format the result. Mutations (`write`/`edit`/`append`/`rename`)
 touch the vault file directly and rely on the daemon's `fswatch` loop (S005) to pick up the resulting
 change asynchronously — the CLI doesn't wait for reindexing to complete on a plain write, only
-`reindex` does (since that's its whole point).
+`reindex` does (since that's its whole point). `vaults` is the one command with no vault to resolve —
+it reads `config.toml`'s vault list directly, per above.
 
 ### Absolute titles for mutating commands
 
@@ -297,6 +316,21 @@ is queue-based (S005): a large or growing count means the daemon is behind or st
 a best-effort courtesy check (attempt a socket connection, non-blocking if it fails) — `stats` itself
 never requires the daemon to be up, unlike `reindex`.
 
+### `mnotes vaults`
+
+Lists every vault configured in `config.toml` (S009), via `listVaults(config)` (`src/config.js`) — the
+same function backing the MCP `list_vaults` tool (S007), so the two surfaces can never disagree about
+what's configured. Default table output: `name`, `description` (blank cell if unset), `default`
+(`yes`/blank). **Deliberately no `path` column** — same reasoning as S007's `list_vaults`: this command
+answers "what vaults exist and what are they for," not "where do they live on disk," and there's no
+reason to surface a vault's absolute filesystem location just to list it. `--json` returns
+`[{ name, description, is_default }]`, `description` present as `null` rather than omitted when unset
+(unlike the audit-log null-omission convention in S008 — this is plain list-tool JSON, matching how
+every other list-style command's `--json` output already represents an absent optional field).
+
+No `--vault` flag on this one command — it lists every vault regardless, there's nothing to scope it
+to.
+
 ### `mnotes logs`
 
 CLI-only, like `links`/`vectors` — no MCP equivalent, since there's no reason an agent would need to
@@ -400,7 +434,11 @@ it does **not** wrap command dispatch in a `runWithLogger` context:
   completeness, not because it shares the other read commands' code path.
 - `mnotes write`/`edit`/`append`/`rename`/`attachment write` — after the command completes (success or
   a caught thrown error), the CLI calls `logAudit(getAuditLogger(defaultLogDir()), { tool, noteTitle,
-  source: 'cli', outcome, errorMessage })` (`S008`) — `reason` is always absent (`source: 'cli'` never
+  vault, source: 'cli', outcome, errorMessage })` (`S008`) — `vault` is the resolved vault's name (per
+  "`--vault` and vault resolution" above), always present regardless of whether `--vault` was passed
+  explicitly, since `audit.log` is shared across every configured vault and a bare `note_title` alone
+  is no longer a unique identifier once more than one vault exists. `reason` is always absent
+  (`source: 'cli'` never
   carries one, per "No `reason` flag" above). This is a direct call to `logAudit`, not a
   `runWithLogger`-wrapped context, so — same as the read commands — `core/notes.js`'s own incidental
   logging (`S003`'s caller-supplied-`id`-overwrite `debug` line) resolves to the no-op logger for

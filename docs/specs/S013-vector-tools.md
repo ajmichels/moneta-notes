@@ -3,6 +3,7 @@
 Status: **Approved**
 Owns: `src/core/vectors.js`, `src/cli/vectors.js`
 Amends: `S006-cli` (adds `vectors` to the command dispatch table)
+Amended by: `S009-config-and-install` (multi-vault support: `--vault <name>` on every subcommand)
 Depends on: `S001-data-model`, `S002-search`, `S005-indexing-daemon`, `S010-shared-utilities`
 Consumed by: (terminal use only — see "Not exposed via MCP" below)
 
@@ -27,6 +28,21 @@ by analogy — no tool schema, no `reason` argument, no `mcp/tools.js` entries. 
 surfaces for Claude to consume one of these (`compare`/`nearest` are the plausible candidates, being
 cheap single-answer lookups), that's a new decision to make explicitly then, not a default to reach
 for now.
+
+## `--vault <name>`
+
+Every subcommand below takes an optional `--vault <name>` flag, resolved exactly like every other
+vault-scoped CLI command (`resolveVault(config, name)`, S009): explicit name wins, else
+`default_vault`, else the sole configured vault, else a hard error naming every configured vault. It's
+omitted from each subcommand's own flag table below for brevity, since it's universal and behaves
+identically everywhere — `cli/vectors.js`'s dispatch resolves it once, before parsing any
+subcommand-specific flag, and opens that vault's `db` connection for whichever `core/vectors.js`
+function the subcommand calls. A single-vault setup (the common case) never needs to pass it. There is
+no cross-vault comparison mode (`compare`/`nearest`/etc. always operate within one resolved vault's own
+embedding space) — comparing raw vectors across two different vaults' potentially-different embedding
+models would be meaningless per "Cosine similarity" above's own model/version-match requirement, so
+this isn't a gap, it's the same constraint already stated there applied across vaults instead of within
+one.
 
 ## New dependencies
 

@@ -16,7 +16,8 @@ search, hashing, or file I/O logic itself — that guarantees the two surfaces c
 sync.
 
 Runs on macOS or Linux, on either a personal or work machine, never both at once. Each machine gets its
-own vault, its own index, and its own config.
+own config and its own indexing daemon, which can watch one or more named vaults at once — see
+[S009](docs/specs/S009-config-and-install.md) for the multi-vault config shape.
 
 This file is a maintainer-facing overview — architecture, tech stack, dev conventions. **Detailed,
 binding functional specs live in `docs/specs/`** and are the actual source of truth for what this

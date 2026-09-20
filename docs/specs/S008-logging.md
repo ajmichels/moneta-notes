@@ -3,8 +3,9 @@
 Status: **Approved**
 Owns: `src/logger.js`, `src/log-rotator.js`
 Depends on: `S009-config-and-install` (`src/platform` supplies `defaultLogDir()`'s actual path — see
-Rotation/File layout below; otherwise used by every other component with no further dependencies of
-its own)
+Rotation/File layout below; also supplies the resolved vault name every audit entry now carries, per
+multi-vault support — see "File layout" below; otherwise used by every other component with no further
+dependencies of its own)
 Consumed by: `S005-indexing-daemon`, `S006-cli`, `S007-mcp-server`, `S009-config-and-install`
 (rotation service installation), `S012-attachments` — and, via `getContextLogger()`, every `core/`
 module (`S001`-`S004`), per CLAUDE.md's instruction that `core/` use the shared logger instead of ad hoc
@@ -157,7 +158,10 @@ to on either OS.
   existence-check cleanup count, `fswatch` watcher started) and processing events (queue drain
   activity, embedding model load/idle-unload) at `info`; size-drop-guard-equivalent issues, hash
   mismatches encountered during processing, embedding failures, and permanent queue-item failures
-  (retries exhausted, per S005) at `warn`/`error`.
+  (retries exhausted, per S005) at `warn`/`error`. Per S009's multi-vault support, this one file is
+  shared across every configured vault's activity (still one daemon process, one log file) — every
+  line except the embedding-pipeline lifecycle ones (shared process-wide, not per-vault) carries a
+  `vault` context field for that reason, per S005's amendment.
 - **`mcp-server.log`** — server lifecycle (started, stdio transport connected/disconnected) at `info`;
   protocol-level errors at `warn`/`error`. Tool-call outcomes do **not** live here — see `audit.log`.
 - **`audit.log`** — the tool-call/mutation audit trail, separated out from `mcp-server.log` from the
@@ -166,24 +170,29 @@ to on either OS.
   `edit`, `append`, `rename`, `attachment write` — per S006's decision that these get logged too, just
   without a `reason`). `tool` is the line's message; `note_title` (or, for `attachment_write`/
   `attachment_read`, `attachment_path` — S012 — same slot, named for whichever identifier the tool
-  actually takes), `source<"mcp"|"cli">`, `query<string, present only for the "search" tool>`,
+  actually takes), `vault<string, S009>` (the resolved vault's name — present on every entry except
+  the MCP `list_vaults` tool, which isn't scoped to one vault; see below for why this exists),
+  `source<"mcp"|"cli">`, `query<string, present only for the "search" tool>`,
   `reason<string, present only when source:"mcp">`, `outcome<"success"|"error">`, and
   `error_message<string, present only when outcome:"error">` are trailing context fields per the Log
   line format above, e.g.:
   ```
-  2026-08-13T18:24:00.113Z INFO  [audit] note_write note_title="Weekly Notes/2026-W32" source=mcp reason="testing redaction" outcome=success
-  2026-08-13T18:24:05.221Z INFO  [audit] write note_title="Test.md" source=cli outcome=error error_message="hash mismatch"
-  2026-08-13T18:24:11.402Z INFO  [audit] attachment_write attachment_path="Attachments/receipt.pdf" source=mcp reason="saving expense receipt" outcome=success
-  2026-08-13T18:24:15.877Z INFO  [audit] search source=mcp query="knowledge graph" reason="looking for related notes" outcome=success
+  2026-08-13T18:24:00.113Z INFO  [audit] note_write note_title="Weekly Notes/2026-W32" vault=notes source=mcp reason="testing redaction" outcome=success
+  2026-08-13T18:24:05.221Z INFO  [audit] write note_title="Test.md" vault=dnd source=cli outcome=error error_message="hash mismatch"
+  2026-08-13T18:24:11.402Z INFO  [audit] attachment_write attachment_path="Attachments/receipt.pdf" vault=notes source=mcp reason="saving expense receipt" outcome=success
+  2026-08-13T18:24:15.877Z INFO  [audit] search vault=notes source=mcp query="knowledge graph" reason="looking for related notes" outcome=success
   ```
-  `query` is the MCP `search` tool's raw query string, carried straight from its input — every other
-  tool has no `query` field on its input at all, so the entry omits it for them, same null-omission
-  rule as everything else here. `reason` is required by every MCP tool call and rendered only for
-  `source: "mcp"`; it's always absent for `source: "cli"` (S006 explicitly has no `--reason` flag).
-  `error_message` is required and rendered only when `outcome: "error"` (matching S007's
-  error-passthrough approach — an audit trail that hides *why* something failed is much less useful).
-  All at `info` level regardless of outcome — a failed mutation is still a normal, expected audit
-  event, not a system error.
+  `vault` exists because `note_title`/`attachment_path` are only unique *within* a vault (S001/S009) —
+  once more than one vault is configured, an audit line naming just `note_title` is ambiguous about
+  which vault's note it actually touched; `mnotes logs --vault=<name>` (S006) filters on this field the
+  same way `--note`/`--tool` already filter on theirs. `query` is the MCP `search` tool's raw query
+  string, carried straight from its input — every other tool has no `query` field on its input at all,
+  so the entry omits it for them, same null-omission rule as everything else here. `reason` is required
+  by every MCP tool call and rendered only for `source: "mcp"`; it's always absent for `source: "cli"`
+  (S006 explicitly has no `--reason` flag). `error_message` is required and rendered only when
+  `outcome: "error"` (matching S007's error-passthrough approach — an audit trail that hides *why*
+  something failed is much less useful). All at `info` level regardless of outcome — a failed mutation
+  is still a normal, expected audit event, not a system error.
 
 CLI **read-only** commands (`search`, `grep`, `tags`, `read`, `attachment read`) are not logged anywhere
 beyond their own stdout/stderr — only mutations go to `audit.log`, matching the README's original "CLI

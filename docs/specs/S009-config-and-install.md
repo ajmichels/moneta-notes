@@ -13,12 +13,13 @@ daemon` control, and log-rotation scheduling respectively)
 ## Purpose
 
 Finalizes `config.toml`'s full shape (collecting every tunable flagged across
-S002/S003/S004/S005/S008/S012 into one coherent schema), the **cross-platform abstraction** that lets
-this project run on both macOS and Linux without OS checks scattered through the codebase, and the
-install/uninstall flow — now covering **two** background services (the indexing daemon from the
-README, plus S008's log-rotation job) instead of one, plus registering (and deregistering)
-`mnotes-mcp` as an actual Claude Code MCP server and linking (and unlinking) the `mnotes` CLI onto
-`PATH` — rather than leaving either step manual.
+S002/S003/S004/S005/S008/S012 into one coherent schema — including **multi-vault support**: naming,
+defaulting, and backward compatibility for running more than one vault off a single daemon, see below),
+the **cross-platform abstraction** that lets this project run on both macOS and Linux without OS checks
+scattered through the codebase, and the install/uninstall flow — now covering **two** background
+services (the indexing daemon from the README, plus S008's log-rotation job) instead of one, plus
+registering (and deregistering) `mnotes-mcp` as an actual Claude Code MCP server and linking (and
+unlinking) the `mnotes` CLI onto `PATH` — rather than leaving either step manual.
 
 ## Supported platforms
 
@@ -87,7 +88,7 @@ messaging differs (see Install below), which is a `scripts/lib/os-*.sh` concern,
 
 ```
 scripts/lib/common.sh    — OS-agnostic steps and helpers: resolve_path, escape_toml_string, the
-                            vault_path/db_path prompts, config.toml writing, embedding-model
+                            vault path/name/description/db_path prompts, config.toml writing, embedding-model
                             pre-download, pnpm global add/uninstall, Claude Code MCP
                             registration/deregistration.
                             Sourced by scripts/install.sh and scripts/uninstall.sh directly.
@@ -145,9 +146,16 @@ macOS-only artifacts with no Linux counterpart.
 ## `config.toml` schema
 
 ```toml
-vault_path = "/Users/aj/Documents/Notes"
-db_path = "/Users/aj/Library/Application Support/mnotes/index.db"
+default_vault = "notes"
 embedding_model = "Qwen3-Embedding-0.6B"
+
+[vaults.notes]
+path = "/Users/aj/Documents/Notes"
+description = "Personal notes and knowledge base"
+
+[vaults.dnd]
+path = "/Users/aj/Documents/DnD"
+description = "D&D campaign notes"
 
 [search]
 limit_default = 20          # S002
@@ -178,30 +186,67 @@ rotation_max_age_days = 7    # S008
 rotation_keep = 5            # S008
 ```
 
-`db_path`'s example above is the **macOS** default (`platform.appSupportDir() + '/index.db'`); on
-Linux it's `${XDG_DATA_HOME:-~/.local/share}/mnotes/index.db` — same computation, different
-`src/platform` implementation (see Platform abstraction above). `config.example.toml` documents
-whichever platform it's generated/checked on; a user on the other OS overriding `db_path` by hand isn't
-copying a wrong-OS path from this file's built-in default either way, since an unset `db_path` already
-resolves correctly for their own platform.
+Each `[vaults.<name>]` table's `path` is required; `db_path` is optional per vault, defaulting to
+`<appSupportDir()>/index-<name>.db` when omitted (`appSupportDir()` per Platform abstraction above —
+`index-notes.db`/`index-dnd.db` alongside each other on macOS, same computation under Linux's
+`${XDG_DATA_HOME:-~/.local/share}/mnotes/`). `description` is optional free text surfaced by the
+`mnotes vaults` CLI command and the MCP `list_vaults` tool (S006/S007) so a caller (human or Claude) can
+tell vaults apart by purpose without knowing their on-disk paths. `embedding_model` stays a single
+top-level value, along with everything under `[search]`/`[notes]`/`[grep]`/`[attachments]`/`[vectors]`/
+`[index]`/`[logging]` — there is one shared daemon process and one shared embedding pipeline across
+every configured vault (see S005's amendment below), so none of that tuning is per-vault.
 
-`vault_path`, `db_path`, and `embedding_model` are the three values already documented in the
-README/`config.example.toml`; everything under
-`[search]`/`[notes]`/`[grep]`/`[attachments]`/`[index]`/`[logging]` is new, collecting every value
-flagged as config-backed across S002-S005/S008/S012.
+### Multi-vault: naming, defaults, and backward compatibility
+
+**Vault names** are TOML table keys under `[vaults.*]`, not a separate `name` field — the key *is* the
+identifier a caller passes as `--vault <name>`/the MCP `vault` argument (S006/S007), and it also
+determines the derived `db_path` above. Because of both uses, a vault name (whether install-prompted or
+hand-written into `config.toml`) must match `^[a-z0-9][a-z0-9_-]*$` — `loadConfig()` throws a specific
+error naming the offending key otherwise, per CLAUDE.md's fail-loudly rule, rather than letting an
+invalid name silently produce a broken filename or an unparseable CLI argument later.
+
+**`default_vault`** names which configured vault a call resolves to when no `--vault`/`vault` argument
+is given. Resolution order, applied once by `resolveVault(config, name)` (`src/config.js`, per the
+Wiring section below):
+
+1. An explicit `name` argument always wins, and is a hard error if it doesn't match any configured
+   vault (fail loudly, not a silent fallback to the default).
+2. Otherwise, `default_vault` if the key is present in `config.toml`.
+3. Otherwise, if exactly one vault is configured, that one — this is what makes a single-vault setup
+   (the common case) require no `default_vault` key at all.
+4. Otherwise (two or more vaults configured, no `default_vault` key) — `loadConfig()` throws at load
+   time (`"config.toml declares multiple vaults but no default_vault key"`), rather than guessing via
+   table order. TOML table order becoming load-bearing for something this consequential is exactly the
+   kind of ambiguity CLAUDE.md's fail-loudly rule exists to reject.
+
+**Backward compatibility — the old flat shape is permanently valid input, not a deprecated one.** A
+`config.toml` predating this feature has top-level `vault_path`/`db_path` keys and no `[vaults]` table
+at all. Per this spec's existing "never touch an existing config.toml" rule, `install.sh` never rewrites
+it and no migration step runs — `loadConfig()` (`src/config.js`) instead normalizes it in memory, every
+time it loads: if `vault_path` is present and no `[vaults.*]` table exists, it synthesizes a single
+vault entry from those two keys (`db_path` defaulting the same way as above if absent) named by
+slugifying `vault_path`'s final path segment — lowercase, non-alphanumeric runs collapsed to a single
+`-`, leading/trailing `-` trimmed (`~/Documents/Notes` → `"notes"`, `~/Documents/D&D` → `"d-d"`). Since
+this produces exactly one vault, resolution rule 3 above makes it the default automatically — an
+existing user's config keeps working with zero required edits, and the synthesized name only surfaces
+at all in a `mnotes vaults`/`list_vaults` listing, never in a `--vault` flag they'd need to type (there's
+nothing else to disambiguate against). A `config.toml` is invalid if it mixes the old flat keys *and* a
+`[vaults]` table — `loadConfig()` throws rather than guessing which one wins.
 
 **`config.toml` on disk is a sparse override file, not a full dump.** Every value shown above is also
-baked into `src/config.js` as an in-code default (one JS object mirroring this exact schema).
-`src/config.js` deep-merges `~/.config/mnotes/config.toml` (if it exists) over those built-in
-defaults — a config file containing only `vault_path` is entirely valid, with every other value
-falling through to its code-level default. This means a hand-edited `config.toml` that predates a new
-tunable being added doesn't need manual updates to pick up the new default (it was never in the file
-to begin with), and — per the install flow below — a user who accepts every suggested default during
-install ends up with **no config.toml file at all**, since there'd be nothing to override.
+baked into `src/config.js` as an in-code default (one JS object mirroring this exact schema, with a
+single `vaults: { notes: { path: defaultVaultPath() } }` entry and no `default_vault` key — resolution
+rule 3 covers it). `src/config.js` deep-merges `~/.config/mnotes/config.toml` (if it exists) over those
+built-in defaults — a config file containing only a single overridden vault path is entirely valid,
+with every other value falling through to its code-level default. This means a hand-edited `config.toml`
+that predates a new tunable being added doesn't need manual updates to pick up the new default (it was
+never in the file to begin with), and — per the install flow below — a user who accepts every suggested
+default during install ends up with **no config.toml file at all**, since there'd be nothing to
+override.
 
-`config.example.toml` still documents the full shape (every key shown, for discoverability) —
-documentation only, never copied to produce the real file, which (if written at all) only ever contains
-the genuinely-overridden keys per above.
+`config.example.toml` still documents the full shape (every key shown, for discoverability, including
+the two-vault `[vaults.*]` example above) — documentation only, never copied to produce the real file,
+which (if written at all) only ever contains the genuinely-overridden keys per above.
 
 ## Install (`scripts/install.sh`)
 
@@ -216,27 +261,40 @@ step 10's `pnpm add --global` links the CLI to this same `node_modules` rather t
    abstraction above for both hints' exact wording per OS). Everything from here through step 3 is
    common code in `scripts/lib/common.sh`; step 4 onward starts calling into whichever `os-*.sh` the
    top-of-script dispatch sourced.
-2. **Prompt** for `vault_path` and `db_path`, each showing a **smart suggested default** computed from
-   the current user (via `os.homedir()`) — e.g. `Vault path [~/Documents/Notes]:`, and
-   `Index DB path [~/Library/Application Support/mnotes/index.db]:` on macOS or
-   `Index DB path [~/.local/share/mnotes/index.db]:` on Linux (via `src/platform`'s `appSupportDir()`)
-   — so accepting the default is just pressing Enter. No other value is prompted for (everything else
-   already has a code-level default, per the schema above).
-   - Whatever the user types (a bare Enter for the default, a `~`-relative path, or a relative path)
-     is **resolved to an absolute path** before use — `~` expanded via `os.homedir()`, relative paths
-     resolved via `path.resolve()`. `config.toml` (if written at all) never contains an unexpanded `~`
-     or a relative path.
-3. **Create config file** (`~/.config/mnotes/config.toml`) — **only if it doesn't already exist, and
-   only if at least one answer differs from its suggested default.** If every prompt was accepted
-   as-is, no file is written at all (the built-in defaults in `src/config.js` already cover it). If
-   the file is written, it contains **only the overridden keys** — e.g. just `vault_path` if that's
-   the only thing that differs, not a full dump of every value. An existing `config.toml` (e.g.
-   re-running install after an upgrade) is always left completely untouched regardless, so a reinstall
-   never silently discards hand-edited tuning values.
+2. **Prompt** for the primary vault's `path`, `name`, and `description`, plus `db_path`, each showing
+   a **smart suggested default** — `Vault path [~/Documents/Notes]:`, `Vault name [notes]:` (suggested
+   by slugifying whatever path was just entered, per the slugify rule below), `Vault description
+   (optional):`, and `Index DB path [~/Library/Application Support/mnotes/index-notes.db]:` on macOS or
+   `Index DB path [~/.local/share/mnotes/index-notes.db]:` on Linux (via `src/platform`'s
+   `appSupportDir()`) — so accepting every default is just pressing Enter four times. No other value is
+   prompted for (everything else already has a code-level default, per the schema above); adding a
+   *second* vault is a manual `config.toml` edit afterward (see "Multi-vault" above), not a second round
+   of install prompts — this keeps install.sh's own flow linear and matches the existing
+   sparse-override-file philosophy for every other advanced setting.
+   - Whatever the user types for `path`/`db_path` (a bare Enter for the default, a `~`-relative path, or
+     a relative path) is **resolved to an absolute path** before use — `~` expanded via `os.homedir()`,
+     relative paths resolved via `path.resolve()`. `config.toml` (if written at all) never contains an
+     unexpanded `~` or a relative path.
+   - `name` is validated against the same `^[a-z0-9][a-z0-9_-]*$` rule `loadConfig()` enforces (see
+     "Multi-vault" above) — a re-prompt with the specific rejection reason, not a silent slugify-and-
+     continue, since a name typed directly (as opposed to the suggested default, which is already
+     slugified) is a deliberate choice worth confirming back.
+3. **Create config file** (`~/.config/mnotes/config.toml`) — **only if it doesn't already exist.**
+   Unlike a single flat override, this step always writes at least `[vaults.<name>]`'s `path` (a vault
+   needs somewhere to point), plus `default_vault = "<name>"` explicitly — set unconditionally on a
+   fresh install, per the "first configured vault is the default" rule, rather than left to
+   `loadConfig()`'s single-vault fallback (rule 3 above) to infer; this is what keeps a *second*,
+   later hand-added `[vaults.*]` table from tripping the "multiple vaults, no default_vault" load
+   error, since the key is already there from install. `name`/`db_path`/`description` are included
+   only when they differ from their suggested defaults, same sparse-override principle as every other
+   key. An existing `config.toml` (e.g. re-running install after an upgrade) is always left completely
+   untouched regardless, so a reinstall never silently discards hand-edited tuning values or a
+   hand-added second vault.
 4. **Create the app-support directory** (`os_app_support_dir`: `~/Library/Application Support/mnotes/`
-   on macOS, `${XDG_DATA_HOME:-~/.local/share}/mnotes/` on Linux) — holds the SQLite index (`index.db`,
-   schema created by the daemon's own startup sequence per S005, not by this script — no duplicate
-   schema-creation logic between install and the daemon) and the S005 Unix socket (`daemon.sock`).
+   on macOS, `${XDG_DATA_HOME:-~/.local/share}/mnotes/` on Linux) — holds each configured vault's
+   SQLite index (`index-<name>.db`, schema created by the daemon's own startup sequence per S005, not
+   by this script — no duplicate schema-creation logic between install and the daemon) and the single,
+   shared S005 Unix socket (`daemon.sock`).
 5. **Create the logs directory** (`os_log_dir`: `~/Library/Logs/com.ajmichels.mnotes/` on macOS,
    `${XDG_STATE_HOME:-~/.local/state}/mnotes/log/` on Linux).
 6. **Prepare the launch executable** (`os_prepare_launch_executable`):
@@ -360,37 +418,57 @@ step 6 there is a no-op.
    three unit files (`mnotes.service`, `mnotes-logrotate.service`, `mnotes-logrotate.timer`) on Linux,
    followed by `systemctl --user daemon-reload` so systemd forgets them.
 5. **Delete the logs directory** (`os_log_dir`).
-6. **Delete the app-support directory** (`os_app_support_dir` — the SQLite index and socket file, plus
-   `MonetaNotes.app` on macOS if it was built — safe to delete unconditionally since the index is a pure
-   derived cache per S001; nothing here is a data-loss risk, a future reinstall's daemon startup just
+6. **Delete the app-support directory** (`os_app_support_dir` — every configured vault's SQLite index
+   and the shared socket file, plus `MonetaNotes.app` on macOS if it was built — safe to delete
+   unconditionally since every index is a pure derived cache per S001; nothing here is a data-loss
+   risk, a future reinstall's daemon startup just
    rebuilds it from the vault on first run).
 7. **Delete Configuration directory** (`~/.config/mnotes/` — identical on both OSes, see Platform
    abstraction above).
 
 Never touches the vault itself — uninstalling `mnotes` removes the tool's own state, not your notes.
 
-## Wiring `vault_path`/`db_path` into the daemon, CLI, and MCP server
+## Wiring vaults into the daemon, CLI, and MCP server
 
 `src/config.js` existing in isolation isn't enough — something has to actually call `loadConfig()` and
-use its result. `src/indexer/daemon.js`'s `main()`, `src/cli/main.js`'s `resolveVaultRoot()`/
-`resolveDbPath()`, and `src/mcp/server.js`'s (module-local) `resolveVaultRoot()`/`resolveDbPath()` all
-now do exactly that, replacing the `MNOTES_VAULT_ROOT`/`MNOTES_DB_PATH` environment-variable stand-ins
-each of S005/S006/S007 introduced with an explicit "stand-in for `config.toml`'s `vault_path` until
-S009 lands" comment. Concretely:
+use its result. `src/indexer/daemon.js`'s `main()`, `src/cli/main.js`'s command handlers, and
+`src/mcp/server.js`'s tool dispatch all now do exactly that, replacing the `MNOTES_VAULT_ROOT`/
+`MNOTES_DB_PATH` environment-variable stand-ins each of S005/S006/S007 introduced with an explicit
+"stand-in for `config.toml`'s `vault_path` until S009 lands" comment. Concretely:
 
-- `resolveVaultRoot(config = loadConfig())`/`resolveDbPath(config = loadConfig())` in `cli/main.js` and
-  `mcp/server.js` now return `config.vault_path`/`config.db_path` directly — the default parameter
-  means a real invocation (`resolveVaultRoot()`, no argument) resolves against the real
-  `~/.config/mnotes/config.toml`, while tests pass an explicit plain object
-  (`resolveVaultRoot({ vault_path: '/tmp/vault' })`) without touching the filesystem.
-- `daemon.js`'s `main()` calls `loadConfig()` once and passes `config.vault_path`/`config.db_path`
-  into `startDaemon()`.
+- `src/config.js` exports `resolveVault(config, name = null)`, implementing the resolution order from
+  "Multi-vault" above (explicit `name` → `default_vault` → sole vault → throw). It returns
+  `{ name, path, dbPath, description }` for one vault — `path`/`dbPath` already absolute, `dbPath`
+  already defaulted to `<appSupportDir()>/index-<name>.db` if the config didn't override it. This is
+  the one place vault resolution logic lives, per CLAUDE.md's "don't duplicate logic" rule — `cli/
+  main.js` and `mcp/tools.js` both call it rather than each re-implementing the fallback order.
+  `src/config.js` also exports `listVaults(config)` (`{ name, description, isDefault }[]`, no `path` —
+  see S007's `list_vaults` tool for why the path itself is deliberately withheld from that output) for
+  the `mnotes vaults`/`list_vaults` surfaces (S006/S007).
+- **The daemon watches every configured vault, not one.** `daemon.js`'s `main()` calls `loadConfig()`
+  once, calls `listVaults(config)` to get every configured vault (not just the default), resolves each
+  one fully via `resolveVault(config, name)`, and starts one independent watch-and-drain pipeline per
+  vault (its own `fswatch` process, its own `index_queue`-drain loop, its own SQLite connection at its
+  own `dbPath`) inside a single daemon process — full details in S005's amendment. The embedding
+  pipeline stays a single process-wide singleton shared across every vault's pipeline (S005 already
+  lazy-loads/idle-unloads it; nothing here changes that), which is the whole resource-sharing point of
+  running one daemon instead of one per vault.
+- **The CLI and MCP server resolve one vault per call.** Every vault-scoped CLI command gains an
+  optional `--vault <name>` flag; every vault-scoped MCP tool gains an optional `vault<string>`
+  argument (S006/S007). Both resolve to a full vault descriptor via `resolveVault(config, name)` —
+  `cli/main.js`'s `buildRealDeps()` no longer resolves a single `vaultRoot`/`dbPath` once at startup;
+  instead each command handler calls `resolveVault` itself with whatever `--vault` value (or `null`) it
+  parsed, and `mcp/tools.js`'s `callTool` wrapper does the same with the tool input's `vault` field
+  before invoking the tool's `core/` call. An unresolvable name (per rule 1 above) surfaces as a normal
+  thrown error — the CLI's existing `mnotes: <message>` stderr wrapper and the MCP server's existing
+  error-passthrough (S007) both already handle an arbitrary thrown `Error` with no new plumbing needed.
 - The previous "no `MNOTES_VAULT_ROOT`, hard error" behavior in `cli/main.js`/`mcp/server.js` is gone
-  — `vault_path` now always resolves to *something* (the computed `~/Documents/Notes` default at
-  minimum), since `config.js`'s `buildDefaultConfig()` guarantees a value even with no `config.toml` on
-  disk at all. A vault path that doesn't actually exist on disk still fails, just later and more
-  specifically, at the point a `core/` module tries to read/write against it — consistent with "fail
-  loudly" (CLAUDE.md), just no longer front-loaded into `resolveVaultRoot()` itself.
+  — a vault always resolves to *something* (the computed `~/Documents/Notes` default at minimum) unless
+  the caller names an unknown vault explicitly, since `config.js`'s `buildDefaultConfig()` guarantees at
+  least one vault even with no `config.toml` on disk at all. A vault path that doesn't actually exist on
+  disk still fails, just later and more specifically, at the point a `core/` module tries to read/write
+  against it — consistent with "fail loudly" (CLAUDE.md), just no longer front-loaded into
+  `resolveVault()` itself.
 - Env-var overrides are gone entirely, not layered on top of `config.toml` — `MNOTES_VAULT_ROOT`/
   `MNOTES_DB_PATH` are no longer read anywhere. This was a clean replacement, not backwards-compatible
   shimming, per the "stand-in... until S009 lands" framing already in the code being replaced.
