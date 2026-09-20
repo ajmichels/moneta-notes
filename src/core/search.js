@@ -1,5 +1,7 @@
 import { getContextLogger } from '../logger.js';
-import { stripMdExtension as pathToTitle } from './note-fs.js';
+import {
+    stripMdExtension as pathToTitle, loadReadonlyMatcher, checkReadonly,
+} from './note-fs.js';
 
 const DEFAULT_LIMIT = 20;
 const DEFAULT_LIMIT_MAX = 100;
@@ -52,11 +54,22 @@ function fulltextSearch(db, query, overfetchLimit) {
     }));
 }
 
-function toFulltextOutput(results, limit) {
+// readonlyMatcher is null when the caller didn't pass vaultRoot (S015) — additive-only, same
+// posture S010's optional-db title-resolution parameters already established: omitted, no readonly
+// field on any row, no behavior change for an existing caller.
+function readonlyField(readonlyMatcher, noteTitle) {
+    if (readonlyMatcher === null) {
+        return {};
+    }
+    return checkReadonly(readonlyMatcher, `${noteTitle}.md`).readonly ? { readonly: true } : {};
+}
+
+function toFulltextOutput(results, limit, readonlyMatcher) {
     return results.slice(0, limit).map((r) => ({
         note_title: r.noteTitle,
         file_line_count: r.fileLineCount,
         bm25_score: r.score,
+        ...readonlyField(readonlyMatcher, r.noteTitle),
     }));
 }
 
@@ -159,13 +172,14 @@ async function semanticSearch(db, query, overfetchLimit, { embed, embeddingModel
     return collapsed.map((row, index) => ({ ...row, rank: index + 1 }));
 }
 
-function toSemanticOutput(results, limit) {
+function toSemanticOutput(results, limit, readonlyMatcher) {
     return results.slice(0, limit).map((r) => ({
         note_title: r.noteTitle,
         file_line_count: r.fileLineCount,
         chunk_line_start: r.lineStart,
         chunk_line_end: r.lineEnd,
         cosine_distance: r.distance,
+        ...readonlyField(readonlyMatcher, r.noteTitle),
     }));
 }
 
@@ -212,7 +226,7 @@ function mergeHybrid(fulltextResults, semanticResults, limit, rrfK) {
     return merged.slice(0, limit);
 }
 
-function toHybridOutput(results) {
+function toHybridOutput(results, readonlyMatcher) {
     return results.map((r) => ({
         note_title: r.noteTitle,
         file_line_count: r.fileLineCount,
@@ -220,6 +234,7 @@ function toHybridOutput(results) {
         semantic_rank: r.semanticRank,
         chunk_line_start: r.lineStart,
         chunk_line_end: r.lineEnd,
+        ...readonlyField(readonlyMatcher, r.noteTitle),
     }));
 }
 
@@ -232,21 +247,25 @@ export async function search(db, options = {}) {
         overfetchMultiplier = DEFAULT_OVERFETCH_MULTIPLIER,
         overfetchCap = DEFAULT_OVERFETCH_CAP,
         rrfK = DEFAULT_RRF_K,
+        vaultRoot = null,
     } = options;
     validateQuery(query);
     validateLimit(limit, limitMax);
     const overfetchLimit = computeOverfetch(limit, overfetchMultiplier, overfetchCap);
+    const readonlyMatcher = vaultRoot !== null ? loadReadonlyMatcher(vaultRoot) : null;
 
     if (mode === 'fulltext') {
-        return toFulltextOutput(fulltextSearch(db, query, overfetchLimit), limit);
+        return toFulltextOutput(fulltextSearch(db, query, overfetchLimit), limit, readonlyMatcher);
     }
     if (mode === 'semantic') {
-        return toSemanticOutput(await semanticSearch(db, query, overfetchLimit, options), limit);
+        return toSemanticOutput(
+            await semanticSearch(db, query, overfetchLimit, options), limit, readonlyMatcher,
+        );
     }
     if (mode === 'hybrid') {
         const fulltextResults = fulltextSearch(db, query, overfetchLimit);
         const semanticResults = await semanticSearch(db, query, overfetchLimit, options);
-        return toHybridOutput(mergeHybrid(fulltextResults, semanticResults, limit, rrfK));
+        return toHybridOutput(mergeHybrid(fulltextResults, semanticResults, limit, rrfK), readonlyMatcher);
     }
 
     throw new Error(`search: unknown mode "${mode}"`);

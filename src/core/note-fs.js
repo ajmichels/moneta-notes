@@ -83,3 +83,28 @@ export function loadIgnoreMatcher(vaultRoot) {
     const patterns = existsSync(ignoreFilePath) ? readFileSync(ignoreFilePath, 'utf8') : '';
     return ignore().add(patterns);
 }
+
+// Gitignore-style read-only marking for vault-relative paths (S015) — a separate file and
+// mechanism from .mnotesignore above: that one gates index membership, this one gates whether the
+// tool surface may write to a path. Both are absent-is-empty and read fresh on every call; unlike
+// .mnotesignore, there's no reindex-cadence staleness to reason about here (see S015/S010 for why).
+export function loadReadonlyMatcher(vaultRoot) {
+    const readonlyFilePath = join(vaultRoot, '.mnotesreadonly');
+    const patterns = existsSync(readonlyFilePath) ? readFileSync(readonlyFilePath, 'utf8') : '';
+    return ignore().add(patterns);
+}
+
+export function checkReadonly(matcher, relativePath) {
+    const { ignored, rule } = matcher.test(relativePath);
+    return { readonly: ignored, pattern: ignored ? rule.pattern : null };
+}
+
+export function assertWritable(vaultRoot, relativePath) {
+    const { readonly, pattern } = checkReadonly(loadReadonlyMatcher(vaultRoot), relativePath);
+    if (readonly) {
+        throw new Error(
+            `assertWritable: "${relativePath}" is read-only — matches pattern "${pattern}" `
+            + 'in .mnotesreadonly.',
+        );
+    }
+}

@@ -1,5 +1,5 @@
 import { getContextLogger } from '../logger.js';
-import { stripMdExtension } from './note-fs.js';
+import { stripMdExtension, loadReadonlyMatcher, checkReadonly } from './note-fs.js';
 import { tagMatchClause } from './tags.js';
 
 // Every frontmatter key except `tags` is projected into `notes.metadata_json` (S014) — tags has its
@@ -247,7 +247,7 @@ function buildCondition(filter) {
     return { sql: negate ? `NOT ${sql}` : sql, params };
 }
 
-export function metadataQuery(db, { filters, match = 'all' } = {}) {
+export function metadataQuery(db, { filters, match = 'all', vaultRoot = null } = {}) {
     if (!Array.isArray(filters) || filters.length === 0) {
         throw validationError('filters must be a non-empty array');
     }
@@ -267,8 +267,16 @@ export function metadataQuery(db, { filters, match = 'all' } = {}) {
         ORDER BY n.path
     `).all(...params);
 
-    return rows.map((row) => ({
-        noteTitle: stripMdExtension(row.path),
-        fileLineCount: row.fileLineCount,
-    }));
+    // vaultRoot is optional (S015) — omitted, no readonly field on any row, same additive-only
+    // posture S010's optional-db title-resolution parameters already established.
+    const readonlyMatcher = vaultRoot !== null ? loadReadonlyMatcher(vaultRoot) : null;
+
+    return rows.map((row) => {
+        const readonly = readonlyMatcher !== null && checkReadonly(readonlyMatcher, row.path).readonly;
+        return {
+            noteTitle: stripMdExtension(row.path),
+            fileLineCount: row.fileLineCount,
+            ...(readonly ? { readonly: true } : {}),
+        };
+    });
 }

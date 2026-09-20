@@ -10,7 +10,7 @@ import { metadataKeys, metadataQuery } from '../core/metadata.js';
 import { getBrokenLinks } from '../core/links.js';
 import { noteRead, noteWrite, noteEdit, noteAppend, noteRename } from '../core/notes.js';
 import { readAttachment, writeAttachment, resolveAttachmentPath } from '../core/attachments.js';
-import { titleToPath, resolveTitle } from '../core/note-fs.js';
+import { titleToPath, resolveTitle, loadReadonlyMatcher, checkReadonly } from '../core/note-fs.js';
 import { logAudit, getAuditLogger, defaultLogDir } from '../logger.js';
 import { openDb } from '../core/db.js';
 import { defaultSocketPath, DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_VERSION } from '../indexer/daemon.js';
@@ -167,7 +167,7 @@ export async function runSearch(args, deps) {
     const limit = values.limit !== undefined ? Number(values.limit) : undefined;
     const { search: searchConfig } = resolveConfig(deps);
     const searchOptions = {
-        query, mode: values.mode, limit,
+        query, mode: values.mode, limit, vaultRoot: deps.vaultRoot,
         embed: deps.embed, embeddingModel: deps.embeddingModel, embeddingVersion: deps.embeddingVersion,
         limitDefault: searchConfig.limit_default,
         limitMax: searchConfig.limit_max,
@@ -220,6 +220,7 @@ export async function runGrep(args, deps) {
             line_matches: values.content
                 ? r.lineMatches
                 : r.lineMatches.map((m) => ({ line: m.line })),
+            ...(r.readonly ? { readonly: true } : {}),
         }));
         return { stdout: formatJson(mapped), stderr: '', exitCode: 0 };
     }
@@ -250,10 +251,13 @@ async function runTagsNotes(args, deps) {
         args, allowPositionals: true, options: { json: { type: 'boolean', default: false } },
     });
     const tagName = positionals[0];
-    const notes = tagNotes(deps.db, tagName);
+    const notes = tagNotes(deps.db, tagName, { vaultRoot: deps.vaultRoot });
 
     if (values.json) {
-        const mapped = notes.map((n) => ({ note_title: n.noteTitle, file_line_count: n.fileLineCount }));
+        const mapped = notes.map((n) => ({
+            note_title: n.noteTitle, file_line_count: n.fileLineCount,
+            ...(n.readonly ? { readonly: true } : {}),
+        }));
         return { stdout: formatJson(mapped), stderr: '', exitCode: 0 };
     }
 
@@ -352,10 +356,13 @@ async function runMetadataQuery(args, deps) {
         ...values.exists.map((key) => ({ key, op: 'exists' })),
         ...values.missing.map((key) => ({ key, op: 'exists', negate: true })),
     ];
-    const notes = metadataQuery(deps.db, { filters, match: values.match });
+    const notes = metadataQuery(deps.db, { filters, match: values.match, vaultRoot: deps.vaultRoot });
 
     if (values.json) {
-        const mapped = notes.map((n) => ({ note_title: n.noteTitle, file_line_count: n.fileLineCount }));
+        const mapped = notes.map((n) => ({
+            note_title: n.noteTitle, file_line_count: n.fileLineCount,
+            ...(n.readonly ? { readonly: true } : {}),
+        }));
         return { stdout: formatJson(mapped), stderr: '', exitCode: 0 };
     }
 
@@ -391,21 +398,42 @@ async function runLinksTitle(args, deps) {
         return { stdout: formatJson({ backlinks, links_out: linksOut }), stderr: '', exitCode: 0 };
     }
     return {
-        stdout: formatLinksTable({ backlinks, links_out: linksOut }, { align: true }),
+        stdout: formatLinksTable(
+            { backlinks, links_out: linksOut },
+            { align: true, readonlyMatcher: readonlyMatcherFor(deps.vaultRoot) },
+        ),
         stderr: '',
         exitCode: 0,
     };
 }
 
+// deps.vaultRoot is always set on a real CLI invocation (buildRealDeps), but links broken has
+// historically needed only db — stay tolerant of a missing vaultRoot (e.g. a caller/test that only
+// cares about the db-backed broken-link listing) rather than crashing on it, same additive-only
+// posture as every other optional readonly hookup in S015.
+function readonlyMatcherFor(vaultRoot) {
+    return vaultRoot ? loadReadonlyMatcher(vaultRoot) : null;
+}
+
 async function runLinksBroken(args, deps) {
     const { values } = parseArgs({ args, options: { json: { type: 'boolean', default: false } } });
     const broken = getBrokenLinks(deps.db);
+    const readonlyMatcher = readonlyMatcherFor(deps.vaultRoot);
 
     if (values.json) {
-        const mapped = broken.map((b) => ({ note_title: b.sourceTitle, broken_target: b.targetTitle }));
+        const mapped = broken.map((b) => ({
+            note_title: b.sourceTitle,
+            broken_target: b.targetTitle,
+            ...(readonlyMatcher && checkReadonly(readonlyMatcher, `${b.sourceTitle}.md`).readonly
+                ? { readonly: true } : {}),
+        }));
         return { stdout: formatJson(mapped), stderr: '', exitCode: 0 };
     }
-    return { stdout: formatBrokenLinksTable(broken, { align: true }), stderr: '', exitCode: 0 };
+    return {
+        stdout: formatBrokenLinksTable(broken, { align: true, readonlyMatcher }),
+        stderr: '',
+        exitCode: 0,
+    };
 }
 
 export async function runLinks(args, deps) {

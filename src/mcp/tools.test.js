@@ -216,7 +216,9 @@ describe('searchTool', () => {
         );
 
         expect(result.isError).toBeUndefined();
-        expect(result.content[0].text).toMatch(/^note_title\|file_line_count\|bm25_score\nRecipe\|5\|-?\d+(\.\d+)?\n$/);
+        expect(result.content[0].text).toMatch(
+            /^note_title\|file_line_count\|bm25_score\|readonly\nRecipe\|5\|-?\d+(\.\d+)?\|\n$/,
+        );
 
         const [ line ] = await waitForAuditLines(deps.logDir);
         expect(line).toContain('query="graphs"');
@@ -303,7 +305,7 @@ describe('grepTool', () => {
 
         expect(result.isError).toBeUndefined();
         expect(result.content[0].text).toBe(
-            'note_title|file_line_count|line_matches\nRecipe|2|L2\n',
+            'note_title|file_line_count|line_matches|readonly\nRecipe|2|L2|\n',
         );
         expect(result.content[0].text).not.toContain('hello world text');
     });
@@ -345,7 +347,7 @@ describe('grepTool', () => {
             { pattern: 'hello', reason: 'testing config line_match_cap' },
         );
 
-        expect(result.content[0].text).toBe('note_title|file_line_count|line_matches\nRecipe|4|L1, L2 (+2 more)\n');
+        expect(result.content[0].text).toBe('note_title|file_line_count|line_matches|readonly\nRecipe|4|L1, L2 (+2 more)|\n');
     });
 });
 
@@ -375,7 +377,7 @@ describe('tagNotesTool', () => {
             makeDeps({ dbPath }), { tag: 'project', reason: 'testing tag_notes' },
         );
 
-        expect(result.content[0].text).toBe('note_title|file_line_count\nA|3\n');
+        expect(result.content[0].text).toBe('note_title|file_line_count|readonly\nA|3|\n');
     });
 });
 
@@ -413,7 +415,7 @@ describe('metadataQueryTool', () => {
             reason: 'testing metadata_query',
         });
 
-        expect(result.content[0].text).toBe('note_title|file_line_count\nA|7\n');
+        expect(result.content[0].text).toBe('note_title|file_line_count|readonly\nA|7|\n');
     });
 
     it('filters by tag through the same interception core/metadata.js documents', async () => {
@@ -428,7 +430,7 @@ describe('metadataQueryTool', () => {
             reason: 'testing metadata_query tags',
         });
 
-        expect(result.content[0].text).toBe('note_title|file_line_count\nA|5\n');
+        expect(result.content[0].text).toBe('note_title|file_line_count|readonly\nA|5|\n');
     });
 
     it('surfaces a validation error as an isError result, same as a malformed search query', async () => {

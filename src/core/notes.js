@@ -3,7 +3,10 @@ import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, statSync } from 'node:fs';
 import matter from 'gray-matter';
 import { getContextLogger } from '../logger.js';
-import { titleToPath, countLines, buildTitleIndex, resolveTitle } from './note-fs.js';
+import {
+    titleToPath, countLines, buildTitleIndex, resolveTitle,
+    loadReadonlyMatcher, checkReadonly, assertWritable,
+} from './note-fs.js';
 import { extractLinkTargets, getBacklinks, replaceLinkTarget, resolveLinkTargets } from './links.js';
 import { grep } from './grep.js';
 import { enqueuePath } from './db.js';
@@ -81,6 +84,8 @@ export function noteRead(vaultRoot, title, { startLine, endLine, db = null } = {
     const rawLinksOut = extractLinkTargets(body);
     const linksOut = db !== null ? resolveLinkTargets(db, rawLinksOut) : rawLinksOut;
     const backlinks = db !== null ? getBacklinks(db, resolvedTitle) : [];
+    const { readonly } = checkReadonly(loadReadonlyMatcher(vaultRoot), `${resolvedTitle}.md`);
+    const readonlyField = readonly ? { readonly: true } : {};
 
     if (totalLines === 0) {
         return {
@@ -93,6 +98,7 @@ export function noteRead(vaultRoot, title, { startLine, endLine, db = null } = {
             content: '',
             backlinks,
             links_out: linksOut,
+            ...readonlyField,
         };
     }
 
@@ -117,6 +123,7 @@ export function noteRead(vaultRoot, title, { startLine, endLine, db = null } = {
         content,
         backlinks,
         links_out: linksOut,
+        ...readonlyField,
     };
 }
 
@@ -284,6 +291,7 @@ export function noteWrite(vaultRoot, title, {
     assertNoSplitWikilinks(content, title, 'note_write');
 
     const filePath = titleToPath(vaultRoot, title);
+    assertWritable(vaultRoot, `${title}.md`);
     const fileExists = existsSync(filePath);
 
     if (hash === null) {
@@ -324,6 +332,7 @@ export function noteEdit(vaultRoot, title, {
     assertNoSplitWikilinks(newTxt, title, 'note_edit');
 
     const filePath = titleToPath(vaultRoot, title);
+    assertWritable(vaultRoot, `${title}.md`);
     const currentRaw = readRawNote(filePath, title);
     const currentHash = hashContent(currentRaw);
 
@@ -384,6 +393,7 @@ export function noteAppend(vaultRoot, title, hash, content) {
     assertNoSplitWikilinks(content, title, 'note_append');
 
     const filePath = titleToPath(vaultRoot, title);
+    assertWritable(vaultRoot, `${title}.md`);
     const currentRaw = readRawNote(filePath, title);
     const currentHash = hashContent(currentRaw);
 
@@ -443,6 +453,17 @@ function rewriteLinkCandidate(vaultRoot, candidateTitle, { oldTitle, newTitle, d
 
     if (count === 0) {
         return;
+    }
+
+    // Deliberate carve-out from the read-only guard (S003/S015): a stale [[wikilink]] left behind
+    // in a read-only note by a rename elsewhere is a worse outcome than the cascade silently fixing
+    // it, so this write never calls assertWritable. Still worth a visibility trail when it happens.
+    const { readonly } = checkReadonly(loadReadonlyMatcher(vaultRoot), `${candidateTitle}.md`);
+    if (readonly) {
+        getContextLogger().debug('link cascade: rewrote read-only candidate', {
+            note_title: newTitle,
+            candidate_title: candidateTitle,
+        });
     }
 
     writeFileSync(candidatePath, stringifyNote(newBody, candidateMetadata), 'utf8');
@@ -509,6 +530,8 @@ export function noteRename(vaultRoot, oldTitle, newTitle, hash, db = null) {
 
     const oldPath = titleToPath(vaultRoot, oldTitle);
     const newPath = titleToPath(vaultRoot, newTitle);
+    assertWritable(vaultRoot, `${oldTitle}.md`);
+    assertWritable(vaultRoot, `${newTitle}.md`);
 
     const currentRaw = readRawNote(oldPath, oldTitle);
     const currentHash = hashContent(currentRaw);

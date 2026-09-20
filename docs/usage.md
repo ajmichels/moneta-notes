@@ -33,6 +33,32 @@ Any JSON that lands on stderr (currently just `read`'s metadata) is pretty-print
 unlike the compact single-line JSON `--json` produces on stdout for scripting. When a command writes to
 both streams, stderr is flushed before stdout.
 
+Every list-style command above, plus `read`, `attachment read`, and `links`/`links broken`, carries a
+`readonly` field (`--json`) or column (default table output — `read-only` when set, blank otherwise)
+when a note matches a pattern in `.mnotesreadonly` — see [Read-only paths](#read-only-paths) below.
+
+## Read-only paths
+
+A gitignore-style `.mnotesreadonly` file at the vault root (same syntax as `.mnotesignore` — comments,
+negation, `Templates/`-style directory patterns) marks matching notes/attachments as protected: every
+mutating command (`write`/`edit`/`append`/`rename`/`attachment write`) fails with an error naming the
+exact pattern that matched, before touching disk. Unlike `.mnotesignore`, a read-only note stays fully
+indexed and readable — the guard only blocks writes, and it's checked fresh on every call, so editing
+`.mnotesreadonly` takes effect immediately with no daemon restart or reindex needed.
+
+```
+# .mnotesreadonly — vault root
+Vendor/**
+Archive/
+Reference/imported-notes.md
+```
+
+`rename` checks **both** the old and new title — you can't move a read-only note away, and you can't
+move an ordinary note onto a read-only-globbed path either. One exception: `rename`'s link-cascade
+rewrite (see below) is still allowed to fix a `[[wikilink]]` inside a read-only note pointing at the
+renamed note — leaving that link dangling would be worse than the cascade touching it. See
+[S015](specs/S015-readonly-paths.md) for the full design.
+
 ## Commands
 
 ### `mnotes search <query>`
@@ -220,6 +246,9 @@ automatically as part of the rename call — no separate step needed.
 **Attachment writes work differently** (see [`mnotes attachment`](#mnotes-attachment-readwrite)
 below): no hash guard, since there's no diffable text content to protect against clobbering.
 
+All four also fail if the target matches a pattern in `.mnotesreadonly` — see
+[Read-only paths](#read-only-paths) above; `rename` checks both the old and new title.
+
 `write` and `append` read content from **stdin** if `--content` is omitted — works naturally with
 `$EDITOR`-produced files, heredocs, or piped command output:
 
@@ -260,7 +289,9 @@ to the `[attachments].max_read_bytes` cap (see [Configuration](configuration.md#
 `mnotes attachment write <path> [local-file]` reads `<local-file>` off your local disk — or, if
 omitted, raw bytes from stdin (the same fallback `write`/`append` already have for note content, see
 above) — and writes it to `<path>` in the vault — always create-or-overwrite, no hash required (S012's
-rationale: there's no diffable text content for a hash guard to protect).
+rationale: there's no diffable text content for a hash guard to protect). It also fails if `<path>`
+matches a pattern in `.mnotesreadonly` (see [Read-only paths](#read-only-paths) above); `--metadata`/
+`--json` on the read side includes a `readonly` field when the attachment is protected.
 
 ### `mnotes reindex [title]`
 

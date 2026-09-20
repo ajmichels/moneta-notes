@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb } from './db.js';
@@ -314,6 +314,77 @@ describe('search: hybrid mode', () => {
         // contributes RRF terms from *both* sides, which outweighs a single #1 vs. a #2 + a #1.
         expect(results[0].note_title).toBe('Both');
         db.close();
+    });
+});
+
+function makeTempVault() {
+    const dir = mkdtempSync(join(tmpdir(), 'mnotes-search-test-'));
+    return dir;
+}
+
+describe('search: readonly field (S015)', () => {
+    it('has no readonly key on any row when vaultRoot is not given', async () => {
+        const { db } = openDb(':memory:');
+        const noteId = insertNote(db, { path: 'Vendor/Spec.md' });
+        insertFtsRow(db, noteId, 'Vendor/Spec', 'graph search');
+
+        const results = await search(db, { query: 'graph', mode: 'fulltext', limit: 20 });
+
+        expect(results[0]).not.toHaveProperty('readonly');
+        db.close();
+    });
+
+    it('reports readonly:true (fulltext mode) for a note matching .mnotesreadonly', async () => {
+        const vaultRoot = makeTempVault();
+        writeFileSync(join(vaultRoot, '.mnotesreadonly'), 'Vendor/**\n');
+        const { db } = openDb(':memory:');
+        const readonlyId = insertNote(db, { path: 'Vendor/Spec.md' });
+        const normalId = insertNote(db, { path: 'Weekly Notes/2026-W32.md' });
+        insertFtsRow(db, readonlyId, 'Vendor/Spec', 'graph search');
+        insertFtsRow(db, normalId, 'Weekly Notes/2026-W32', 'graph search');
+
+        const results = await search(db, { query: 'graph', mode: 'fulltext', limit: 20, vaultRoot });
+
+        const byTitle = Object.fromEntries(results.map((r) => [ r.note_title, r ]));
+        expect(byTitle['Vendor/Spec'].readonly).toBe(true);
+        expect(byTitle['Weekly Notes/2026-W32']).not.toHaveProperty('readonly');
+        db.close();
+        await cleanupTempDir(vaultRoot);
+    });
+
+    it('reports readonly:true (semantic mode)', async () => {
+        const vaultRoot = makeTempVault();
+        writeFileSync(join(vaultRoot, '.mnotesreadonly'), 'Vendor/**\n');
+        const { db } = openDb(':memory:');
+        const noteId = insertNote(db, { path: 'Vendor/Spec.md' });
+        insertChunkWithVector(db, noteId, { seed: 0.5 });
+
+        const results = await search(db, {
+            query: 'graph', mode: 'semantic', limit: 20, vaultRoot,
+            embed: fakeEmbed(0.5), embeddingModel: 'test-model', embeddingVersion: 'v1',
+        });
+
+        expect(results[0].readonly).toBe(true);
+        db.close();
+        await cleanupTempDir(vaultRoot);
+    });
+
+    it('reports readonly:true (hybrid mode)', async () => {
+        const vaultRoot = makeTempVault();
+        writeFileSync(join(vaultRoot, '.mnotesreadonly'), 'Vendor/**\n');
+        const { db } = openDb(':memory:');
+        const noteId = insertNote(db, { path: 'Vendor/Spec.md' });
+        insertFtsRow(db, noteId, 'Vendor/Spec', 'graph search');
+        insertChunkWithVector(db, noteId, { seed: 0.5 });
+
+        const results = await search(db, {
+            query: 'graph', mode: 'hybrid', limit: 20, vaultRoot,
+            embed: fakeEmbed(0.5), embeddingModel: 'test-model', embeddingVersion: 'v1',
+        });
+
+        expect(results[0].readonly).toBe(true);
+        db.close();
+        await cleanupTempDir(vaultRoot);
     });
 });
 

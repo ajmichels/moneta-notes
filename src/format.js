@@ -1,3 +1,5 @@
+import { checkReadonly } from './core/note-fs.js';
+
 export function formatJson(data) {
     return `${JSON.stringify(data)}\n`;
 }
@@ -32,16 +34,25 @@ export function formatTable(columns, rows, { align = false } = {}) {
 }
 
 const SEARCH_COLUMNS = {
-    fulltext: [ 'note_title', 'file_line_count', 'bm25_score' ],
-    semantic: [ 'note_title', 'file_line_count', 'chunk_line_start', 'chunk_line_end', 'cosine_distance' ],
+    fulltext: [ 'note_title', 'file_line_count', 'bm25_score', 'readonly' ],
+    semantic: [
+        'note_title', 'file_line_count', 'chunk_line_start', 'chunk_line_end', 'cosine_distance', 'readonly',
+    ],
     hybrid: [
         'note_title', 'file_line_count', 'fulltext_rank', 'semantic_rank',
-        'chunk_line_start', 'chunk_line_end',
+        'chunk_line_start', 'chunk_line_end', 'readonly',
     ],
 };
 
+// core/search.js reports readonly as a real boolean, present only when true (S015) — this is the
+// formatting-layer conversion to the table column's read-only/empty-cell sentinel convention.
+function readonlySentinel(value) {
+    return value ? 'read-only' : null;
+}
+
 export function formatSearchTable(results, mode, { align = false } = {}) {
-    return formatTable(SEARCH_COLUMNS[mode], results, { align });
+    const rows = results.map((r) => ({ ...r, readonly: readonlySentinel(r.readonly) }));
+    return formatTable(SEARCH_COLUMNS[mode], rows, { align });
 }
 
 const EXPLAIN_COLUMNS = {
@@ -80,8 +91,9 @@ export function formatGrepTable(results, { includeText = false, align = false } 
         note_title: r.noteTitle,
         file_line_count: r.fileLineCount,
         line_matches: formatLineMatches(r.lineMatches, r.totalMatchCount, includeText),
+        readonly: readonlySentinel(r.readonly),
     }));
-    return formatTable([ 'note_title', 'file_line_count', 'line_matches' ], rows, { align });
+    return formatTable([ 'note_title', 'file_line_count', 'line_matches', 'readonly' ], rows, { align });
 }
 
 export function formatTagListTable(results, { align = false } = {}) {
@@ -90,8 +102,10 @@ export function formatTagListTable(results, { align = false } = {}) {
 }
 
 export function formatTagNotesTable(results, { align = false } = {}) {
-    const rows = results.map((r) => ({ note_title: r.noteTitle, file_line_count: r.fileLineCount }));
-    return formatTable([ 'note_title', 'file_line_count' ], rows, { align });
+    const rows = results.map((r) => ({
+        note_title: r.noteTitle, file_line_count: r.fileLineCount, readonly: readonlySentinel(r.readonly),
+    }));
+    return formatTable([ 'note_title', 'file_line_count', 'readonly' ], rows, { align });
 }
 
 // metadata_query's output is the same { noteTitle, fileLineCount } shape tagNotes returns (S014) —
@@ -103,17 +117,32 @@ export function formatMetadataKeysTable(results, { align = false } = {}) {
     return formatTable([ 'key', 'type', 'example', 'notes_with_key' ], rows, { align });
 }
 
-export function formatLinksTable({ backlinks, links_out: linksOut }, { align = false } = {}) {
+// readonlyMatcher is CLI-only (S015/S006) — core/links.js's backlinks/links_out stay plain title
+// arrays by design (S003: "no extra fields beyond what's needed to navigate"), so unlike
+// formatSearchTable/formatGrepTable/formatTagNotesTable there's no readonly field already on the
+// data; this looks it up itself, given an already-loaded matcher, when the caller provides one.
+function readonlyColumnFor(readonlyMatcher, noteTitle) {
+    if (!readonlyMatcher) {
+        return null;
+    }
+    return readonlySentinel(checkReadonly(readonlyMatcher, `${noteTitle}.md`).readonly);
+}
+
+export function formatLinksTable({ backlinks, links_out: linksOut }, { align = false, readonlyMatcher = null } = {}) {
     const rows = [
         ...backlinks.map((noteTitle) => ({ direction: 'backlink', note_title: noteTitle })),
         ...linksOut.map((noteTitle) => ({ direction: 'link_out', note_title: noteTitle })),
-    ];
-    return formatTable([ 'direction', 'note_title' ], rows, { align });
+    ].map((row) => ({ ...row, readonly: readonlyColumnFor(readonlyMatcher, row.note_title) }));
+    return formatTable([ 'direction', 'note_title', 'readonly' ], rows, { align });
 }
 
-export function formatBrokenLinksTable(results, { align = false } = {}) {
-    const rows = results.map((r) => ({ note_title: r.sourceTitle, broken_target: r.targetTitle }));
-    return formatTable([ 'note_title', 'broken_target' ], rows, { align });
+export function formatBrokenLinksTable(results, { align = false, readonlyMatcher = null } = {}) {
+    const rows = results.map((r) => ({
+        note_title: r.sourceTitle,
+        broken_target: r.targetTitle,
+        readonly: readonlyColumnFor(readonlyMatcher, r.sourceTitle),
+    }));
+    return formatTable([ 'note_title', 'broken_target', 'readonly' ], rows, { align });
 }
 
 const LOG_COLUMNS = [ 'timestamp', 'tool', 'source', 'identifier', 'query', 'outcome', 'reason', 'error_message' ];

@@ -61,10 +61,17 @@ const TAG_ESCAPE_NOTE = ' Content is scanned for inline #tags on reindex. An iso
     + 'refs) or a hex-looking run (#3498db), both of which become real tags. Escape a single value '
     + 'with a backslash (\\#foo) or wrap a longer run in backticks, e.g. `#1/#2`.';
 
+// S015: shared across every mutating/read tool the read-only guard touches, rather than reworded
+// per tool — same pattern as TAG_ESCAPE_NOTE above.
+const READONLY_WRITE_NOTE = ' Fails if the target path matches a pattern in the vault\'s '
+    + '.mnotesreadonly file — the error names the specific pattern that matched.';
+const READONLY_READ_NOTE = ' A readonly field/column is present when the note matches a read-only '
+    + 'pattern — check it before attempting to write.';
+
 const TOOL_DEFS = [
     {
         name: 'search',
-        description: SEARCH_DESCRIPTION,
+        description: SEARCH_DESCRIPTION + READONLY_READ_NOTE,
         inputSchema: {
             query: z.string(),
             mode: z.enum([ 'fulltext', 'semantic', 'hybrid' ]).optional(),
@@ -83,7 +90,7 @@ const TOOL_DEFS = [
         description: 'Ripgrep-backed literal or regex search over vault note files. Returns matching '
             + 'line numbers only, not line content — use note_read to view the matched lines. '
             + 'note_title (if given) resolves like note_read\'s does: exact title match, or a unique '
-            + 'basename match (e.g. text copied from inside a [[wikilink]]).',
+            + 'basename match (e.g. text copied from inside a [[wikilink]]).' + READONLY_READ_NOTE,
         inputSchema: {
             pattern: z.string(),
             regex: z.boolean().optional(),
@@ -110,7 +117,8 @@ const TOOL_DEFS = [
     },
     {
         name: 'tag_notes',
-        description: 'List notes carrying a tag, including nested child tags (parent-includes-child).',
+        description: 'List notes carrying a tag, including nested child tags (parent-includes-child).'
+            + READONLY_READ_NOTE,
         inputSchema: { tag: z.string(), reason: z.string() },
         annotations: {
             readOnlyHint: true,
@@ -152,7 +160,7 @@ const TOOL_DEFS = [
             + 'takes no dot-path nesting; note that tags does NOT appear in metadata_keys\' output '
             + '(use tag_list to discover tag names), even though it\'s filterable here. Multiple '
             + 'filters combine via match: "all" (default, AND) or "any" (OR) — one flat toggle over '
-            + 'every filter, not nested boolean grouping.',
+            + 'every filter, not nested boolean grouping.' + READONLY_READ_NOTE,
         inputSchema: {
             filters: z.array(z.object({
                 key: z.string(),
@@ -179,7 +187,8 @@ const TOOL_DEFS = [
             + 'short or ambiguous reference (e.g. text from inside a [[wikilink]]) — this tool '
             + 'resolves it (exact title match, or a unique basename match) and returns the note\'s '
             + 'true absolute title in its response. Every mutating tool below requires that absolute '
-            + 'title exactly; read a note first if you only have a short reference to it.',
+            + 'title exactly; read a note first if you only have a short reference to it.'
+            + READONLY_READ_NOTE,
         inputSchema: {
             note_title: z.string(),
             start_line: z.number().int().optional(),
@@ -199,7 +208,7 @@ const TOOL_DEFS = [
             + 'current content_hash). No hash against an existing title is an error, not a silent '
             + 'overwrite. note_title must be the note\'s exact absolute title (full path from vault '
             + 'root) — as returned by search or note_read, never a short or ambiguous wikilink '
-            + 'reference.' + TAG_ESCAPE_NOTE,
+            + 'reference.' + TAG_ESCAPE_NOTE + READONLY_WRITE_NOTE,
         inputSchema: {
             note_title: z.string(),
             hash: z.string().nullable(),
@@ -219,7 +228,7 @@ const TOOL_DEFS = [
         name: 'note_edit',
         description: 'Surgically replace old_txt with new_txt in an existing note. old_txt must '
             + 'match exactly once. note_title must be the note\'s exact absolute title, as returned '
-            + 'by search or note_read — no resolution fallback.' + TAG_ESCAPE_NOTE,
+            + 'by search or note_read — no resolution fallback.' + TAG_ESCAPE_NOTE + READONLY_WRITE_NOTE,
         inputSchema: {
             note_title: z.string(),
             hash: z.string(),
@@ -239,7 +248,7 @@ const TOOL_DEFS = [
         name: 'note_append',
         description: 'Append content to the end of an existing note. note_title must be the note\'s '
             + 'exact absolute title, as returned by search or note_read — no resolution fallback.'
-            + TAG_ESCAPE_NOTE,
+            + TAG_ESCAPE_NOTE + READONLY_WRITE_NOTE,
         inputSchema: {
             note_title: z.string(),
             hash: z.string(),
@@ -257,8 +266,10 @@ const TOOL_DEFS = [
         name: 'note_rename',
         description: 'Rename a note. Hard error if new_title already exists — no force override. '
             + 'Also rewrites [[wikilink]] references to old_title in every other note that links to '
-            + 'it. old_title and new_title must both be exact absolute titles, as returned by search '
-            + 'or note_read — no resolution fallback.',
+            + 'it — including a read-only one, so a rename never leaves a read-only note with a '
+            + 'dangling link. old_title and new_title must both be exact absolute titles, as returned '
+            + 'by search or note_read — no resolution fallback.' + READONLY_WRITE_NOTE
+            + ' Applies to both old_title and new_title.',
         inputSchema: {
             old_title: z.string(),
             new_title: z.string(),
@@ -289,7 +300,8 @@ const TOOL_DEFS = [
             + 'also returned (metadata-only reads included) whenever the file parses as a valid PDF. '
             + 'start_page/end_page (1-indexed, inclusive, PDF only) fetch just that page range as a '
             + 'standalone PDF instead of the whole file — both are required together, must fall '
-            + 'within 1..total_pages, and cannot be combined with include_content: false.',
+            + 'within 1..total_pages, and cannot be combined with include_content: false.'
+            + READONLY_READ_NOTE,
         inputSchema: {
             attachment_path: z.string(),
             include_content: z.boolean().optional(),
@@ -311,7 +323,7 @@ const TOOL_DEFS = [
             + '— always a full replace, no hash guard (unlike the note_* mutating tools — binary '
             + 'attachments have no diffable text content for a hash guard to protect). '
             + 'attachment_path must be the exact vault-relative path; parent directories are created '
-            + 'as needed. content_base64 is the file\'s bytes, base64-encoded.',
+            + 'as needed. content_base64 is the file\'s bytes, base64-encoded.' + READONLY_WRITE_NOTE,
         inputSchema: {
             attachment_path: z.string(),
             content_base64: z.string(),

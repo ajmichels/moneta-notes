@@ -140,6 +140,32 @@ describe('grep: .mnotesignore', () => {
     });
 });
 
+describe('grep: readonly field (S015)', () => {
+    it('has no readonly key for an ordinary note', () => {
+        const vaultRoot = makeTempVault({
+            'A.md': 'mentions apple\n',
+        });
+
+        const results = grep(vaultRoot, 'apple');
+
+        expect(results[0]).not.toHaveProperty('readonly');
+    });
+
+    it('reports readonly:true for a note matching .mnotesreadonly, leaving other rows untouched', () => {
+        const vaultRoot = makeTempVault({
+            'A.md': 'mentions apple\n',
+            'Vendor/Spec.md': 'also mentions apple\n',
+            '.mnotesreadonly': 'Vendor/**\n',
+        });
+
+        const results = grep(vaultRoot, 'apple');
+        const byTitle = Object.fromEntries(results.map((r) => [ r.noteTitle, r ]));
+
+        expect(byTitle['Vendor/Spec'].readonly).toBe(true);
+        expect(byTitle.A).not.toHaveProperty('readonly');
+    });
+});
+
 describe('grep: regex option', () => {
     it('matches literally by default even with regex metacharacters in the pattern', () => {
         const vaultRoot = makeTempVault({

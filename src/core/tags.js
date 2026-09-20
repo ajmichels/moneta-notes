@@ -1,4 +1,6 @@
-import { stripMdExtension, stripCodeRegions } from './note-fs.js';
+import {
+    stripMdExtension, stripCodeRegions, loadReadonlyMatcher, checkReadonly,
+} from './note-fs.js';
 
 // (?<!\\) rejects a backslash-escaped "#" (Obsidian's own tag/heading escape syntax) without
 // consuming it, same non-consuming reasoning as the boundary lookbehind before it: consuming the
@@ -87,7 +89,7 @@ export function tagMatchClause(tagName) {
     return { clause: 't.name = ? OR t.name LIKE ? || \'/%\'', params: [ tagName, tagName ] };
 }
 
-export function tagNotes(db, tagName) {
+export function tagNotes(db, tagName, { vaultRoot = null } = {}) {
     const { clause, params } = tagMatchClause(tagName);
     const rows = db.prepare(`
         SELECT DISTINCT n.path AS path, n.line_count AS fileLineCount
@@ -98,8 +100,16 @@ export function tagNotes(db, tagName) {
         ORDER BY n.path
     `).all(...params);
 
-    return rows.map(row => ({
-        noteTitle: stripMdExtension(row.path),
-        fileLineCount: row.fileLineCount,
-    }));
+    // vaultRoot is optional (S015) — omitted, no readonly field on any row, same additive-only
+    // posture S010's optional-db title-resolution parameters already established.
+    const readonlyMatcher = vaultRoot !== null ? loadReadonlyMatcher(vaultRoot) : null;
+
+    return rows.map(row => {
+        const readonly = readonlyMatcher !== null && checkReadonly(readonlyMatcher, row.path).readonly;
+        return {
+            noteTitle: stripMdExtension(row.path),
+            fileLineCount: row.fileLineCount,
+            ...(readonly ? { readonly: true } : {}),
+        };
+    });
 }

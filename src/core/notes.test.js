@@ -43,6 +43,25 @@ describe('hashContent', () => {
     });
 });
 
+describe('noteRead readonly field (S015)', () => {
+    it('has no readonly key for an ordinary note', () => {
+        const vaultRoot = makeTempVault();
+        noteWrite(vaultRoot, 'Ordinary', { content: 'body' });
+
+        expect(noteRead(vaultRoot, 'Ordinary')).not.toHaveProperty('readonly');
+    });
+
+    it('reports readonly:true for a note matching .mnotesreadonly, empty-note branch included', () => {
+        const vaultRoot = makeTempVault();
+        noteWrite(vaultRoot, 'Vendor/Spec', { content: 'body' });
+        noteWrite(vaultRoot, 'Vendor/Empty', { content: '' });
+        writeReadonlyPattern(vaultRoot, 'Vendor/**');
+
+        expect(noteRead(vaultRoot, 'Vendor/Spec').readonly).toBe(true);
+        expect(noteRead(vaultRoot, 'Vendor/Empty').readonly).toBe(true);
+    });
+});
+
 describe('noteRead', () => {
     it('reads a note with no frontmatter as metadata: {}', () => {
         const vaultRoot = makeTempVault();
@@ -1299,5 +1318,96 @@ describe('noteRename with db write-through', () => {
             /hash mismatch|changed since/i,
         );
         expect(db.prepare('SELECT path FROM notes WHERE id = ?').get(noteId).path).toBe('Stale Rename.md');
+    });
+});
+
+function writeReadonlyPattern(vaultRoot, pattern) {
+    writeFileSync(join(vaultRoot, '.mnotesreadonly'), `${pattern}\n`);
+}
+
+describe('read-only guard (S015)', () => {
+    it('noteWrite blocks creating a new note under a read-only pattern', () => {
+        const vaultRoot = makeTempVault();
+        writeReadonlyPattern(vaultRoot, 'Vendor/**');
+
+        expect(() => noteWrite(vaultRoot, 'Vendor/New Note', { content: 'body' })).toThrow(
+            /read-only — matches pattern "Vendor\/\*\*"/,
+        );
+        expect(existsSync(titleToPath(vaultRoot, 'Vendor/New Note'))).toBe(false);
+    });
+
+    it('noteWrite blocks updating an existing read-only note', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Vendor/Spec', { content: 'original' });
+        writeReadonlyPattern(vaultRoot, 'Vendor/**');
+
+        expect(() => noteWrite(vaultRoot, 'Vendor/Spec', { hash: created.hash, content: 'changed' }))
+            .toThrow(/read-only/);
+        expect(noteRead(vaultRoot, 'Vendor/Spec').content).toBe('original');
+    });
+
+    it('noteEdit blocks editing a read-only note', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Vendor/Spec', { content: 'original text' });
+        writeReadonlyPattern(vaultRoot, 'Vendor/**');
+
+        expect(() => noteEdit(vaultRoot, 'Vendor/Spec', {
+            hash: created.hash, oldTxt: 'original', newTxt: 'changed',
+        })).toThrow(/read-only/);
+        expect(noteRead(vaultRoot, 'Vendor/Spec').content).toBe('original text');
+    });
+
+    it('noteAppend blocks appending to a read-only note', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Vendor/Spec', { content: 'original' });
+        writeReadonlyPattern(vaultRoot, 'Vendor/**');
+
+        expect(() => noteAppend(vaultRoot, 'Vendor/Spec', created.hash, 'more')).toThrow(/read-only/);
+        expect(noteRead(vaultRoot, 'Vendor/Spec').content).toBe('original');
+    });
+
+    it('noteRename blocks renaming a read-only note away', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Vendor/Spec', { content: 'body' });
+        writeReadonlyPattern(vaultRoot, 'Vendor/**');
+
+        expect(() => noteRename(vaultRoot, 'Vendor/Spec', 'Vendor/Renamed', created.hash))
+            .toThrow(/read-only/);
+        expect(existsSync(titleToPath(vaultRoot, 'Vendor/Spec'))).toBe(true);
+    });
+
+    it('noteRename blocks renaming an ordinary note onto a read-only-globbed path', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Ordinary', { content: 'body' });
+        writeReadonlyPattern(vaultRoot, 'Vendor/**');
+
+        expect(() => noteRename(vaultRoot, 'Ordinary', 'Vendor/New Home', created.hash))
+            .toThrow(/read-only/);
+        expect(existsSync(titleToPath(vaultRoot, 'Ordinary'))).toBe(true);
+        expect(existsSync(titleToPath(vaultRoot, 'Vendor/New Home'))).toBe(false);
+    });
+
+    it('the link cascade still rewrites a read-only candidate rather than skipping it', async () => {
+        const vaultRoot = makeTempVault();
+        const target = noteWrite(vaultRoot, 'Old Target', { content: 'target body' });
+        noteWrite(vaultRoot, 'Vendor/Linker', { content: 'see [[Old Target]] for more' });
+        writeReadonlyPattern(vaultRoot, 'Vendor/**');
+
+        const logDir = mkdtempSync(join(tmpdir(), 'mnotes-notes-test-log-'));
+        const logger = getLogger('mcp-server', logDir);
+
+        try {
+            await runWithLogger(
+                logger, () => noteRename(vaultRoot, 'Old Target', 'New Target', target.hash),
+            );
+            expect(noteRead(vaultRoot, 'Vendor/Linker').content).toBe('see [[New Target]] for more');
+            await vi.waitFor(() => {
+                const line = readFileSync(join(logDir, 'mcp-server.log'), 'utf8').trim();
+                expect(line).toContain('DEBUG [mcp-server] link cascade: rewrote read-only candidate');
+                expect(line).toContain('candidate_title="Vendor/Linker"');
+            });
+        } finally {
+            await cleanupTempDir(logDir);
+        }
     });
 });

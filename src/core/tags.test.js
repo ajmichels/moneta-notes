@@ -1,6 +1,24 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { extractTags, syncNoteTags, tagList, tagNotes, tagMatchClause } from './tags.js';
 import { openDb } from './db.js';
+import { cleanupTempDir } from '../../vitest.helpers.js';
+
+const tempDirs = [];
+
+function makeTempVault() {
+    const dir = mkdtempSync(join(tmpdir(), 'mnotes-tags-test-'));
+    tempDirs.push(dir);
+    return dir;
+}
+
+afterEach(async () => {
+    while (tempDirs.length > 0) {
+        await cleanupTempDir(tempDirs.pop());
+    }
+});
 
 function makeTestDb() {
     const { db } = openDb(':memory:');
@@ -340,6 +358,36 @@ describe('tagNotes', () => {
         const results = tagNotes(db, 'project');
 
         expect(results[0].fileLineCount).toBe(42);
+        db.close();
+    });
+});
+
+describe('tagNotes: readonly field (S015)', () => {
+    it('has no readonly key on any row when vaultRoot is not given', () => {
+        const db = makeTestDb();
+        const noteId = insertTestNote(db, 'Vendor/Spec.md');
+        syncNoteTags(db, noteId, [ 'project' ]);
+
+        const results = tagNotes(db, 'project');
+
+        expect(results[0]).not.toHaveProperty('readonly');
+        db.close();
+    });
+
+    it('reports readonly:true for a note matching .mnotesreadonly, leaving other rows untouched', () => {
+        const vaultRoot = makeTempVault();
+        writeFileSync(join(vaultRoot, '.mnotesreadonly'), 'Vendor/**\n');
+        const db = makeTestDb();
+        const readonlyId = insertTestNote(db, 'Vendor/Spec.md');
+        const normalId = insertTestNote(db, 'A.md');
+        syncNoteTags(db, readonlyId, [ 'project' ]);
+        syncNoteTags(db, normalId, [ 'project' ]);
+
+        const results = tagNotes(db, 'project', { vaultRoot });
+        const byTitle = Object.fromEntries(results.map((r) => [ r.noteTitle, r ]));
+
+        expect(byTitle['Vendor/Spec'].readonly).toBe(true);
+        expect(byTitle.A).not.toHaveProperty('readonly');
         db.close();
     });
 });

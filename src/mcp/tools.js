@@ -61,14 +61,14 @@ export async function callTool(auditLogger, mcpLogger, toolName, input, fn) {
 }
 
 export async function searchTool(deps, input) {
-    const { dbPath, embed, embeddingModel, embeddingVersion } = deps;
+    const { vaultRoot, dbPath, embed, embeddingModel, embeddingVersion } = deps;
     const { search: searchConfig } = resolveConfig(deps);
     const { query, mode = 'hybrid', limit = searchConfig.limit_default } = input;
 
     return callTool(deps.auditLogger, deps.mcpLogger, 'search', input, async () => {
         const results = await withDb(dbPath, (db) => (
             search(db, {
-                query, mode, limit, embed, embeddingModel, embeddingVersion,
+                query, mode, limit, embed, embeddingModel, embeddingVersion, vaultRoot,
                 limitDefault: searchConfig.limit_default,
                 limitMax: searchConfig.limit_max,
                 overfetchMultiplier: searchConfig.overfetch_multiplier,
@@ -101,10 +101,10 @@ export async function tagListTool(deps, input) {
 }
 
 export async function tagNotesTool(deps, input) {
-    const { dbPath } = deps;
+    const { vaultRoot, dbPath } = deps;
     const { tag } = input;
     return callTool(deps.auditLogger, deps.mcpLogger, 'tag_notes', input,
-        async () => formatTagNotesTable(await withDb(dbPath, (db) => tagNotes(db, tag))));
+        async () => formatTagNotesTable(await withDb(dbPath, (db) => tagNotes(db, tag, { vaultRoot }))));
 }
 
 export async function metadataKeysTool(deps, input) {
@@ -114,10 +114,10 @@ export async function metadataKeysTool(deps, input) {
 }
 
 export async function metadataQueryTool(deps, input) {
-    const { dbPath } = deps;
+    const { vaultRoot, dbPath } = deps;
     const { filters, match = 'all' } = input;
     return callTool(deps.auditLogger, deps.mcpLogger, 'metadata_query', input, async () => (
-        formatTagNotesTable(await withDb(dbPath, (db) => metadataQuery(db, { filters, match })))
+        formatTagNotesTable(await withDb(dbPath, (db) => metadataQuery(db, { filters, match, vaultRoot })))
     ));
 }
 

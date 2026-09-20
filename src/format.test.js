@@ -75,7 +75,7 @@ describe('formatSearchTable', () => {
             'fulltext',
         );
 
-        expect(text).toBe('note_title|file_line_count|bm25_score\nA|5|-1.5\n');
+        expect(text).toBe('note_title|file_line_count|bm25_score|readonly\nA|5|-1.5|\n');
     });
 
     it('includes fulltext_rank/semantic_rank/chunk_line columns for hybrid mode, even with null values', () => {
@@ -88,7 +88,8 @@ describe('formatSearchTable', () => {
         );
 
         expect(text).toBe(
-            'note_title|file_line_count|fulltext_rank|semantic_rank|chunk_line_start|chunk_line_end\nA|5|1|||\n',
+            'note_title|file_line_count|fulltext_rank|semantic_rank|chunk_line_start|chunk_line_end|readonly\n'
+            + 'A|5|1||||\n',
         );
     });
 
@@ -102,7 +103,8 @@ describe('formatSearchTable', () => {
         );
 
         expect(text).toBe(
-            'note_title|file_line_count|chunk_line_start|chunk_line_end|cosine_distance\nA|5|12|18|0.42\n',
+            'note_title|file_line_count|chunk_line_start|chunk_line_end|cosine_distance|readonly\n'
+            + 'A|5|12|18|0.42|\n',
         );
     });
 
@@ -114,10 +116,19 @@ describe('formatSearchTable', () => {
         );
 
         expect(text).toBe(
-            'note_title | file_line_count | bm25_score\n'
-            + '---------- | --------------- | ----------\n'
-            + 'A          | 5               | -1.5\n',
+            'note_title | file_line_count | bm25_score | readonly\n'
+            + '---------- | --------------- | ---------- | --------\n'
+            + 'A          | 5               | -1.5       |\n',
         );
+    });
+
+    it('renders the read-only sentinel for a row with readonly:true (S015)', () => {
+        const text = formatSearchTable(
+            [ { note_title: 'A', file_line_count: 5, bm25_score: -1.5, readonly: true } ],
+            'fulltext',
+        );
+
+        expect(text).toBe('note_title|file_line_count|bm25_score|readonly\nA|5|-1.5|read-only\n');
     });
 });
 
@@ -170,7 +181,7 @@ describe('formatGrepTable', () => {
             },
         ]);
 
-        expect(text).toBe('note_title|file_line_count|line_matches\nRecipe|10|L2, L5\n');
+        expect(text).toBe('note_title|file_line_count|line_matches|readonly\nRecipe|10|L2, L5|\n');
     });
 
     it('renders line_matches as "L<line>: <text>" joined by "; " when includeText is true', () => {
@@ -183,7 +194,9 @@ describe('formatGrepTable', () => {
             },
         ], { includeText: true });
 
-        expect(text).toBe('note_title|file_line_count|line_matches\nRecipe|10|L2: hello world; L5: hello again\n');
+        expect(text).toBe(
+            'note_title|file_line_count|line_matches|readonly\nRecipe|10|L2: hello world; L5: hello again|\n',
+        );
     });
 
     it('appends "(+N more)" when totalMatchCount exceeds the capped lineMatches length', () => {
@@ -196,7 +209,7 @@ describe('formatGrepTable', () => {
             },
         ]);
 
-        expect(text).toBe('note_title|file_line_count|line_matches\nBig|100|L1 (+11 more)\n');
+        expect(text).toBe('note_title|file_line_count|line_matches|readonly\nBig|100|L1 (+11 more)|\n');
     });
 
     it('aligns columns when align is true', () => {
@@ -205,10 +218,21 @@ describe('formatGrepTable', () => {
         ], { align: true });
 
         expect(text).toBe(
-            'note_title | file_line_count | line_matches\n'
-            + '---------- | --------------- | ------------\n'
-            + 'Recipe     | 10              | L2\n',
+            'note_title | file_line_count | line_matches | readonly\n'
+            + '---------- | --------------- | ------------ | --------\n'
+            + 'Recipe     | 10              | L2           |\n',
         );
+    });
+
+    it('renders the read-only sentinel for a row with readonly:true (S015)', () => {
+        const text = formatGrepTable([
+            {
+                noteTitle: 'Vendor/Spec', fileLineCount: 10,
+                lineMatches: [ { line: 2, text: 'x' } ], totalMatchCount: 1, readonly: true,
+            },
+        ]);
+
+        expect(text).toBe('note_title|file_line_count|line_matches|readonly\nVendor/Spec|10|L2|read-only\n');
     });
 });
 
@@ -222,7 +246,12 @@ describe('formatTagListTable', () => {
 describe('formatTagNotesTable', () => {
     it('maps noteTitle/fileLineCount to note_title/file_line_count', () => {
         const text = formatTagNotesTable([ { noteTitle: 'A', fileLineCount: 5 } ]);
-        expect(text).toBe('note_title|file_line_count\nA|5\n');
+        expect(text).toBe('note_title|file_line_count|readonly\nA|5|\n');
+    });
+
+    it('renders the read-only sentinel for a row with readonly:true (S015)', () => {
+        const text = formatTagNotesTable([ { noteTitle: 'Vendor/Spec', fileLineCount: 5, readonly: true } ]);
+        expect(text).toBe('note_title|file_line_count|readonly\nVendor/Spec|5|read-only\n');
     });
 });
 
@@ -238,18 +267,42 @@ describe('formatMetadataKeysTable', () => {
 describe('formatLinksTable', () => {
     it('renders backlinks then links_out, one row per link', () => {
         const text = formatLinksTable({ backlinks: [ 'A' ], links_out: [ 'B', 'C' ] });
-        expect(text).toBe('direction|note_title\nbacklink|A\nlink_out|B\nlink_out|C\n');
+        expect(text).toBe('direction|note_title|readonly\nbacklink|A|\nlink_out|B|\nlink_out|C|\n');
     });
 
     it('renders just the header row when there are no links either direction', () => {
-        expect(formatLinksTable({ backlinks: [], links_out: [] })).toBe('direction|note_title\n');
+        expect(formatLinksTable({ backlinks: [], links_out: [] })).toBe('direction|note_title|readonly\n');
+    });
+
+    it('renders the read-only sentinel for a linked title matching a readonlyMatcher (S015)', () => {
+        const readonlyMatcher = {
+            test: (p) => (p === 'Vendor/Spec.md'
+                ? { ignored: true, rule: { pattern: 'Vendor/**' } }
+                : { ignored: false }),
+        };
+        const text = formatLinksTable(
+            { backlinks: [ 'Vendor/Spec' ], links_out: [ 'Ordinary' ] }, { readonlyMatcher },
+        );
+        expect(text).toBe('direction|note_title|readonly\nbacklink|Vendor/Spec|read-only\nlink_out|Ordinary|\n');
     });
 });
 
 describe('formatBrokenLinksTable', () => {
     it('maps sourceTitle/targetTitle to note_title/broken_target', () => {
         const text = formatBrokenLinksTable([ { sourceTitle: 'A', targetTitle: 'Missing' } ]);
-        expect(text).toBe('note_title|broken_target\nA|Missing\n');
+        expect(text).toBe('note_title|broken_target|readonly\nA|Missing|\n');
+    });
+
+    it('renders the read-only sentinel for a sourceTitle matching a readonlyMatcher (S015)', () => {
+        const readonlyMatcher = {
+            test: (p) => (p === 'Vendor/Spec.md'
+                ? { ignored: true, rule: { pattern: 'Vendor/**' } }
+                : { ignored: false }),
+        };
+        const text = formatBrokenLinksTable(
+            [ { sourceTitle: 'Vendor/Spec', targetTitle: 'Missing' } ], { readonlyMatcher },
+        );
+        expect(text).toBe('note_title|broken_target|readonly\nVendor/Spec|Missing|read-only\n');
     });
 });
 

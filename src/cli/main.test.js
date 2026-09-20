@@ -150,9 +150,8 @@ describe('runSearch', () => {
         );
 
         expect(result.exitCode).toBe(0);
-        expect(result.stdout).toMatch(
-            /^note_title \| file_line_count \| bm25_score\n-+ \| -+ \| -+\nA\s+\| 10\s+\| -?\d+(\.\d+)?\n$/,
-        );
+        expect(result.stdout).toMatch(/^note_title \| file_line_count \| bm25_score \| readonly\n/);
+        expect(result.stdout).toMatch(/A\s+\| 10\s+\| -?\d+(\.\d+)?\s*\|\n$/);
         db.close();
     });
 
@@ -168,6 +167,24 @@ describe('runSearch', () => {
 
         expect(JSON.parse(result.stdout)).toEqual([
             { note_title: 'A', file_line_count: 10, bm25_score: expect.any(Number) },
+        ]);
+        db.close();
+    });
+
+    it('reports readonly:true for a note matching .mnotesreadonly, end to end via --json (S015)', async () => {
+        const vaultRoot = makeTempVault();
+        writeFileSync(join(vaultRoot, '.mnotesreadonly'), 'Vendor/**\n');
+        const { db } = openDb(':memory:');
+        const noteId = insertTestNote(db, 'Vendor/Spec.md', 10);
+        db.prepare('INSERT INTO notes_fts (rowid, title, body) VALUES (?, ?, ?)').run(noteId, 'Vendor/Spec', 'graph');
+
+        const result = await runSearch(
+            [ 'graph', '--mode=fulltext', '--json' ],
+            { db, vaultRoot, embed: async () => new Float32Array(1024), embeddingModel: 'm', embeddingVersion: 'v1' },
+        );
+
+        expect(JSON.parse(result.stdout)).toEqual([
+            { note_title: 'Vendor/Spec', file_line_count: 10, bm25_score: expect.any(Number), readonly: true },
         ]);
         db.close();
     });
@@ -325,7 +342,7 @@ describe('runTags', () => {
         const result = await runTags([ 'notes', 'project' ], { db });
 
         expect(result.stdout).toBe(
-            'note_title | file_line_count\n---------- | ---------------\nA          | 7\n',
+            'note_title | file_line_count | readonly\n---------- | --------------- | --------\nA          | 7               |\n',
         );
         db.close();
     });
@@ -433,7 +450,7 @@ describe('runMetadata', () => {
         const result = await runMetadata([ 'query', '--filter=status=active' ], { db });
 
         expect(result.stdout).toBe(
-            'note_title | file_line_count\n---------- | ---------------\nA          | 7\n',
+            'note_title | file_line_count | readonly\n---------- | --------------- | --------\nA          | 7               |\n',
         );
         db.close();
     });
@@ -517,7 +534,8 @@ describe('runLinks', () => {
         const result = await runLinks([ 'Target' ], { vaultRoot, db });
 
         expect(result.stdout).toBe(
-            'direction | note_title\n--------- | ----------\nbacklink  | Linker\nlink_out  | Other\n',
+            'direction | note_title | readonly\n--------- | ---------- | --------\n'
+            + 'backlink  | Linker     |\nlink_out  | Other      |\n',
         );
         db.close();
     });
@@ -542,7 +560,8 @@ describe('runLinks', () => {
         const result = await runLinks([ 'broken' ], { db });
 
         expect(result.stdout).toBe(
-            'note_title | broken_target\n---------- | -------------\nLinker     | Nonexistent\n',
+            'note_title | broken_target | readonly\n---------- | ------------- | --------\n'
+            + 'Linker     | Nonexistent   |\n',
         );
         db.close();
     });
@@ -714,6 +733,25 @@ describe('runWrite', () => {
         await expect(
             runWrite([ 'Bad Meta', '--content=x', '--metadata={not json' ], { vaultRoot, auditLogger }),
         ).rejects.toThrow(/--metadata is not valid JSON/);
+    });
+
+    it('logs an error audit entry and rethrows (via dispatch) for a .mnotesreadonly target (S015)', async () => {
+        const vaultRoot = makeTempVault();
+        writeFileSync(join(vaultRoot, '.mnotesreadonly'), 'Vendor/**\n');
+        const logDir = makeTempVault();
+        const auditLogger = getAuditLogger(logDir);
+
+        const result = await dispatch(
+            [ 'write', 'Vendor/Spec', '--content=first' ],
+            { vaultRoot, auditLogger },
+        );
+
+        expect(result.exitCode).toBe(1);
+        await vi.waitFor(() => {
+            const line = findAuditLine(logDir, 'write', 'Vendor/Spec', 'error');
+            expect(line).toBeDefined();
+            expect(line).toMatch(/error_message=".*read-only.*"/i);
+        });
     });
 
     it('honors deps.config.notes.size_drop_threshold (config.toml-backed, S009)', async () => {

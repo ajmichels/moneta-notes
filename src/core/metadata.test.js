@@ -1,7 +1,25 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { buildMetadataJson, metadataKeys, metadataQuery } from './metadata.js';
 import { openDb } from './db.js';
 import { syncNoteTags } from './tags.js';
+import { cleanupTempDir } from '../../vitest.helpers.js';
+
+const tempDirs = [];
+
+function makeTempVault() {
+    const dir = mkdtempSync(join(tmpdir(), 'mnotes-metadata-test-'));
+    tempDirs.push(dir);
+    return dir;
+}
+
+afterEach(async () => {
+    while (tempDirs.length > 0) {
+        await cleanupTempDir(tempDirs.pop());
+    }
+});
 
 function makeTestDb() {
     const { db } = openDb(':memory:');
@@ -243,6 +261,33 @@ describe('metadataQuery: scalar conditions', () => {
             filters: [ { key: 'due', op: 'exists', negate: true } ],
         });
         expect(titles(results)).toEqual([ 'B', 'C' ]);
+    });
+});
+
+describe('metadataQuery: readonly field (S015)', () => {
+    it('has no readonly key on any row when vaultRoot is not given', () => {
+        const db = makeTestDb();
+        insertNoteWithMetadata(db, 'Vendor/Spec.md', { status: 'active' });
+
+        const results = metadataQuery(db, { filters: [ { key: 'status', op: 'eq', value: 'active' } ] });
+
+        expect(results[0]).not.toHaveProperty('readonly');
+    });
+
+    it('reports readonly:true for a note matching .mnotesreadonly, leaving other rows untouched', () => {
+        const vaultRoot = makeTempVault();
+        writeFileSync(join(vaultRoot, '.mnotesreadonly'), 'Vendor/**\n');
+        const db = makeTestDb();
+        insertNoteWithMetadata(db, 'Vendor/Spec.md', { status: 'active' });
+        insertNoteWithMetadata(db, 'A.md', { status: 'active' });
+
+        const results = metadataQuery(db, {
+            filters: [ { key: 'status', op: 'eq', value: 'active' } ], vaultRoot,
+        });
+        const byTitle = Object.fromEntries(results.map((r) => [ r.noteTitle, r ]));
+
+        expect(byTitle['Vendor/Spec'].readonly).toBe(true);
+        expect(byTitle.A).not.toHaveProperty('readonly');
     });
 });
 

@@ -3,7 +3,9 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import matter from 'gray-matter';
 import { getContextLogger } from '../logger.js';
-import { titleToPath, pathToTitle, countLines, resolveTitle } from './note-fs.js';
+import {
+    titleToPath, pathToTitle, countLines, resolveTitle, loadReadonlyMatcher, checkReadonly,
+} from './note-fs.js';
 import { ripgrepInstallHint } from '../platform/index.js';
 
 const DEFAULT_LINE_MATCH_CAP = 10;
@@ -62,14 +64,18 @@ export function grep(vaultRoot, pattern, options = {}) {
 
     const stdout = runRipgrep(args, vaultRoot);
     const matchesByPath = parseMatches(stdout, vaultRoot, targetPath);
+    const readonlyMatcher = loadReadonlyMatcher(vaultRoot);
 
     const results = [];
     for (const [ absPath, lineMatches ] of matchesByPath) {
+        const noteTitle = pathToTitle(vaultRoot, absPath);
+        const { readonly } = checkReadonly(readonlyMatcher, `${noteTitle}.md`);
         results.push({
-            noteTitle: pathToTitle(vaultRoot, absPath),
+            noteTitle,
             fileLineCount: fileLineCount(absPath),
             lineMatches: lineMatches.slice(0, lineMatchCap),
             totalMatchCount: lineMatches.length,
+            ...(readonly ? { readonly: true } : {}),
         });
     }
 

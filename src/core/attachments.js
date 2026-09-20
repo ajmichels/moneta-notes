@@ -3,7 +3,7 @@ import {
     existsSync, statSync, readFileSync, writeFileSync, mkdirSync, renameSync,
 } from 'node:fs';
 import { PDFDocument } from 'pdf-lib';
-import { resolveVaultPath } from './note-fs.js';
+import { resolveVaultPath, loadReadonlyMatcher, checkReadonly, assertWritable } from './note-fs.js';
 
 export const MAX_READ_BYTES = 10_000_000; // S012/S009 default; config.js carries the real override
 
@@ -78,7 +78,7 @@ async function slicePdfPages(srcDoc, startPage, endPage) {
 }
 
 async function readPdfAttachment(attachmentPath, filePath, size, mimeType, {
-    includeContent, maxReadBytes, startPage, endPage,
+    includeContent, maxReadBytes, startPage, endPage, readonlyField,
 }) {
     const wantsPageRange = startPage !== undefined;
     const fileBuffer = readFileSync(filePath);
@@ -89,7 +89,9 @@ async function readPdfAttachment(attachmentPath, filePath, size, mimeType, {
     const totalPagesField = totalPages === undefined ? {} : { total_pages: totalPages };
 
     if (!includeContent) {
-        return { path: attachmentPath, size_bytes: size, mime_type: mimeType, ...totalPagesField };
+        return {
+            path: attachmentPath, size_bytes: size, mime_type: mimeType, ...totalPagesField, ...readonlyField,
+        };
     }
 
     if (wantsPageRange) {
@@ -110,7 +112,7 @@ async function readPdfAttachment(attachmentPath, filePath, size, mimeType, {
         }
         return {
             path: attachmentPath, size_bytes: sliceBuffer.length, mime_type: mimeType,
-            total_pages: totalPages, content: sliceBuffer,
+            total_pages: totalPages, content: sliceBuffer, ...readonlyField,
         };
     }
 
@@ -123,6 +125,7 @@ async function readPdfAttachment(attachmentPath, filePath, size, mimeType, {
     }
     return {
         path: attachmentPath, size_bytes: size, mime_type: mimeType, ...totalPagesField, content: fileBuffer,
+        ...readonlyField,
     };
 }
 
@@ -136,14 +139,17 @@ export async function readAttachment(vaultRoot, attachmentPath, {
 
     validatePageRangeArgs(attachmentPath, isPdf, includeContent, startPage, endPage);
 
+    const { readonly } = checkReadonly(loadReadonlyMatcher(vaultRoot), attachmentPath);
+    const readonlyField = readonly ? { readonly: true } : {};
+
     if (isPdf) {
         return readPdfAttachment(attachmentPath, filePath, size, mimeType, {
-            includeContent, maxReadBytes, startPage, endPage,
+            includeContent, maxReadBytes, startPage, endPage, readonlyField,
         });
     }
 
     if (!includeContent) {
-        return { path: attachmentPath, size_bytes: size, mime_type: mimeType };
+        return { path: attachmentPath, size_bytes: size, mime_type: mimeType, ...readonlyField };
     }
     if (size > maxReadBytes) {
         throw new Error(
@@ -153,11 +159,13 @@ export async function readAttachment(vaultRoot, attachmentPath, {
     }
     return {
         path: attachmentPath, size_bytes: size, mime_type: mimeType, content: readFileSync(filePath),
+        ...readonlyField,
     };
 }
 
 export function writeAttachment(vaultRoot, attachmentPath, buffer) {
     const filePath = resolveVaultPath(vaultRoot, attachmentPath);
+    assertWritable(vaultRoot, attachmentPath);
     mkdirSync(dirname(filePath), { recursive: true });
 
     const tmpPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;

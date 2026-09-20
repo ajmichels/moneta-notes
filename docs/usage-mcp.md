@@ -22,6 +22,16 @@ reindex ([S004](specs/S004-grep-tags.md)): an isolated `#5` is already safe (rej
 numeric), but adjacent refs (`#1/#2`) or a hex-looking run (`#3498db`) become real tags. Escape a single
 value with a backslash (`\#foo`, Obsidian's own escape syntax) or wrap a longer run in backticks.
 
+A vault-root `.mnotesreadonly` file ([S015](specs/S015-readonly-paths.md), same gitignore syntax as
+`.mnotesignore`) marks matching notes/attachments as protected: `note_write`/`note_edit`/`note_append`/
+`note_rename`/`attachment_write` fail with an error naming the matched pattern before touching disk
+(`note_rename` checks both `old_title` and `new_title`), and every read/list tool
+(`search`/`grep`/`tag_notes`/`metadata_query`/`note_read`/`attachment_read`) carries a `readonly`
+field/column when a result matches — check it before attempting a write. Each affected tool's own
+description states this. One exception: `note_rename`'s link-cascade rewrite still fixes a
+`[[wikilink]]` inside a read-only note that pointed at the renamed note, rather than leaving it
+dangling.
+
 `metadata_query`'s `filters` argument takes the structured `{key, op, value?, negate?}` shape
 directly — no string parsing — the same shape `mnotes metadata query`'s `--filter`/`--exists`/
 `--missing` flags compile down to (see [`mnotes metadata query`](usage.md#mnotes-metadata-keys--mnotes-metadata-query)

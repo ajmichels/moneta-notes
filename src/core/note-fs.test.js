@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import {
     titleToPath, pathToTitle, stripMdExtension, countLines, stripCodeRegions,
     buildTitleIndex, resolveAgainstIndex, resolveTitle, resolveVaultPath, loadIgnoreMatcher,
+    loadReadonlyMatcher, checkReadonly, assertWritable,
 } from './note-fs.js';
 import { openDb } from './db.js';
 import { cleanupTempDir } from '../../vitest.helpers.js';
@@ -226,5 +227,70 @@ describe('loadIgnoreMatcher', () => {
 
         expect(matcher.ignores('Templates/Daily Note.md')).toBe(true);
         expect(matcher.ignores('Templates/Extraction.md')).toBe(false);
+    });
+});
+
+describe('loadReadonlyMatcher / checkReadonly', () => {
+    it('reports nothing read-only when the vault has no .mnotesreadonly file', () => {
+        const vaultRoot = makeTempVault();
+        const matcher = loadReadonlyMatcher(vaultRoot);
+
+        expect(checkReadonly(matcher, 'Vendor/Spec.md')).toEqual({ readonly: false, pattern: null });
+    });
+
+    it('reports readonly:true with the matched pattern for a file under a read-only folder', () => {
+        const vaultRoot = makeTempVault();
+        writeFileSync(join(vaultRoot, '.mnotesreadonly'), 'Vendor/**\n');
+
+        const matcher = loadReadonlyMatcher(vaultRoot);
+
+        expect(checkReadonly(matcher, 'Vendor/Spec.md')).toEqual({ readonly: true, pattern: 'Vendor/**' });
+        expect(checkReadonly(matcher, 'Weekly Notes/2026-W32.md')).toEqual({ readonly: false, pattern: null });
+    });
+
+    it('supports negation to carve an exception out of a broader read-only pattern', () => {
+        const vaultRoot = makeTempVault();
+        writeFileSync(
+            join(vaultRoot, '.mnotesreadonly'),
+            'Archive/*\n!Archive/Notes.md\n',
+        );
+
+        const matcher = loadReadonlyMatcher(vaultRoot);
+
+        expect(checkReadonly(matcher, 'Archive/Old.md').readonly).toBe(true);
+        expect(checkReadonly(matcher, 'Archive/Notes.md').readonly).toBe(false);
+    });
+
+    it('matches a directory-only trailing-slash pattern against nested content', () => {
+        const vaultRoot = makeTempVault();
+        writeFileSync(join(vaultRoot, '.mnotesreadonly'), 'Archive/\n');
+
+        const matcher = loadReadonlyMatcher(vaultRoot);
+
+        expect(checkReadonly(matcher, 'Archive/Old.md').readonly).toBe(true);
+    });
+});
+
+describe('assertWritable', () => {
+    it('is a no-op when the path is not read-only', () => {
+        const vaultRoot = makeTempVault();
+        writeFileSync(join(vaultRoot, '.mnotesreadonly'), 'Vendor/**\n');
+
+        expect(() => assertWritable(vaultRoot, 'Weekly Notes/2026-W32.md')).not.toThrow();
+    });
+
+    it('is a no-op when the vault has no .mnotesreadonly file at all', () => {
+        const vaultRoot = makeTempVault();
+
+        expect(() => assertWritable(vaultRoot, 'Vendor/Spec.md')).not.toThrow();
+    });
+
+    it('throws naming the matched pattern when the path is read-only', () => {
+        const vaultRoot = makeTempVault();
+        writeFileSync(join(vaultRoot, '.mnotesreadonly'), 'Vendor/**\n');
+
+        expect(() => assertWritable(vaultRoot, 'Vendor/Spec.md')).toThrow(
+            'assertWritable: "Vendor/Spec.md" is read-only — matches pattern "Vendor/**" in .mnotesreadonly.',
+        );
     });
 });

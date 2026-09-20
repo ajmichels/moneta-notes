@@ -253,3 +253,53 @@ describe('writeAttachment', () => {
             .toThrow(/outside the vault/);
     });
 });
+
+function writeReadonlyPattern(vaultRoot, pattern) {
+    writeFileSync(join(vaultRoot, '.mnotesreadonly'), `${pattern}\n`);
+}
+
+describe('read-only guard and reporting (S015)', () => {
+    it('writeAttachment blocks a path matching a .mnotesreadonly pattern', () => {
+        const vaultRoot = makeTempVault();
+        writeReadonlyPattern(vaultRoot, 'Vendor/**');
+
+        expect(() => writeAttachment(vaultRoot, 'Vendor/logo.png', Buffer.from('x'))).toThrow(
+            'assertWritable: "Vendor/logo.png" is read-only — matches pattern "Vendor/**" in .mnotesreadonly.',
+        );
+        expect(existsSync(join(vaultRoot, 'Vendor'))).toBe(false);
+    });
+
+    it('writeAttachment leaves an existing read-only file untouched', () => {
+        const vaultRoot = makeTempVault();
+        writeAttachmentFile(vaultRoot, 'Vendor/receipt.bin', Buffer.from('original'));
+        writeReadonlyPattern(vaultRoot, 'Vendor/**');
+
+        expect(() => writeAttachment(vaultRoot, 'Vendor/receipt.bin', Buffer.from('changed'))).toThrow(/read-only/);
+    });
+
+    it('readAttachment has no readonly key for an ordinary attachment', async () => {
+        const vaultRoot = makeTempVault();
+        writeAttachmentFile(vaultRoot, 'Attachments/note.txt', Buffer.from('hello'));
+
+        const result = await readAttachment(vaultRoot, 'Attachments/note.txt');
+        expect(result).not.toHaveProperty('readonly');
+    });
+
+    it('readAttachment reports readonly:true for a path matching .mnotesreadonly', async () => {
+        const vaultRoot = makeTempVault();
+        writeAttachmentFile(vaultRoot, 'Vendor/receipt.bin', Buffer.from('hello'));
+        writeReadonlyPattern(vaultRoot, 'Vendor/**');
+
+        const result = await readAttachment(vaultRoot, 'Vendor/receipt.bin');
+        expect(result.readonly).toBe(true);
+    });
+
+    it('readAttachment reports readonly:true in metadata-only mode too', async () => {
+        const vaultRoot = makeTempVault();
+        writeAttachmentFile(vaultRoot, 'Vendor/receipt.bin', Buffer.from('hello'));
+        writeReadonlyPattern(vaultRoot, 'Vendor/**');
+
+        const result = await readAttachment(vaultRoot, 'Vendor/receipt.bin', { includeContent: false });
+        expect(result.readonly).toBe(true);
+    });
+});
