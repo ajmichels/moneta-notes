@@ -140,7 +140,12 @@ Build bottom-up: config resolution (1) has to exist before the daemon (2) or CLI
     in `resolveVaultsForQuery`'s vault order rather than attempting to re-sort across vaults (S009 —
     no cross-vault score/rank comparison). A per-vault target-scoping failure (e.g. `grep --note=<title>`
     unresolvable in one particular vault) contributes zero rows from that vault rather than aborting
-    the whole call; an explicit single-vault `--vault` still hard-errors on it as before.
+    the whole call; an explicit single-vault `--vault` still hard-errors on it as before. A genuine
+    per-vault `core/` error (not the soft not-found case above) aborts the whole fan-out loop
+    immediately and propagates that error — never assemble/print results from vaults already processed
+    alongside a later vault's error (CLAUDE.md's no-partial-result rule, S009). The CLI has no audit-log
+    multiplicity concern here (unlike MCP, per step 4) since `search`/`grep`/`tags notes`/
+    `metadata query`/`links broken` are all read-only and never audited from the CLI side (S006).
   - `format.js`: `formatSearchTable`, `formatGrepTable`, `formatTagNotesTable`, and whatever formats
     `metadata query`/`links broken` use need a `vault` column added to their row-shaping, present only
     when the row actually carries the key — same convention `readonly` (S015) already uses.
@@ -196,18 +201,32 @@ Build bottom-up: config resolution (1) has to exist before the daemon (2) or CLI
       formatVaultsTable(listVaults(resolveConfig(deps))))` — reuse the CLI's `formatVaultsTable`
       from `src/format.js` (already shared cross-surface per S006/S007's existing pattern for every
       other list tool).
-- [ ] `callTool`: add `vault` to both the error and success `logAudit` calls — for group 1, the single
-      resolved vault's name (or `null` if resolution itself failed, since there's nothing else to log it
-      under); for group 2 under fan-out, there's no single vault to log — use `null` (or a
-      comma-joined list of every vault touched, if that reads better in `audit.log`; decide against a
-      real fan-out call before committing to one, this is presentation-layer, not load-bearing).
+- [ ] `callTool`: add `vault` to both the error and success `logAudit` calls — for group 1 (and group 2
+      when only one vault resolved), the single resolved vault's name, exactly one `logAudit` call, same
+      as today. **Group 2 under real fan-out (2+ resolved vaults) does not go through the single
+      `callTool` wrapper's one-shot logAudit at all** — per S007/S009's decision, it needs its own loop:
+      on success, call `logAudit` once per vault actually delivered results (all of them); on a genuine
+      per-vault `core/` error, abort the loop immediately (no partial results assembled or returned —
+      CLAUDE.md's fail-loud rule), call `logAudit` exactly once naming the vault that failed, and return
+      the same `isError: true` shape `callTool`'s existing catch path produces. This likely means
+      `searchTool`/`grepTool`/`tagNotesTool`/`metadataQueryTool` grow their own small fan-out-aware
+      wrapper (reusing `callTool`'s error-mapping/response shape, not `callTool` itself, for the
+      2+-vault branch) rather than every one of the four hand-rolling this loop independently — a
+      `callToolFannedOut(auditLogger, mcpLogger, toolName, input, vaults, fn)` helper taking the already-
+      resolved vault list and a per-vault `fn(vault)` is one reasonable shape, calling `fn` in a loop and
+      handling the multi-log/abort-on-error behavior once, shared by all four tools.
 - [ ] `tools.test.js` / `server.test.js`: `vault` argument threads through to the right `dbPath` for a
       representative read tool and a representative write tool; `list_vaults` output shape and
       annotations; an unresolvable `vault` argument produces `isError: true` with the exact
       `resolveVault`/`resolveVaultsForQuery` message, and an `audit.log` entry with `outcome: error`;
       a fan-out tool (e.g. `search`) with `vault` omitted against a 2-vault test config returns rows
-      from both, each carrying `vault`, grouped by vault; the same call against a 1-vault test config
-      returns rows with no `vault` key at all (shape-unchanged assertion).
+      from both, each carrying `vault`, grouped by vault, and writes **two** `audit.log` entries (one
+      per vault, both `outcome: success`); the same call against a 1-vault test config returns rows with
+      no `vault` key at all and writes exactly **one** `audit.log` entry (shape-unchanged assertion); a
+      fan-out call where one vault's underlying `core/` call throws (mock it) aborts immediately —
+      `isError: true` naming that vault, no rows from the vault(s) that had already succeeded, and
+      exactly **one** `audit.log` entry (`outcome: error`, naming the failing vault) — not one per vault
+      attempted.
 
 ## 5. `src/core/metadata.js` tools (S014) — no core change, wiring only
 

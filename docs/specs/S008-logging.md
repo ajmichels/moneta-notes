@@ -185,7 +185,16 @@ to on either OS.
   `vault` exists because `note_title`/`attachment_path` are only unique *within* a vault (S001/S009) —
   once more than one vault is configured, an audit line naming just `note_title` is ambiguous about
   which vault's note it actually touched; `mnotes logs --vault=<name>` (S006) filters on this field the
-  same way `--note`/`--tool` already filter on theirs. `query` is the MCP `search` tool's raw query
+  same way `--note`/`--tool` already filter on theirs.
+
+  **One call, more than one line — the fan-out exception.** The example `search` line above is the
+  common case (a single resolved vault); when `search`/`grep`/`tag_notes`/`metadata_query` actually fan
+  out across 2+ vaults (S009's "Cross-vault fan-out for read/list tools"), that single MCP tool call
+  logs **one `audit.log` entry per vault it actually delivered results from** — every configured vault
+  on success, or exactly one (naming whichever vault's error aborted the call) if the fan-out fails
+  partway through. This is the one place in the whole log shape where a single tool invocation doesn't
+  correspond 1:1 with a single audit line; every other tool, and every non-fanned-out call to these
+  four, still logs exactly one. `query` is the MCP `search` tool's raw query
   string, carried straight from its input — every other tool has no `query` field on its input at all,
   so the entry omits it for them, same null-omission rule as everything else here. `reason` is required
   by every MCP tool call and rendered only for `source: "mcp"`; it's always absent for `source: "cli"`

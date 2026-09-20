@@ -426,6 +426,15 @@ with the SDK) until that spec lands.
    `outcome: 'error'` with the preserved error message as `error_message` — the same message Claude sees
    in the tool response.
 
+   **Exception: a fan-out call to `search`/`grep`/`tag_notes`/`metadata_query` (S009) logs more than
+   once.** These four don't wrap a single `core/` call in the pattern above when `vault` is omitted
+   against 2+ configured vaults — they loop, one `core/` call per resolved vault (per S009's "Cross-vault
+   fan-out"), and `logAudit` is called **once per vault actually delivered results from** (all of them,
+   on success), or exactly once naming whichever vault's error aborted the whole call, on the
+   abort-on-first-error path S009 specifies. Every other tool, and every non-fanned-out call to these
+   four (a single configured vault, or an explicit `vault` argument), still logs exactly the one entry
+   described above — this exception only changes call-count, never the shape of an individual entry.
+
 The two records serve different purposes and are intentionally redundant rather than something to
 deduplicate: e.g. an MCP-driven `search` that hits `core/search.js`'s malformed-FTS5-query throw
 produces a `warn` line in `mcp-server.log` ("what happened inside this component") *and* an

@@ -557,6 +557,28 @@ vault count, it is never split across vaults. `--explain`'s fan-out output (S006
 vault's own pipeline-summary-line-then-table printed in sequence, one block per vault, rather than an
 attempted merge of pipeline summaries that don't describe the same query execution.
 
+**A genuine per-vault failure aborts the whole fan-out call immediately — it never returns a partial
+result.** The "target doesn't resolve in this vault" case above (an empty per-vault result) is not a
+failure; a real thrown error from a vault's `core/` call (a malformed FTS5 expression, a corrupt index,
+etc.) is. Per CLAUDE.md's fail-loud rule against partial/best-effort results, the loop stops at the
+first such error and the whole call fails with that error — rows already collected from vaults processed
+earlier in the loop are discarded, never returned alongside an error. This is a deliberate difference
+from continuing the loop and reporting a mixed success/failure outcome, which would mean Claude or a
+script sometimes has to distinguish "these are all the results" from "these are only some of the
+results, look at the error too" — a distinction CLAUDE.md's fail-loud philosophy exists specifically to
+avoid making a caller reason about.
+
+**Audit logging (S008) for a fan-out MCP tool call reflects this**: on success, one `audit.log` entry
+per vault actually delivered results (all of them, since success means every resolved vault was
+processed), each carrying that vault's own name — this preserves `mnotes logs --vault=<name>`'s
+exact-match filtering with no new parsing logic, at the cost of one call producing multiple audit lines
+instead of the usual one. On the abort-on-first-error path above, exactly **one** entry is logged,
+naming the vault whose error aborted the call — not one entry per vault attempted, since the vaults that
+succeeded before the abort never actually delivered anything to the caller (per "no partial result"
+above), so logging them as successes would misrepresent what happened. This is the one case in this
+project where a single tool call produces more than one `audit.log` line; every other tool (fan-out or
+not) still logs exactly one.
+
 ## Wiring `[search]`/`[notes]`/`[grep]`/`[attachments]`/`[index]`/`[logging]` into `core/`, the daemon, and log-rotator
 
 The remaining sections are now read too — no `config.toml` key is decorative. `core/search.js`,
