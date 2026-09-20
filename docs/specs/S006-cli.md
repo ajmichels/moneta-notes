@@ -24,14 +24,25 @@ S007, just not `--vault`'s flag syntax specifically).
 
 ## `--vault <name>` and vault resolution
 
-Every vault-scoped command below (everything except `daemon`, which controls the single daemon process
-itself, not a specific vault) accepts an optional `--vault <name>` flag. Omitted, it resolves per
-S009's order: `default_vault` if set, else the sole configured vault, else a hard error naming every
-configured vault if there's more than one and no default is set. An explicit `--vault` naming an
-unconfigured vault is also a hard error — `resolveVault(config, name)` (`src/config.js`, S009) is the
-single implementation every command handler calls, so this behaves identically everywhere rather than
-being reimplemented per command. A single-vault setup (the common case, including every config
-predating this feature) never needs `--vault` at all.
+Every vault-scoped command below — everything except `daemon` (controls the single daemon process
+itself, not a specific vault), `vaults` (lists every vault, nothing to scope), and `logs` (see its own
+note below) — accepts an optional `--vault <name>` flag that selects **which vault the command operates
+against**. Omitted, it resolves per S009's order: `default_vault` if set, else the sole configured
+vault, else a hard error naming every configured vault if there's more than one and no default is set.
+An explicit `--vault` naming an unconfigured vault is also a hard error — `resolveVault(config, name)`
+(`src/config.js`, S009) is the single implementation every command handler calls, so this behaves
+identically everywhere rather than being reimplemented per command. A single-vault setup (the common
+case, including every config predating this feature) never needs `--vault` at all.
+
+**`mnotes logs --vault` is a different kind of flag, not a target selector.** `audit.log` is one file
+shared across every configured vault (S008), not a per-vault resource the way a note or an index is —
+so `logs`'s `--vault` is a plain optional *filter* over that shared file, exactly like `--source`/
+`--tool`/`--note`/`--outcome`, never routed through `resolveVault`'s default-vault fallback. **Omitted,
+it shows entries for every vault, not just the default one** — the opposite of what every other
+command's omitted `--vault` does. An unrecognized vault name is *not* a hard error here either (unlike
+everywhere else `--vault` appears) — it's a filter that legitimately matches zero entries, the same as
+`--tool=nonexistent-tool` does, since a caller might reasonably be checking the audit trail for a vault
+that was since renamed or removed from `config.toml`.
 
 ## Argument parsing
 
@@ -174,7 +185,7 @@ exact absolute title — see "Absolute titles for mutating commands" below).
 | `mnotes reindex [title]` | `--vault=<name>` | Talks to the daemon over the S005 Unix socket; hard error if daemon isn't running. Blocks until done, streaming attempt/retry progress for a single-title reindex. |
 | `mnotes daemon <start\|stop\|restart>` | | Controls the OS-service-managed daemon process itself, not any one vault (S009) — no `--vault`, since there's exactly one daemon process regardless of vault count. See below. |
 | `mnotes stats` | `--vault=<name>`, `--json` | See below. |
-| `mnotes logs` | `--file=<name>` (7 values, see below), `--source=mcp\|cli`, `--tool=<name>`, `--note=<title>`, `--outcome=success\|error`, `--vault=<name>`, `--since=<duration\|ISO8601>`, `--limit=N`, `--follow`, `--json` | `--file` defaults to `audit`; the rest are audit-only — see below. `--vault` filters `audit.log` entries by which vault the call targeted (S008); like the other audit-only flags, it's rejected on a non-`audit` `--file`. |
+| `mnotes logs` | `--file=<name>` (7 values, see below), `--source=mcp\|cli`, `--tool=<name>`, `--note=<title>`, `--outcome=success\|error`, `--vault=<name>`, `--since=<duration\|ISO8601>`, `--limit=N`, `--follow`, `--json` | `--file` defaults to `audit`; the rest are audit-only — see below. `--vault` is a plain filter on `audit.log`'s `vault` field (S008), **not** a target-vault selector like every other command's `--vault` — omitted, it shows every vault's entries, not just the default one (see "`--vault <name>` and vault resolution" above). Like the other audit-only flags, it's rejected on a non-`audit` `--file`. |
 | `mnotes vectors <subcommand>` | (per subcommand) | `compare`/`nearest`/`cluster`/`reduce`/`tag-fit`/`tag-redundancy`/`outliers`/`calibrate` — CLI-only debug/analysis tooling over the raw embedding space, no MCP equivalent (same rationale as `mnotes links`). Fully specified in [S013 — Vector Tools](S013-vector-tools.md), which owns `src/cli/vectors.js` and amends this spec only to add `vectors` to the dispatch table above; S013 also owns whether/how its subcommands take `--vault`. |
 | `mnotes vaults` | `--json` | Lists every configured vault: `name`, `description` (empty if unset), and whether it's the default — see below. CLI-only, no exact-title/path resolution to speak of. |
 

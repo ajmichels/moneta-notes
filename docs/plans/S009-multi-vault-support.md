@@ -117,7 +117,10 @@ Build bottom-up: config resolution (1) has to exist before the daemon (2) or CLI
       Add `vaults` to `TOP_LEVEL_HELP` and `COMMAND_USAGE`.
 - [ ] `mnotes logs --vault=<name>`: add to `cli/logs.js`'s audit-only flag set and filter predicate
       (alongside `--source`/`--tool`/`--note`/`--outcome`), rejected on non-`audit` `--file` same as the
-      others (S006). Also: the audit-line parser's field list gains `vault`; `formatLogsTable`/
+      others (S006). **This is a plain equality filter, not a call to `resolveVault`** — do not give it
+      the default-vault-fallback treatment step 3's other `--vault` flags get: omitted, it must show
+      every vault's entries unfiltered; an unrecognized name is not an error, it's a filter matching
+      zero rows (S006). Also: the audit-line parser's field list gains `vault`; `formatLogsTable`/
       `formatLogRow` (default table + `--follow` streaming) gain a `vault` column; NDJSON `--json` mode
       includes `vault` per entry, `null` when absent (list_vaults tool calls only). An entry with no
       `vault` field never matches a `--vault` filter, regardless of value.
