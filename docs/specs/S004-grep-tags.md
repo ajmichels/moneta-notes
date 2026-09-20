@@ -66,9 +66,9 @@ per row). Same real-boolean-at-core-layer, sentinel-string-at-format-layer split
 - `file_line_count` means the same thing here as everywhere else it appears in the tool surface
   (`search`, `tag_notes`, `stats`, `read`): the frontmatter-stripped body's logical line count, per
   `core/note-fs.js`'s `countLines` contract (S010). Since `grep` reads the vault directly rather than
-  through the index (this section's opening line), it can't just read `notes.line_count` — it parses
-  each matched file's frontmatter out (via `gray-matter`, same as `noteRead`) before counting, so the
-  number means the same thing regardless of which command reported it.
+  through the index, it can't just read `notes.line_count` — it parses each matched file's frontmatter
+  out (via `gray-matter`, same as `noteRead`) before counting, so the number means the same thing
+  regardless of which command reported it.
 - Line numbers inside `line_matches` are ripgrep's own, unadjusted — they count from the top of the
   **raw file on disk** (frontmatter included), since that's what a match's line number means when you
   open the file in an editor. This is intentionally different from `file_line_count` above, which is
@@ -150,12 +150,11 @@ Tags come from two sources per note, merged into one set with no source distinct
      instead of escaping each `#`. A bare shell shebang (`#!/bin/bash`) needs no such protection
      regardless of code fencing: `!` isn't a valid tag character, so the pattern never matches there in
      the first place.
-   - **Two verified escapes exist**: a leading backslash (`\#foo`) for a single value, or wrapping in
-     backticks/a code fence for anything else (a hex color, or a whole adjacent run). A human typing in
-     an editor gets Obsidian's own tag highlighting as a visual cue that something just became a tag —
-     an agent calling `note_write`/`note_edit`/`note_append` over MCP gets no such signal, so S007
-     duplicates this guidance directly into those three tools' descriptions (`TAG_ESCAPE_NOTE`) rather
-     than assuming the caller has read this spec.
+   - A human typing in an editor gets Obsidian's own tag highlighting as a visual cue that something
+     just became a tag — an agent calling `note_write`/`note_edit`/`note_append` over MCP gets no such
+     signal, so S007 duplicates this escape guidance (leading backslash for a single value; backticks/a
+     code fence for anything else) directly into those three tools' descriptions (`TAG_ESCAPE_NOTE`)
+     rather than assuming the caller has read this spec.
 
 **Changing these rules requires bumping `EXTRACTION_VERSION`** (`indexer/daemon.js`, S005) — a
 parsing-logic fix here doesn't touch any note's file content, so `mnotes reindex` would otherwise
@@ -207,9 +206,9 @@ any nested child (`project/api-migration`, `project/website`, ...) — a case-in
 practice than requiring the exact hierarchical string — "show me everything project-related" is the
 natural query, not "show me only the bare #project tag."
 
-This is a deliberate asymmetry with `tag_list` (which shows exact-match counts per row, not rolled
-up) — `tag_list` is an inventory view of what tags exist, `tag_notes` is a "find everything under
-this tag" query. Both are correct for what they're each for.
+This is a deliberate asymmetry with `tag_list`'s exact-match-only counts: `tag_list` is an inventory
+of what tags exist, `tag_notes` answers "find everything under this tag" — both correct for what
+they're each for.
 
 ## Logging
 
@@ -235,4 +234,3 @@ extraction function itself.
 - **When/how extraction runs during reindex** (per-note vs. full-vault, idempotency) — S005.
 - **CLI-only `--explain` style debug output for grep or tags** — S006, if it ends up needed there at
   all (neither tool has raw scores to hide in the first place, unlike search).
-</content>

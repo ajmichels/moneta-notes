@@ -116,12 +116,10 @@ absent case, so the contract stays a flat list of names both files must define:
 | `os_watcher_install_hint` | prints the human-facing install command for the preflight warning | `` `brew install fswatch` `` | generic multi-distro line, no detection (see below) |
 | `os_ripgrep_install_hint` | same, for `rg` | `` `brew install ripgrep` `` | generic multi-distro line, no detection (see below) |
 
-These two are plain **hints** — same posture as the existing macOS `brew` warnings, which never invoke Homebrew on the user's behalf either. `os-linux.sh` doesn't attempt to detect which package manager is present and pick a single command; a user running any of these distros already knows which package manager they run and how to use it, so the win from detection logic wouldn't be worth the extra fenced-off code path it'd need. Instead each hint is one static, generic line naming all three:
+These two are plain **hints**, static strings rather than scripts that shell out to detect anything — same posture as the existing macOS `brew` warnings, which never invoke Homebrew on the user's behalf either, and the same one-liner-function simplicity as `os_prepare_launch_executable`'s Linux branch. `os-linux.sh` doesn't attempt to detect which package manager is present and pick a single command; a user running any of these distros already knows which package manager they run and how to use it, so the win from detection logic wouldn't be worth the extra fenced-off code path it'd need. Instead each hint is one static, generic line naming all three:
 
 - `os_ripgrep_install_hint`: `"install ripgrep via your distro's package manager, e.g. apt install ripgrep / dnf install ripgrep / pacman -S ripgrep"` — verified as an official package with no extra repo needed on Debian/Ubuntu (`apt`), Fedora (`dnf`), and Arch (`pacman -S ripgrep`, `extra` repo).
 - `os_watcher_install_hint`: `"install fswatch via your distro's package manager, e.g. apt install fswatch / pacman -S fswatch; on RHEL/CentOS/Rocky/AlmaLinux enable EPEL first (dnf install epel-release fswatch)"` — verified as an official package on Debian/Ubuntu (`apt`) and Arch (`pacman -S fswatch`, promoted out of the AUR into `extra`, so no AUR helper is needed) and on plain Fedora (`dnf install fswatch` works directly there); RHEL-family enterprise clones (RHEL/CentOS/Rocky/AlmaLinux, as opposed to Fedora itself) only carry it in EPEL, not the base repos, so the hint calls that out explicitly rather than implying a bare `dnf install fswatch` always works. This distinction is worth keeping in the hint text itself (not just this spec) since "RHEL-based" plausibly means the enterprise clones, not Fedora.
-
-Both hints are static strings, not scripts that shell out to detect anything — same one-liner-function simplicity as `os_prepare_launch_executable`'s Linux branch.
 
 ### Concept mapping
 
@@ -138,11 +136,11 @@ Both hints are static strings, not scripts that shell out to detect anything —
 | TLS-intercepting proxy visibility (e.g. Zscaler) | plist's `EnvironmentVariables` dict carries `NODE_EXTRA_CA_CERTS` | unit's `Environment=NODE_EXTRA_CA_CERTS=...` line (same underlying problem as the PATH row above, for a different env var: a corporate proxy's root CA lands in the OS/browser trust store, but Node's `fetch` doesn't consult it, and neither service sees a shell rc file's `export NODE_EXTRA_CA_CERTS=...` — install.sh carries forward whatever value is in its own environment at install time, empty string if unset, which Node treats as a no-op) |
 | Running without an active login session | not supported — LaunchAgents require an active GUI session (`gui/<uid>`) | not supported by default either — a systemd *user* instance normally only runs during an active login session. A headless/always-on Linux box needs `loginctl enable-linger $(whoami)` to keep it running unattended; `scripts/install.sh`'s Linux path prints this as an install-time hint (same "warn and continue" posture as the `rg`/`fswatch` preflight checks), not something it runs automatically |
 
-The native-launcher row is the one place this project has genuinely asymmetric logic between the two
-platforms, not just a different implementation of the same idea — Linux's `os_prepare_launch_executable`
-isn't "the Linux version of code-signing," it's a no-op because the problem the launcher solves is
-macOS-specific from the ground up. `launchd/launcher.c`, `launchd/Info.plist`, and the `.app`-bundle
-build step stay macOS-only artifacts with no parallel structure created on the Linux side.
+The native-launcher row is the one place this project has genuinely asymmetric logic, not just a
+different implementation of the same idea — Linux's `os_prepare_launch_executable` isn't "the Linux
+version of code-signing," it's a no-op, because the problem the launcher solves is macOS-specific from
+the ground up. `launchd/launcher.c`, `launchd/Info.plist`, and the `.app`-bundle build step are
+macOS-only artifacts with no Linux counterpart.
 
 ## `config.toml` schema
 
@@ -202,8 +200,8 @@ to begin with), and — per the install flow below — a user who accepts every 
 install ends up with **no config.toml file at all**, since there'd be nothing to override.
 
 `config.example.toml` still documents the full shape (every key shown, for discoverability) —
-documentation only, never the real config, per the existing convention. It's not what gets copied to
-produce the real file; the real file (if written) only ever contains genuinely-overridden keys.
+documentation only, never copied to produce the real file, which (if written at all) only ever contains
+the genuinely-overridden keys per above.
 
 ## Install (`scripts/install.sh`)
 
@@ -242,27 +240,26 @@ step 10's `pnpm add --global` links the CLI to this same `node_modules` rather t
 5. **Create the logs directory** (`os_log_dir`: `~/Library/Logs/com.ajmichels.mnotes/` on macOS,
    `${XDG_STATE_HOME:-~/.local/state}/mnotes/log/` on Linux).
 6. **Prepare the launch executable** (`os_prepare_launch_executable`):
-   - **macOS**: build the native launcher app bundle. macOS's Background Task Management attributes a
-     LaunchAgent's "Software from X" identity (both the Login Items & Extensions listing and the
-     transient "App Background Activity" notification) to the code signature of the executable
-     `ProgramArguments` actually launches — pointing it straight at `node` gets both LaunchAgents
-     attributed to Node.js Foundation's signing identity, not to `mnotes`. `which clang` — if present
-     (Xcode Command Line Tools; near-universal on a dev Mac), compile `launchd/launcher.c` (a ~20-line
-     native launcher that `execv`s `<node> --disable-warning=ExperimentalWarning <script> [args...]`,
-     with the `node` path baked in at compile time via `-DNODE_BIN_PATH`) into
+   - **macOS**: build the native launcher app bundle. Per the Background Task Management identity issue
+     above, the attributed identity shows up in both the Login Items & Extensions listing and the
+     transient "App Background Activity" notification — pointing `ProgramArguments` straight at `node`
+     gets both LaunchAgents (daemon and log-rotation) attributed to Node.js Foundation's signing
+     identity, not to `mnotes`. `which clang` — if present (Xcode Command Line Tools; near-universal on
+     a dev Mac), compile `launchd/launcher.c` (a ~20-line native launcher that `execv`s `<node>
+     --disable-warning=ExperimentalWarning <script> [args...]`, with the `node` path baked in at compile
+     time via `-DNODE_BIN_PATH`) into
      `<app-support-dir>/MonetaNotes.app/Contents/MacOS/moneta-notes-launcher`, copy `launchd/Info.plist`
      (static `CFBundleName`/`CFBundleIdentifier` metadata, no templating needed) alongside it as
      `Contents/Info.plist` so Launch Services can resolve a bundle name, then ad-hoc sign the bundle
      (`codesign --sign -` — no paid Apple Developer ID needed, since this binary is compiled and run
      locally, never distributed, so Gatekeeper's quarantine flow never triggers). If `clang` is missing,
-     warn (same "warn and continue" posture as step 1's `rg` check, naming `xcode-select --install` as
-     the fix) and fall back to writing a plain `<app-support-dir>/mnotes-node-wrapper.sh`
-     (`exec node --disable-warning=... "$@"`) instead — functionally equivalent (the LaunchAgent still
-     works, warning still suppressed), just without the corrected BTM identity.
-   - **Linux**: a one-liner — `LAUNCH_EXECUTABLE="$NODE_BIN"`. The Background Task Management identity
-     problem this step solves on macOS doesn't exist on Linux (see Platform abstraction above): a
-     systemd unit's own `Description=` is its identity, nothing attributes it via a launched binary's
-     code signature, so there's no bundle to build, no signing step, and no fallback-wrapper case.
+     warn (warn-and-continue, naming `xcode-select --install` as the fix) and fall back to writing a
+     plain `<app-support-dir>/mnotes-node-wrapper.sh` (`exec node --disable-warning=... "$@"`) instead —
+     functionally equivalent (the LaunchAgent still works, warning still suppressed), just without the
+     corrected BTM identity.
+   - **Linux**: a one-liner — `LAUNCH_EXECUTABLE="$NODE_BIN"`. The BTM identity problem this step solves
+     on macOS doesn't exist on Linux (see Concept mapping above), so there's no bundle to build, no
+     signing step, and no fallback-wrapper case.
    - Either way, this step's output is a single **launch executable path** that step 7 points the
      daemon's service definition at.
 7. **Write the service definition file(s)** (`os_write_service_files`):
@@ -283,16 +280,14 @@ step 10's `pnpm add --global` links the CLI to this same `node_modules` rather t
      up), and `mnotes-logrotate.timer` (`OnCalendar=*-*-* 00,06,12,18:00:00`, `Persistent=true` — S008).
      All three go under `os_service_dir` (`${XDG_CONFIG_HOME:-~/.config}/systemd/user/`), followed by
      `systemctl --user daemon-reload` so systemd notices the new/changed files.
-   - Both OSes' daemon service definition also carries the `fswatch`-directory PATH fix from the
-     existing behavior below (macOS: `EnvironmentVariables` plist dict; Linux: `Environment=PATH=...`
-     unit line) — services on both platforms run with a minimal PATH that omits wherever `fswatch` was
-     installed, so `FSWATCH_DIR` (resolved via `command -v fswatch`, common to both OSes) gets prepended
-     either way, just rendered into each platform's own format.
-   - Same mechanism, for `NODE_EXTRA_CA_CERTS`: if set in install.sh's own environment (e.g. a shell rc
-     file exporting it for a TLS-intercepting corporate proxy — see Concept mapping above), its value is
-     rendered into the same plist dict / unit `Environment=` line, empty string otherwise (a harmless
-     no-op for Node). This is an install-time snapshot, same limitation the PATH fix already has —
-     changing the value later means re-running `install.sh` to pick it up.
+   - Both OSes' daemon service definition also carries the `fswatch`-directory PATH fix (macOS:
+     `EnvironmentVariables` plist dict; Linux: `Environment=PATH=...` unit line — see Concept mapping
+     above for why both need it): `FSWATCH_DIR` (resolved via `command -v fswatch`, common to both OSes)
+     gets prepended to the service's minimal PATH, rendered into each platform's own format.
+   - Same mechanism, for `NODE_EXTRA_CA_CERTS` (see Concept mapping above): if set in install.sh's own
+     environment, its value is rendered into the same plist dict / unit `Environment=` line, empty
+     string otherwise (a harmless no-op for Node). This is an install-time snapshot, same limitation as
+     the PATH fix — changing the value later means re-running `install.sh` to pick it up.
 8. **Activate both services** (`os_enable_services`): macOS —
    `launchctl bootout gui/$(id -u) <plist path>` (tolerating "wasn't loaded" — a first-ever install has
    nothing to boot out) then `launchctl bootstrap gui/$(id -u) <plist path>` for both plists. The
@@ -303,12 +298,9 @@ step 10's `pnpm add --global` links the CLI to this same `node_modules` rather t
    plist actually take effect instead of silently no-op'ing against the stale loaded one. Linux —
    `systemctl --user enable --now <unit>` for both `mnotes.service` and `mnotes-logrotate.timer` (not
    `mnotes-logrotate.service` directly — the timer is what's enabled/persistent; it triggers the service
-   on its own schedule). On a machine with no active login session expected to stay logged in (a
-   headless/always-on box), also print a hint to run `loginctl enable-linger $(whoami)` — without it, a
-   `systemd --user` instance (and everything in it) stops when the last session for that user ends, the
-   same restriction a macOS LaunchAgent has under `gui/<uid>` needing an active GUI session; this is
-   informational only, same "warn and continue" posture as the `rg`/`fswatch`/`clang` checks, not
-   something this script runs on the user's behalf.
+   on its own schedule). On a headless/always-on box with no login session expected to stay active (see
+   Concept mapping above), also print a hint to run `loginctl enable-linger $(whoami)`
+   (warn-and-continue, not run automatically).
 9. **Pre-download the embedding model**: a one-line pipeline warm-up call (loads the `q8` model per
    the now-created config, triggering `@huggingface/transformers`' download-and-cache) as the final
    step, with a visible "downloading embedding model, this may take a minute..." message — so the

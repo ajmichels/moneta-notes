@@ -9,38 +9,37 @@ Consumed by: Claude Code / Claude Desktop
 
 ## Purpose
 
-Defines the finalized MCP tool set (superseding the README's tool section, which this spec brings up
-to date with decisions made in S002/S003: `note_rename` is new, `note_edit` gains `metadata`, `search`
-gains `limit`; S012 adds `attachment_read`/`attachment_write`), server bootstrap, and how `core/`
-errors map to MCP tool responses. Prompts are explicitly out of scope — see below.
+Defines the finalized MCP tool set — superseding the README's tool section, updated per S002/S003
+decisions (`note_rename` is new, `note_edit` gains `metadata`, `search` gains `limit`; S012 adds
+`attachment_read`/`attachment_write`) — plus server bootstrap and how `core/` errors map to MCP tool
+responses. Prompts are out of scope (see below).
 
 ## Transport
 
 **stdio.** `mnotes-mcp` (the `bin` entry in `package.json`) is launched as a subprocess by Claude
-Code/Desktop and communicates over stdin/stdout via `@modelcontextprotocol/sdk`'s stdio transport —
-no network exposure, no port to configure. Standard setup for a locally-launched, single-user MCP
-server.
+Code/Desktop and communicates over stdin/stdout via `@modelcontextprotocol/sdk`'s stdio transport — no
+network exposure, no port to configure. Standard setup for a locally-launched, single-user MCP server.
 
 ## No daemon interaction
 
-Every tool is a direct `core/` consumer — reads hit the SQLite index directly (WAL mode handles
-concurrent readers safely alongside the daemon's writes), writes touch vault files directly and rely
-on the daemon's `fswatch` loop (S005) to pick up reindexing asynchronously, exactly like the CLI does
-for every command except `reindex`/`stats`. The MCP server never opens the S005 Unix socket — `reindex`
-and `stats` are CLI-only per the README, and no other tool needs daemon-backed work.
+Every tool is a direct `core/` consumer: reads hit the SQLite index directly (WAL mode handles
+concurrent readers safely alongside the daemon's writes), and writes touch vault files directly,
+relying on the daemon's `fswatch` loop (S005) to pick up reindexing asynchronously — exactly like the
+CLI for every command except `reindex`/`stats`. The MCP server never opens the S005 Unix socket;
+`reindex` and `stats` stay CLI-only per the README, and no other tool needs daemon-backed work.
 
 **Schema version handling**: only the daemon rebuilds the schema on a version mismatch (S001/S005) —
-the MCP server never attempts DDL itself, since two processes racing to drop/recreate tables
-concurrently would be actively dangerous. If the MCP server's own schema-version read doesn't match
-what the code expects, tool calls fail with a clear error directing the caller to ensure the daemon is
-running (which owns migration) — the MCP server surfaces the problem, it doesn't fix it.
+two processes racing to drop/recreate tables concurrently would be actively dangerous, so the MCP
+server never attempts DDL itself. If its own schema-version read doesn't match what the code expects,
+tool calls fail with a clear error directing the caller to ensure the daemon (which owns migration) is
+running — the MCP server surfaces the problem, it doesn't fix it.
 
 ## Error mapping
 
 Every `core/` function throws on error (per CLAUDE.md). `mcp/tools.js` catches the thrown `Error` and
 returns it as an MCP tool error response (`isError: true`) with the **original message preserved
 verbatim** — no error-code taxonomy. Claude sees exactly why a call failed (e.g. "hash mismatch: note
-has changed since last read") and can react accordingly (re-read, adjust, retry), rather than a
+has changed since last read") and can react accordingly (re-read, adjust, retry) instead of getting a
 generic failure with the specific reason lost.
 
 ## Output formats
@@ -49,9 +48,9 @@ Two response shapes, chosen per tool for token efficiency (per the README's desi
 
 - **Pipe-delimited columnar plain text** for every list-style tool — `search`, `grep`, `tag_list`,
   `tag_notes`. A header row plus one row per result, no JSON object/array wrapper, no per-field key
-  repetition across rows. This is deliberately **not JSON**: a JSON array of objects repeats every
-  field name once per row, which is pure token overhead for tabular data Claude is going to scan down
-  a column at a time anyway — the header row already documents the shape once.
+  repetition across rows. Deliberately **not JSON**: a JSON array of objects repeats every field name
+  once per row, pure token overhead for tabular data Claude scans down a column at a time — the header
+  row already documents the shape once.
 - **Structured JSON** for `note_read`, the four mutating note tools (`note_write`, `note_edit`,
   `note_append`, `note_rename`), and both attachment tools (`attachment_read`, `attachment_write`,
   S012) — content and metadata are unconstrained text (or, for attachments, base64-encoded binary) that
@@ -79,24 +78,31 @@ other two per their actual semantics rather than a blanket "any mutation is dest
   `new_title` that must not already exist) on each call, so a second identical call fails rather than
   being a no-op — `idempotentHint: false`.
 
-### Read-only guard and reporting (S015)
+### Shared tool-description snippets
 
-Two shared tool-description snippets, appended per tool below (same pattern as `TAG_ESCAPE_NOTE`
-further down this spec — one string, reused, not independently reworded per tool):
+Four snippets are defined once and appended verbatim to every relevant tool's description, rather than
+independently reworded per tool:
 
-- **`READONLY_WRITE_NOTE`** (on `note_write`, `note_edit`, `note_append`, `note_rename`,
+- **`READONLY_WRITE_NOTE`** (S015; on `note_write`, `note_edit`, `note_append`, `note_rename`,
   `attachment_write`): *"Fails if the target path matches a pattern in the vault's `.mnotesreadonly`
   file — the error names the specific pattern that matched."*
-- **`READONLY_READ_NOTE`** (on `note_read`, `search`, `grep`, `tag_notes`, `attachment_read`; also on
-  `metadata_query`, in its own S014 tool description): *"A `readonly` field/column is present when the
-  note matches a read-only pattern — check it before attempting to write."*
-
-**`NO_INLINE_FRONTMATTER_NOTE`** (on `note_write`, `note_edit`, `note_append`; issue #13, S003):
-*"Do not write a `---` YAML frontmatter block yourself — pass frontmatter fields via the metadata
-parameter instead; this stays body text only."* Same shared-snippet pattern as the two above — stated
-in the tool description up front, not left to be discovered via `core/notes.js`'s
-`assertNoFrontmatterBlock` error (S003) when a caller (an agent that notices a note "should have
-frontmatter" and hand-writes one) hits it.
+- **`READONLY_READ_NOTE`** (S015; on `note_read`, `search`, `grep`, `tag_notes`, `attachment_read`;
+  also on `metadata_query`, in its own S014 tool description): *"A `readonly` field/column is present
+  when the note matches a read-only pattern — check it before attempting to write."*
+- **`NO_INLINE_FRONTMATTER_NOTE`** (issue #13, S003; on `note_write`, `note_edit`, `note_append`):
+  *"Do not write a `---` YAML frontmatter block yourself — pass frontmatter fields via the metadata
+  parameter instead; this stays body text only."* Stated up front in the tool description, rather than
+  left to be discovered via `core/notes.js`'s `assertNoFrontmatterBlock` error (S003) when a caller (an
+  agent that notices a note "should have frontmatter" and hand-writes one) hits it.
+- **`TAG_ESCAPE_NOTE`** (on `note_write`, `note_edit`, `note_append`): warns about inline tag
+  extraction. Content passed to these tools is scanned for `#hashtags` on the next reindex exactly as
+  S004 describes, and a caller has no way to see that scan happen — unlike a human typing directly into
+  the vault in an editor with Obsidian's own tag highlighting, an agent calling these tools blind gets
+  no visual signal that adjacent refs like `#1`/`#2` just became tags. A single isolated ref like `#5`
+  is already safe (rejected as purely numeric, per S004) and the note says so, so a caller doesn't
+  over-escape things that were never at risk. It states both escapes S004's extractor honors: a leading
+  backslash (`\#foo`) for a single value, or wrapping a longer run in backticks/a code span (a hex
+  color, or several adjacent refs) — backslash only escapes the one `#` it precedes, not a whole run.
 
 ### `search`
 
@@ -125,12 +131,12 @@ about to use `search` reliably, not an implementation detail to hide.
 **Input**: `pattern<string>`, `?regex<bool>=false`, `?note_title<string>`, `reason<string>`.
 **Output**: `note_title`, `file_line_count`, `line_matches` (capped at 10 per note + `(+N more)`, per
 S004), `?readonly` (S015, `READONLY_READ_NOTE`) — **line numbers only** (`L2, L5`), never the matched
-line's text. Unlike the CLI (S006), the
-MCP tool has no input for opting into match text — grep is meant to help Claude locate *which* notes
-and *which lines* are worth a closer look, not to substitute for reading them. Returning matched text
-inline would burn context on content Claude hasn't decided it needs yet, especially for a broad
-pattern with many hits across many notes; the intended flow is `grep` to find candidates, then
-`note_read` (scoped to the relevant `start_line`/`end_line`) to actually see them.
+line's text. Unlike the CLI (S006), the MCP tool has no input for opting into match text — grep is
+meant to help Claude locate *which* notes and *which lines* are worth a closer look, not to substitute
+for reading them. Returning matched text inline would burn context on content Claude hasn't decided it
+needs yet, especially for a broad pattern with many hits across many notes; the intended flow is
+`grep` to find candidates, then `note_read` (scoped to the relevant `start_line`/`end_line`) to
+actually see them.
 
 `note_title` resolves the same way `note_read`'s does (S004/S010): exact match, then unique-basename
 fallback — the tool description should say so, since a caller scoping `grep` to a note it only knows
@@ -169,17 +175,6 @@ requires that absolute title exactly; read a note first if you only have a short
 This is the sentence that makes the read/write split (S003/S010) legible to Claude at call time, not
 just to a spec reader.
 
-**`note_write`/`note_edit`/`note_append` all warn about inline tag extraction in their tool
-description** (a shared `TAG_ESCAPE_NOTE` string, appended to each): content passed to these tools is
-scanned for `#hashtags` on the next reindex exactly as S004 describes, and a caller has no way to see
-that scan happen — unlike a human typing directly into the vault in an editor with Obsidian's own tag
-highlighting, an agent calling these tools blind has no visual signal that adjacent refs like `#1/#2`
-just became tags. A single isolated ref like `#5` is already safe (rejected as purely numeric, per
-S004) and the description says so, so a caller doesn't over-escape things that were never at risk. The
-description states both escapes S004's extractor honors: a leading backslash (`\#foo`) for a single
-value, or wrapping a longer run in backticks/a code span (a hex color, or several adjacent refs) —
-backslash only escapes the one `#` it precedes, not a whole run.
-
 ### `note_write`
 
 **Input**: `note_title<string>`, `hash<null|string>`, `?metadata<json>`, `content<string>`,
@@ -206,12 +201,12 @@ ambiguous wikilink reference."*
 (S015) and `NO_INLINE_FRONTMATTER_NOTE` (issue #13).
 **Output**: `{ title, hash, line_count }`.
 
-Fails first if `note_title` matches a `.mnotesreadonly` pattern (S015), before the hash check.
-Errors unless `old_txt` matches exactly once. `metadata` uses the same merge semantics as
-`note_write` — this is new relative to the README's current documentation (S003 closed this gap).
+Fails first if `note_title` matches a `.mnotesreadonly` pattern (S015), before the hash check. Errors
+unless `old_txt` matches exactly once. `metadata` uses the same merge semantics as `note_write` — this
+is new relative to the README's current documentation (S003 closed this gap).
 
-Same as `note_write`: `note_title` requires the exact absolute title, no resolution fallback (S003/
-S010) — tool description states this the same way.
+Same as `note_write`: `note_title` requires the exact absolute title, no resolution fallback
+(S003/S010) — tool description states this the same way.
 
 ### `note_append`
 
@@ -220,8 +215,8 @@ S010) — tool description states this the same way.
 `NO_INLINE_FRONTMATTER_NOTE` (issue #13).
 **Output**: `{ title, hash, line_count }`.
 
-Fails first if `note_title` matches a `.mnotesreadonly` pattern (S015), before the hash check.
-No `metadata` param (append stays content-only, per S003).
+Fails first if `note_title` matches a `.mnotesreadonly` pattern (S015), before the hash check. No
+`metadata` param (append stays content-only, per S003).
 
 Same as `note_write`/`note_edit`: `note_title` requires the exact absolute title, no resolution
 fallback (S003/S010).
@@ -235,19 +230,16 @@ rewritten `id` frontmatter field **and** the outcome of the link cascade below, 
 
 Fails first if `old_title` **or** `new_title` matches a `.mnotesreadonly` pattern (S015) — protects an
 existing read-only note from being moved, and protects a read-only-globbed zone from a normal note
-being moved into it. Checked before the hash comparison and the `new_title`-already-exists check below.
-Hard error if `new_title` already exists — no `force` override.
+being moved into it — checked before the hash comparison and the `new_title`-already-exists check
+below. Hard error if `new_title` already exists — no `force` override.
 
-The link cascade below is a deliberate exception to this guard — it rewrites `[[old_title]]` references
-in other notes, including read-only ones, so a rename never leaves a read-only note's link dangling
-(S003/S015 explain why).
-
-Also rewrites `[[old_title]]` references in every other note that links to it, so search/read results
-never point Claude at a stale link after a rename (S003/S011's link cascade) — this happens
-synchronously inside the call, no separate tool or follow-up action needed. That cascade's own
-internal matching against *other* notes' link text is basename-aware (S003/S011); `old_title`/
-`new_title` themselves are not — both require the exact absolute title, same as every other mutating
-tool, no resolution fallback (S003/S010).
+Also rewrites `[[old_title]]` references in every other note that links to it — including read-only
+ones, a deliberate exception to the guard above so a rename never leaves a read-only note's link
+dangling (S003/S015) — so search/read results never point Claude at a stale link after a rename
+(S003/S011's link cascade). This happens synchronously inside the call, no separate tool or follow-up
+action needed. That cascade's own internal matching against *other* notes' link text is basename-aware
+(S003/S011); `old_title`/`new_title` themselves are not — both require the exact absolute title, same
+as every other mutating tool, no resolution fallback (S003/S010).
 
 ### `attachment_read` (new — S012)
 
@@ -271,15 +263,15 @@ file over the cap with `include_content: true` (the default) is a hard error nam
 directing the caller to retry with `include_content: false` for metadata only, or (PDFs) with
 `start_page`/`end_page` (S012) for a page-range slice instead of the whole file.
 
-**Bytes are never inlined as a base64 string inside the JSON metadata block.** An earlier version of
-this tool did exactly that — one `text` content block containing
-`{ path, size_bytes, mime_type, content_base64 }` as a single JSON string — which put the entire
-base64 payload in front of the model as literal text with no structural signal that it was opaque,
-already-decoded binary data rather than something to reason over. In practice this caused the model
-to try to manually "decode" large attachments itself mid-turn, ballooning output tokens until the
-turn timed out — worse than the truncation problem the `text`-only design was chosen to avoid (below).
-The fix: `content` (when included) is now its own content block, split by whether the Claude API can
-render it as vision input —
+**Bytes are never inlined as a base64 string inside the JSON metadata block.** An earlier version did
+exactly that — one `text` content block containing `{ path, size_bytes, mime_type, content_base64 }`
+as a single JSON string — which put the entire base64 payload in front of the model as literal text
+with no structural signal that it was opaque, already-decoded binary data rather than something to
+reason over. In practice the model tried to manually "decode" large attachments itself mid-turn,
+ballooning output tokens until the turn timed out — worse than the truncation problem the `text`-only
+design was chosen to avoid (below). The fix: `content` (when included) is now its own content block,
+split by whether the Claude API can render it as vision input:
+
 - **`image/png`, `image/jpeg`, `image/gif`, `image/webp`** → an `image` content block
   (`{ type: 'image', data, mimeType }`) — the exact four raster formats the Claude API's vision input
   accepts; nothing else qualifies even if MCP's own schema would technically allow representing it as
@@ -296,20 +288,19 @@ render it as vision input —
 500000 }`** — a Claude-Code-specific annotation (documented at
 `code.claude.com/docs/en/mcp#mcp-output-limits-and-warnings`, not part of the MCP spec itself) that
 raises a tool's `text`-content output threshold to the annotation's hard ceiling, independent of
-whatever `MAX_MCP_OUTPUT_TOKENS` the client has configured globally — without it, the `text` metadata
+whatever `MAX_MCP_OUTPUT_TOKENS` the client has configured globally. Without it, the `text` metadata
 block plus a base64-inlined `image` block together (as this tool used to return) easily tripped Claude
 Code's default 25,000-token MCP-output limit and got silently persisted to disk with a file-reference
 stub in its place. The docs are explicit that this annotation **has no effect on `image`-typed
 content** — an `image` block stays subject to `MAX_MCP_OUTPUT_TOKENS` regardless, so a large raster
 image read through this tool can still hit that global cap and get silently truncated to a disk
 reference. The docs are silent on `resource`-typed content either way (neither confirmed to inherit
-the `text` override nor confirmed to be excluded like `image`) — this is unverified, closed-source
-client behavior, not a settled guarantee, and worth confirming empirically against a real oversized
-PDF before leaning on it. The annotation itself stays a flat constant, not derived from
-`[attachments].max_read_bytes` (S009) — the two caps bound different things (one what's read off disk,
-the other what a specific client will forward for `text` content) and conflating them would just
-reintroduce the same silent-truncation failure mode for any `max_read_bytes` configured above 500,000
-characters' worth of base64.
+the `text` override nor confirmed to be excluded like `image`) — unverified, closed-source client
+behavior, worth confirming empirically against a real oversized PDF before leaning on it. The
+annotation itself stays a flat constant, not derived from `[attachments].max_read_bytes` (S009) — the
+two caps bound different things (one what's read off disk, the other what a specific client forwards
+for `text` content), and conflating them would reintroduce the same silent-truncation failure mode for
+any `max_read_bytes` configured above 500,000 characters' worth of base64.
 
 ### `attachment_write` (new — S012)
 
@@ -318,11 +309,10 @@ carries `READONLY_WRITE_NOTE` (S015).
 **Output**: `{ path, size_bytes, mime_type }`.
 
 Fails first if `attachment_path` matches a `.mnotesreadonly` pattern (S015), before the parent-
-directory creation or the atomic write below.
-Create-or-overwrite, unconditional — **no hash guard** (S012: CLAUDE.md's hash-guard rule is scoped to
-notes' diffable text content, which binary attachments have no equivalent of). Same exact-path
-requirement as `attachment_read`, same vault-containment check every path-taking tool in this project
-already has (S010's `resolveVaultPath`).
+directory creation or the atomic write below. Create-or-overwrite, unconditional — **no hash guard**
+(S012: CLAUDE.md's hash-guard rule is scoped to notes' diffable text content, which binary attachments
+have no equivalent of). Same exact-path requirement as `attachment_read`, same vault-containment check
+every path-taking tool in this project already has (S010's `resolveVaultPath`).
 
 ## Prompts — explicitly out of scope here
 
@@ -336,7 +326,7 @@ with the SDK) until that spec lands.
 
 ## Logging
 
-`src/mcp/server.js` does two separate things with the logger, both per `S008`:
+`src/mcp/server.js` does two things with the logger, both per `S008`:
 
 1. **Server lifecycle**, at `info` on its own `getLogger('mcp-server', defaultLogDir())` instance:
    `"server started"` on boot, `"stdio transport connected"`/`"stdio transport disconnected"` as the
@@ -346,22 +336,21 @@ with the SDK) until that spec lands.
 2. **Per-tool-call wrapping**, in `mcp/tools.js`'s dispatch: every tool invocation — read or write,
    `search` through `note_rename` — runs as `runWithLogger(mcpLogger, () => handler(args))`, so any
    `getContextLogger()` call inside the `core/` function it invokes (`S002`'s malformed-query `warn`,
-   `S003`'s `id`-overwrite `debug`, `S004`'s ripgrep-not-found `warn`, `S001`'s schema-mismatch `warn`
-   in the unlikely event the MCP server's own connection hits it) lands in `mcp-server.log`. Separately
-   from that context, **every** tool call — this is the asymmetry with the CLI, which per `S006` only
-   audits mutations — also gets a `logAudit(getAuditLogger(defaultLogDir()), { tool, noteTitle,
-   source: 'mcp', reason, outcome, errorMessage })` call in `audit.log`, using the tool's own
-   (required, per CLAUDE.md) `reason` argument. This is what "logged per S008, not used to gate
-   behavior" in the Tool set intro above actually resolves to: every tool call is audited regardless of
-   outcome, `reason` is captured verbatim, and a caught thrown error (per "Error mapping" above) becomes
-   `outcome: 'error'` with the preserved error message as `error_message` — the same message Claude sees
-   in the tool response.
+   `S003`'s `id`-overwrite `debug`, `S004`'s ripgrep-not-found `warn`, `S001`'s schema-mismatch `warn`,
+   should the MCP server's own connection ever hit it) lands in `mcp-server.log`. Independent of that,
+   **every** tool call — unlike the CLI, which per `S006` only audits mutations — also gets a
+   `logAudit(getAuditLogger(defaultLogDir()), { tool, noteTitle, source: 'mcp', reason, outcome,
+   errorMessage })` call in `audit.log`, using the tool's own (required, per CLAUDE.md) `reason`
+   argument. This is what "logged per S008, not used to gate behavior" in the Tool set intro above
+   resolves to: every tool call is audited regardless of outcome, `reason` is captured verbatim, and a
+   caught thrown error (per "Error mapping" above) becomes `outcome: 'error'` with the preserved error
+   message as `error_message` — the same message Claude sees in the tool response.
 
-Net effect: an MCP-driven `search` that hits `core/search.js`'s malformed-FTS5-query throw produces
-*two* durable records — a `warn` line in `mcp-server.log` from the `core/` call site itself, and an
-`outcome: 'error'` line in `audit.log` from the tool-call wrapper — which is intentional redundancy
-(different files, different purposes: one is "what happened inside this component," the other is "what
-did this caller do and did it work") rather than something to deduplicate.
+The two records serve different purposes and are intentionally redundant rather than something to
+deduplicate: e.g. an MCP-driven `search` that hits `core/search.js`'s malformed-FTS5-query throw
+produces a `warn` line in `mcp-server.log` ("what happened inside this component") *and* an
+`outcome: 'error'` line in `audit.log` ("what did this caller do and did it work"), in two separate
+files for two separate readers.
 
 ## Explicitly out of scope here (beyond prompts)
 

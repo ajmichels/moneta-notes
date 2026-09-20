@@ -15,8 +15,7 @@ are.
 
 `core/db.js` owns schema creation, migration (version-check-and-rebuild), and low-level connection
 setup. It exposes plain functions that `core/notes.js`, `core/search.js`, and `core/tags.js` call —
-it does not itself implement note I/O, search ranking, or tag extraction logic (those are specified
-in S003/S002/S004 respectively).
+note I/O, search ranking, and tag extraction logic live in S003/S002/S004 respectively, not here.
 
 ## Driver: `node:sqlite`
 
@@ -45,14 +44,14 @@ db.exec('PRAGMA busy_timeout = 5000');
 db.exec('PRAGMA foreign_keys = ON');
 ```
 
-**`WAL` + `busy_timeout`**: three separate processes (the indexing daemon, the CLI, the MCP server)
-all open connections against the same SQLite file, with the daemon as the sole writer and the
-CLI/MCP server as readers. The default rollback-journal mode blocks readers during a writer's
-transaction; `WAL` lets readers proceed against the last-committed snapshot while a write is in
-progress. `busy_timeout = 5000` means a genuine contention moment (e.g. two writers, which
-shouldn't normally happen but isn't impossible) waits up to 5s and retries rather than throwing
-`SQLITE_BUSY` immediately. Both values are `config.toml`-backed per this project's established
-tunable pattern (S009) — 5000ms is the default, not a hardcoded constant.
+**`WAL` + `busy_timeout`**: three separate processes (indexing daemon, CLI, MCP server) open
+connections against the same file, with the daemon as sole writer and CLI/MCP as readers. The
+default rollback-journal mode blocks readers during a writer's transaction; `WAL` lets readers
+proceed against the last-committed snapshot while a write is in progress. `busy_timeout = 5000`
+makes a genuine contention moment (e.g. two writers, which shouldn't normally happen but isn't
+impossible) wait up to 5s and retry rather than throwing `SQLITE_BUSY` immediately. Both values are
+`config.toml`-backed per this project's established tunable pattern (S009) — 5000ms is the default,
+not a hardcoded constant.
 
 **`node:sqlite` numeric binding**: `DatabaseSync` binds every JS `number` parameter as SQLite
 `REAL`, never `INTEGER` (verified: `SELECT typeof(?)` bound to `5` returns `'real'`; only a
@@ -85,8 +84,8 @@ One row per indexed note file.
 | `extraction_version` | INTEGER | NOT NULL DEFAULT 0  | The `EXTRACTION_VERSION` (`indexer/daemon.js`) in effect the last time this note's tags/links were extracted. Checked the same way `chunks.embedding_version` is (S005) — a mismatch forces reprocessing on the next `mnotes reindex` even though the file's `content_hash` is unchanged, which is what makes a tag/link-extraction-logic fix (S004/S011) reach already-indexed notes without a schema rebuild. |
 
 **Title is never stored.** `core/note-fs.js` (S010) derives it from `path` (strip vault root prefix,
-strip `.md` extension) and derives `path` from a title the same way in reverse. This is a pure,
-deterministic transform — storing both would risk drift between them for zero benefit.
+strip `.md` extension) and derives `path` from a title the same way in reverse — a pure,
+deterministic transform. Storing both would risk drift between them for zero benefit.
 
 ### `notes_fts` (FTS5, contentless)
 
@@ -101,12 +100,12 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
 ```
 
 - `content=''` makes this a **contentless** FTS5 table: it stores only the inverted index (tokens →
-  rowid), never the note text itself. This matches the README's "no duplicated note content" rule.
-  It means `snippet()`/`highlight()` are unavailable — acceptable because the `search` tool's output
-  is note title + rank only, never a text snippet (see README).
+  rowid), never the note text itself, matching the README's "no duplicated note content" rule. It
+  means `snippet()`/`highlight()` are unavailable — acceptable because the `search` tool's output is
+  note title + rank only, never a text snippet (see README).
 - **`contentless_delete=1` is required, not optional.** A plain contentless table (`content=''`
   alone) rejects `DELETE FROM notes_fts WHERE rowid = ?` outright (`cannot DELETE from contentless
-  fts5 table`), and — worse — silently re-inserting the same rowid with different text does *not*
+  fts5 table`), and worse, silently re-inserting the same rowid with different text does *not*
   replace the old tokens: the old terms keep matching forever, which permanently violates the
   idempotent-reindex requirement (CLAUDE.md: "no double-inserted FTS rows") on every single note
   edit. `contentless_delete=1` (SQLite ≥ 3.43; Node 24 bundles a recent-enough version) makes
@@ -141,13 +140,13 @@ One row per embedding chunk. A note with N chunks has N rows here.
 | `embedding_model`   | TEXT    | NOT NULL                                      | e.g. `Qwen3-Embedding-0.6B`. |
 | `embedding_version` | TEXT    | NOT NULL                                      | Model/build version string, so a re-pull of the same model name with different weights is still detectable. |
 
-`UNIQUE (note_id, chunk_index)` on the table (in addition to the `id` primary key): this does double
-duty. First, it's the index that makes `DELETE FROM chunks WHERE note_id = ?` (run on every single
-note reindex, per "Idempotent reindex" below, plus the `ON DELETE CASCADE` from `notes`) an indexed
-lookup instead of a full table scan — without it, a full-vault reindex is O(notes × chunks). Second,
-it upgrades "no duplicate chunk rows for the same note+position" from a convention the reindex code
-has to get right to a constraint the database enforces — a bug that inserts a chunk twice fails
-loudly (per CLAUDE.md) instead of silently duplicating data.
+`UNIQUE (note_id, chunk_index)` (in addition to the `id` primary key) does double duty: it's the
+index that makes `DELETE FROM chunks WHERE note_id = ?` (run on every note reindex, per "Idempotent
+reindex" below, plus the `ON DELETE CASCADE` from `notes`) an indexed lookup instead of a full table
+scan — without it, a full-vault reindex is O(notes × chunks) — and it turns "no duplicate chunk rows
+for the same note+position" from a convention the reindex code has to get right into a
+database-enforced constraint: a bug that inserts a chunk twice fails loudly (per CLAUDE.md) instead
+of silently duplicating data.
 
 `(embedding_model, embedding_version)` on a chunk row is what makes a model swap detectable at
 per-note granularity: `mnotes stats`' "notes pending re-embedding" count is a query over `chunks`
@@ -156,8 +155,8 @@ configured model.
 
 Chunk **text** is never stored — only offsets. The chunk's actual content is re-derived from the
 vault file (`body[char_start:char_end]`) whenever needed (e.g. re-embedding, `--explain` debug
-output). This keeps chunk bookkeeping from becoming a second copy of note content, consistent with
-the FTS5 contentless decision above.
+output), keeping chunk bookkeeping from becoming a second copy of note content, consistent with the
+FTS5 contentless decision above.
 
 `line_start`/`line_end` are derived from `char_start`/`char_end` at chunk time (S005 already has the
 body text in hand when it computes the character offsets, so counting newlines up to those offsets is
@@ -258,8 +257,8 @@ One row per distinct wikilink target a note contains, extracted from `[[Target]]
   referenced three times in one note's body) into a single row — a note either links to a target or it
   doesn't; backlink output cares about that, not mention count.
 - `note_links_target_title` covers the actual primary read path — "which notes link to this
-  title" (`note_read`'s `backlinks`, `note_rename`'s cascade candidate lookup) — which is a
-  `target_title`-first query the composite PK alone doesn't index.
+  title" (`note_read`'s `backlinks`, `note_rename`'s cascade candidate lookup) — a `target_title`-
+  first query the composite PK alone doesn't index.
 
 ### `index_queue`
 
@@ -275,19 +274,17 @@ CREATE TABLE index_queue (
 Durable work queue for the indexing daemon (full behavior in S005). `path` as the primary key gives
 free dedup: re-enqueueing a path already pending is `INSERT ... ON CONFLICT(path) DO NOTHING` (the
 existing row's position is preserved, not bumped). `attempts`/`next_attempt_at` back the
-retry-with-backoff behavior for processing failures.
+retry-with-backoff behavior for processing failures. Being a real table, not an in-memory queue,
+means a daemon crash mid-queue loses nothing — whatever's still in the table drains again on restart.
 
 `core/db.js` exports `enqueuePath(db, path, now)` — the one-line `INSERT ... ON CONFLICT DO NOTHING`
-above — for the same reason it exports `getMeta`/`setMeta` below: it's a plain data-layer operation on
-a table this spec owns, not daemon-process logic, so it lives here rather than in `indexer/daemon.js`
-even though the daemon's drain loop (S005) is its main caller. This matters concretely for S011:
-`note_rename`'s link cascade (S003) also calls it directly, from `core/notes.js` — if it lived in
-`indexer/daemon.js` instead, `core/notes.js` importing it would create a circular import, since
+above — for the same reason it exports `getMeta`/`setMeta` below: it's a plain data-layer operation
+on a table this spec owns, not daemon-process logic, so it lives here rather than in
+`indexer/daemon.js`, even though the daemon's drain loop (S005) is its main caller. This matters
+concretely for S011: `note_rename`'s link cascade (S003) also calls it directly, from
+`core/notes.js` — if it lived in `indexer/daemon.js` instead, that import would be circular, since
 `indexer/daemon.js` already imports `core/notes.js`. `indexer/daemon.js` re-exports it for its own
 existing call sites, but the implementation is here.
-
-Being a real table (not an in-memory queue)
-means a daemon crash mid-queue loses nothing — whatever's still in the table drains again on restart.
 
 ### `meta`
 
@@ -303,14 +300,12 @@ Single-value bookkeeping. Known keys:
 - `schema_version` — integer (as text), checked at every connection open.
 - `last_full_reindex_at` — epoch seconds, surfaced by `mnotes stats`.
 
-`core/db.js` exports `getMeta(db, key) -> string | null` and `setMeta(db, key, value)` — per this
-spec's stated goal of `db.js` "exposing plain functions that `core/notes.js`, `core/search.js`, and
-`core/tags.js` call," rather than every consumer (S005's daemon writing `last_full_reindex_at`,
-`mnotes stats` reading it) hand-rolling its own `INSERT ... ON CONFLICT` upsert — the exact
-CLI/MCP-duplication problem CLAUDE.md warns against, one layer down. `setMeta` internally applies
-`String(value)` before binding, so callers never have to think about the `node:sqlite` numeric
-binding quirk described above (a bare JS number written to this `TEXT`-affinity column would
-otherwise store with a trailing `.0`).
+`core/db.js` exports `getMeta(db, key) -> string | null` and `setMeta(db, key, value)` so consumers
+(S005's daemon writing `last_full_reindex_at`, `mnotes stats` reading it) don't each hand-roll their
+own `INSERT ... ON CONFLICT` upsert — the exact CLI/MCP-duplication problem CLAUDE.md warns against,
+one layer down. `setMeta` internally applies `String(value)` before binding, so callers never have to
+think about the `node:sqlite` numeric binding quirk described above (a bare JS number written to this
+`TEXT`-affinity column would otherwise store with a trailing `.0`).
 
 ## Migrations: version-check-and-rebuild
 
@@ -321,11 +316,12 @@ Instead:
 1. On connection open, `core/db.js` reads `meta.schema_version`.
 2. If it's missing or doesn't match the `SCHEMA_VERSION` constant in code, **every** table —
    `notes`, `notes_fts`, `chunks`, `chunk_vectors`, `tags`, `note_tags`, `note_links`, `index_queue`,
-   `meta`, all nine, not just the seven that hold reconstructable index data — is dropped and recreated from the
-   current `CREATE TABLE`/`CREATE VIRTUAL TABLE` statements, then `meta.schema_version` is set to the
-   new value. `index_queue` and `meta` are included deliberately: a schema rebuild implies a full
-   reindex is about to happen, so any pending queue entries are moot, and `last_full_reindex_at`
-   describes a reindex that (from the new schema's perspective) never happened.
+   `meta`, all nine, not just the seven that hold reconstructable index data — is dropped and
+   recreated from the current `CREATE TABLE`/`CREATE VIRTUAL TABLE` statements, then
+   `meta.schema_version` is set to the new value. `index_queue` and `meta` are included deliberately:
+   a schema rebuild implies a full reindex is about to happen, so any pending queue entries are moot,
+   and `last_full_reindex_at` describes a reindex that (from the new schema's perspective) never
+   happened.
 3. `core/db.js` surfaces this as a `reindexRequired: true` signal to the caller (daemon startup logs
    it and immediately kicks off a full reindex; `mnotes stats` reports 100% of notes pending).
 

@@ -30,24 +30,24 @@ in it," which a direct filesystem check answers as well as an index would.
 Every tool here takes `attachment_path<string>` — a **vault-relative path, extension included** (e.g.
 `Attachments/receipt.pdf`, or `Projects/mnotes/logo.png` if a note keeps an attachment alongside
 itself rather than in a dedicated folder — resolution isn't restricted to any one directory, matching
-this vault's existing "flat structure is convention, not enforced" stance, S003). This is a deliberate
-departure from CLAUDE.md's "note title is the identifier, never the raw file path" rule: that rule
-exists because a note's *title* is one level of indirection above its path (frontmatter, hashing,
-rename all operate on the title while the path underneath can theoretically move), and because the
-index gives read-side callers basename resolution when they only have a short reference. Neither holds
-for attachments — there's no frontmatter/id layer to speak of, and with no index there's nothing to
-resolve a short reference against. The vault-relative path **is** the whole identifier, the same way
-`notes.path` is internally, just surfaced directly instead of through a title abstraction.
+this vault's "flat structure is convention, not enforced" stance, S003).
 
-**No resolution fallback, on read or write** — both tools require the caller's `attachment_path` to
-match a real vault-relative path exactly. This applies uniformly to `attachment_read` too, unlike
-`note_read`'s exact-then-basename fallback (S003/S010): that fallback is powered by `buildTitleIndex`
-querying the `notes` table, and there is no equivalent table here to query. A caller with only a bare
-filename (e.g. Obsidian wrote `![[receipt.pdf]]` using its own shortest-path convention) has no way to
-resolve that through this tool surface — the practical mitigation is that a note's embed/link syntax
-already contains the literal string a reference was written with, and Claude reads that string
-directly out of the note body it just fetched, so in practice the reference handed to these tools is
-whatever's actually between the `[[...]]`/`(...)`, not a value Claude invents.
+This departs from CLAUDE.md's "note title is the identifier, never the raw file path" rule, and
+neither of that rule's underlying reasons holds here: a note's *title* is one level of indirection
+above its path (frontmatter, hashing, and rename all operate on the title while the path underneath
+can theoretically move), and the index gives read-side callers basename resolution when they only have
+a short reference. Attachments have no frontmatter/id layer, and with no index there's nothing to
+resolve a short reference against — so the vault-relative path **is** the whole identifier (the same
+way `notes.path` is internally, just surfaced directly instead of through a title abstraction), and
+there's **no resolution fallback on read or write**: both tools require `attachment_path` to match a
+real vault-relative path exactly, unlike `note_read`'s exact-then-basename fallback (powered by
+`buildTitleIndex` querying the `notes` table — S003/S010 — for which there is no equivalent here).
+
+A caller with only a bare filename (e.g. Obsidian wrote `![[receipt.pdf]]` using its own shortest-path
+convention) has no way to resolve that through this tool surface. The practical mitigation: a note's
+embed/link syntax already contains the literal string a reference was written with, and Claude reads
+that string directly out of the note body it just fetched — so in practice the reference handed to
+these tools is whatever's actually between the `[[...]]`/`(...)`, not a value Claude invents.
 
 ## Path resolution and containment (amends S010)
 
@@ -89,12 +89,11 @@ extension is not a reason to fail a read).
 
 - **`content` is included whenever `include_content` is `true`** (the default) — the file's raw
   bytes as a `Buffer`, so a caller can actually see/use an image or document, not just confirm it
-  exists. **Gated by a config-backed size cap** (`[attachments].max_read_bytes`, S009) — if
-  `include_content` is `true` and the file exceeds the cap, this is a hard error (fail loudly, per
-  CLAUDE.md — never a silent downgrade to metadata-only) naming the file's actual size, the configured
-  cap, and directing the caller to retry with `include_content: false` for metadata only, or — when
-  `mime_type` is `application/pdf` — with `start_page`/`end_page` to fetch a slice instead of the whole
-  file (see below).
+  exists. **Gated by a config-backed size cap** (`[attachments].max_read_bytes`, S009) — if the file
+  exceeds the cap, this is a hard error (fail loudly, per CLAUDE.md — never a silent downgrade to
+  metadata-only) naming the file's actual size, the configured cap, and directing the caller to retry
+  with `include_content: false` for metadata only, or — when `mime_type` is `application/pdf` — with
+  `start_page`/`end_page` to fetch a slice instead of the whole file (see below).
 - **`include_content: false`** returns `{ path, size_bytes, mime_type }` with no `content` key
   at all (omitted, not `null`) — an explicit metadata-only mode, useful when Claude only needs to
   confirm an attachment exists or check its size/type before deciding whether to fetch it, without
@@ -110,20 +109,23 @@ extension is not a reason to fail a read).
 `start_line`/`end_line` convention rather than any external tool's own range-string syntax, for
 consistency with the rest of this project's own tool surface. Given either, `readAttachment` uses
 `pdf-lib` to load the source PDF, copy just that page range into a freshly-created `PDFDocument`, and
-return *that* smaller document's bytes as `content` — a real, independently-openable PDF
-containing only the requested pages, not a text/image extraction. `total_pages` (the source document's
-full page count) is always included on a PDF response, sliced or not, so a caller that hits the size
-cap on a whole-file read knows what range is even worth asking for next.
+return *that* smaller document's bytes as `content` — a real, independently-openable PDF containing
+only the requested pages, not a text/image extraction.
 
-- **Not a hard requirement.** Unlike some external tools' "large PDFs *must* specify a page range"
-  behavior, a PDF under the size cap still reads whole-file with no range needed — page count is a poor
-  proxy for byte size (a handful of scanned-image pages can dwarf a hundred pages of text), so the
-  existing byte-based cap stays the single trigger for when a range becomes necessary, surfaced via the
-  cap-exceeded error's retry guidance (above), not a separate page-count gate.
+`total_pages` (the source document's full page count) is always included on a PDF response — sliced,
+whole-file, or metadata-only — and the cap-exceeded error names it too, so a caller that hits the size
+cap on a whole-file read always knows what range is worth asking for next without a wasted round trip.
+This is computed via a `pdf-lib` load whenever `mime_type` is `application/pdf`, independent of
+`include_content`.
+
+- **Not a hard requirement.** A PDF under the size cap still reads whole-file with no range needed
+  (unlike some external tools' "large PDFs *must* specify a page range" behavior) — page count is a
+  poor proxy for byte size (a handful of scanned-image pages can dwarf a hundred pages of text), so the
+  byte-based cap alone triggers when a range becomes necessary, not page count.
 - **No separate page-span cap.** The sliced document's bytes are checked against the same
-  `max_read_bytes` cap as any other read — asking for too wide a range fails the same "retry narrower"
-  way asking for too large a whole file already does, rather than introducing a second, independent
-  limit (e.g. "20 pages max") a caller would have to learn.
+  `max_read_bytes` cap as any other read — too wide a range fails the same "retry narrower" way too
+  large a whole file already does, rather than introducing a second, independent limit (e.g. "20 pages
+  max") a caller would have to learn.
 - `start_page`/`end_page` on a non-PDF `attachment_path` is a hard error — there's no page concept to
   slice for any other MIME type this tool serves.
 - `start_page`/`end_page` without the other, or with `start_page > end_page`, or a page number outside
@@ -134,23 +136,17 @@ cap on a whole-file read knows what range is even worth asking for next.
   content at all), and per CLAUDE.md a nonsensical combination fails loudly rather than one argument
   quietly winning.
 
-`total_pages` is computed via a `pdf-lib` load whenever `mime_type` is `application/pdf`, **independent
-of `include_content`** — a metadata-only read reports it too, and the cap-exceeded error message (above)
-names it, so a caller always has enough information to pick a sensible `start_page`/`end_page` on the
-next call without a wasted round trip.
-
-**This computation is best-effort, not a requirement, except when a page range is actually
-requested.** A `.pdf`-extension file that fails to parse as an actual PDF (corrupt, mislabeled,
-whatever) doesn't fail a plain byte or metadata read over it — `total_pages` is simply omitted from the
-response (same "omitted, not null/error" precedent `content` already sets for
+**This `total_pages` computation is best-effort, not a requirement, except when a page range is
+actually requested.** A `.pdf`-extension file that fails to parse as an actual PDF (corrupt,
+mislabeled, whatever) doesn't fail a plain byte or metadata read — `total_pages` is simply omitted
+from the response (same "omitted, not null/error" precedent `content` already sets for
 `include_content: false`), and the cap-exceeded error falls back to its plain `include_content: false`
-retry hint with no page-range mention. This matches the file extension→MIME lookup's own existing
-stance one paragraph up ("an unrecognized extension is not a reason to fail a read") applied to a
-mismatched/corrupt one instead: `attachment_read`'s baseline contract — return whatever bytes exist at
-`attachment_path`, or confirm they exist — never depends on those bytes actually being well-formed for
-their apparent type. **Only when `start_page`/`end_page` is explicitly given** does a parse failure
-become a hard error (naming the underlying parse problem) — that's the one case where the file
-genuinely being a valid, page-addressable PDF is load-bearing for fulfilling the request at all.
+retry hint with no page-range mention. This mirrors the extension→MIME lookup's own stance above ("an
+unrecognized extension is not a reason to fail a read"): `attachment_read`'s baseline contract is to
+return whatever bytes exist at `attachment_path`, or confirm they exist, never depending on those
+bytes being well-formed for their apparent type. **Only when `start_page`/`end_page` is explicitly
+given** does a parse failure become a hard error (naming the underlying parse problem) — the one case
+where the file genuinely being a valid, page-addressable PDF is load-bearing for the request.
 
 ### `attachment_write`
 
@@ -177,7 +173,7 @@ Returns `{ path, size_bytes, mime_type }`.
   in.
 - No size-drop guard (S003's guard is specific to note line-count collapse; there's no equivalent
   "logical size" concept for an arbitrary binary format to guard against shrinking).
-- Same containment check as `attachment_read` (`resolveVaultPath`, above) — a `attachment_path`
+- Same containment check as `attachment_read` (`resolveVaultPath`, above) — an `attachment_path`
   resolving outside `vaultRoot` throws, never silently writes outside the vault.
 
 ## Config: `[attachments]` (amends S009)

@@ -16,20 +16,18 @@ Consumed by: (terminal use, `obsidian.nvim` integration)
 
 Defines `mnotes`'s subcommand surface. Per the README, the CLI is "the same underlying functionality
 as the MCP server, with additional flags for debugging" plus two CLI-only commands (`reindex`,
-`stats`). This spec's job is to pin down argument parsing, output formatting, and the handful of
-CLI-specific concerns (no `reason`, `--explain`, stdin content input) that don't apply to the MCP
-surface.
+`stats`). This spec pins down argument parsing, output formatting, and the handful of CLI-specific
+concerns (no `reason`, `--explain`, stdin content input) that don't apply to the MCP surface.
 
 ## Argument parsing
 
-Node's built-in `util.parseArgs` — no CLI framework dependency. Subcommand routing is a small
-dispatch table keyed on `argv[2]` (`search`, `grep`, `tags`, `links`, `read`, `write`, `edit`, `append`,
-`rename`, `attachment`, `reindex`, `daemon`, `stats`, `logs`, `vectors`), each parsing its own remaining
-flags via `parseArgs`. This matches the
-project's minimal-dependency, no-build-step bias — a dozen flat subcommands doesn't need a framework's
-nested-command/auto-help machinery.
+Node's built-in `util.parseArgs` — no CLI framework dependency, matching the project's
+minimal-dependency, no-build-step bias: a dozen flat subcommands doesn't need a framework's
+nested-command/auto-help machinery. Subcommand routing is a small dispatch table keyed on `argv[2]`
+(`search`, `grep`, `tags`, `links`, `read`, `write`, `edit`, `append`, `rename`, `attachment`,
+`reindex`, `daemon`, `stats`, `logs`, `vectors`), each parsing its own remaining flags via `parseArgs`.
 
-`dispatch()` intercepts `--help`/`-h` itself, ahead of routing to a command handler: `mnotes` (no
+`dispatch()` intercepts `--help`/`-h` itself, before routing to a command handler: `mnotes` (no
 command), `mnotes --help`, or `mnotes -h` prints the full command list; `mnotes <command> --help` (the
 flag can appear anywhere in that command's args) prints just that command's usage line instead of
 running it. This is a static lookup table (`COMMAND_USAGE` in `cli/main.js`) keyed by top-level
@@ -39,22 +37,22 @@ trailing `--help`.
 **`vectors` is the one exception to the static-lookup-table approach**, per S013: it has no
 `COMMAND_USAGE` entry, and `dispatch()` explicitly skips its generic `--help` short-circuit for this
 one command, always calling `runVectorsCommand` (`cli/vectors.js`) and letting it interpret `--help`
-itself. This is because `vectors` has eight sub-subcommands with genuinely distinct, non-trivial flag
-sets — a single flat usage line (adequate for every other command's `--help`) would either have to
-cram all eight together or lose the sub-subcommand-specific detail entirely. `runVectorsCommand`
-implements the same two-tier shape the top-level CLI does (`mnotes vectors`/`mnotes vectors --help`
-lists subcommands; `mnotes vectors <subcommand> --help` gives that subcommand's full usage, argument,
-and flag documentation), just one level down.
+itself. `vectors` has eight sub-subcommands with genuinely distinct, non-trivial flag sets — a single
+flat usage line (adequate for every other command's `--help`) would either cram all eight together or
+lose sub-subcommand-specific detail entirely. `runVectorsCommand` implements the same two-tier shape
+the top-level CLI does (`mnotes vectors`/`mnotes vectors --help` lists subcommands; `mnotes vectors
+<subcommand> --help` gives that subcommand's full usage, argument, and flag documentation), just one
+level down.
 
 ## Output format
 
 **Mirrors MCP tool output** — the same pipe-delimited columnar text for list-style commands
 (`search`, `grep`, `tags list`, `tags notes`, `links`) and the same structured JSON for
 `write`/`edit`/`append`/`rename`, produced by the same formatting function each MCP tool handler calls.
-This is a direct consequence of the architecture rule that `cli/` and `mcp/` must not duplicate logic —
-one formatter per tool, shared by both surfaces, rather than a second "human-friendly" renderer that
-could drift from what Claude actually sees. Two deliberate exceptions, both opt-in flags/options on the
-otherwise-shared formatter rather than a parallel rendering path:
+This follows from the architecture rule that `cli/` and `mcp/` must not duplicate logic — one formatter
+per tool, shared by both surfaces, rather than a second "human-friendly" renderer that could drift from
+what Claude actually sees. Two deliberate exceptions, both opt-in flags/options on the otherwise-shared
+formatter rather than a parallel rendering path:
 
 - **`grep`'s `--content` flag**: `formatGrepTable`'s `includeText` option is still the single shared
   formatter, but the CLI is the only caller that ever passes `includeText: true` — a human at a
@@ -67,11 +65,11 @@ otherwise-shared formatter rather than a parallel rendering path:
   — an LLM reader gets no benefit from the padding, and it costs tokens on every tool response. The
   underlying values and column set are identical either way; only the whitespace differs.
 
-List-style commands accept a `--json` flag for scripting/`obsidian.nvim` integration use cases where
-structured output is more convenient than parsing pipe-delimited columns. `write`/`edit`/`append`/
-`rename` are already JSON by default (per the README and S003's `{ title, hash, line_count }` return
-shape), so `--json` is a no-op / not offered on those. **`read` is the one exception** — see below,
-its default output is deliberately not JSON.
+List-style commands accept a `--json` flag for scripting/`obsidian.nvim` integration, where structured
+output beats parsing pipe-delimited columns. `write`/`edit`/`append`/`rename` are already JSON by
+default (per the README and S003's `{ title, hash, line_count }` return shape), so `--json` is a no-op
+/ not offered on those. **`read` is the one exception** — see below, its default output is deliberately
+not JSON.
 
 ## Read-only rejection and reporting (S015)
 
@@ -111,8 +109,8 @@ content, matching `note_edit`'s own "surgical" scope.
 Unlike every other command, `read`'s **default output is not JSON** — a deliberate CLI-specific
 divergence from the MCP tool, justified by Unix piping ergonomics: piping a note straight into
 `$EDITOR`, `less`, or another tool shouldn't require unwrapping JSON first, and this is exactly the
-kind of thing the CLI (used interactively and from `obsidian.nvim`) needs to do routinely in a way the
-MCP tool never does.
+kind of routine task the CLI (used interactively and from `obsidian.nvim`) supports that the MCP tool
+never needs to.
 
 | Mode | stdout | stderr |
 |---|---|---|
@@ -121,16 +119,16 @@ MCP tool never does.
 | `--json` | Full MCP-identical structured JSON (`title`, `content_hash`, `metadata`, `content`, line info) | Nothing |
 
 `--json` exists because `content_hash` isn't visible in either of the other two modes' stdout — any
-script that wants to chain a `write`/`edit` after a `read` needs the hash, and `--json` is the one mode
-that surfaces it on stdout without a second lookup. `--raw` is for getting the file exactly as it
-lives on disk (e.g. a manual diff or backup) — no metadata is separately reported in that mode since
-it's already present in the raw output.
+script chaining a `write`/`edit` after a `read` needs the hash, and `--json` is the one mode that
+surfaces it on stdout without a second lookup. `--raw` is for getting the file exactly as it lives on
+disk (e.g. a manual diff or backup) — no metadata is separately reported in that mode since it's
+already present in the raw output.
 
 Default mode's stderr JSON is pretty-printed (`JSON.stringify(metadata, null, 2)`, trailing blank line)
 rather than the compact single-line JSON `--json`/`--explain --json` produce on stdout — stderr here is
-for a human skimming metadata at a glance, not a script parsing it, so indentation costs nothing and
-helps readability. `main()` also writes stderr before stdout for every command, so this metadata prints
-ahead of the note body when both streams land in the same terminal.
+for a human skimming metadata, not a script parsing it, so indentation costs nothing. `main()` also
+writes stderr before stdout for every command, so this metadata prints ahead of the note body when both
+streams land in the same terminal.
 
 **`<title>` resolves in all three modes** (S003/S010): an exact title match first, then a fallback to
 a unique-basename match (e.g. `mnotes read "Barbara Garn"` finds a note actually at
@@ -208,8 +206,8 @@ needed to navigate" rule for `backlinks`/`links_out`, which `getBacklinks` also 
 itself is unchanged. Instead, `cli/main.js`'s handlers for these two commands compute it directly:
 `loadReadonlyMatcher(vaultRoot)` loaded once, then `checkReadonly` per row, before handing rows to
 `formatLinksTable`/`formatBrokenLinksTable`. This is CLI-layer composition of an existing
-`core/note-fs.js` primitive, not a second copy of the read-only check — there is no other copy to
-diverge from.
+`core/note-fs.js` primitive, not a second copy of the read-only check — no other copy exists to diverge
+from.
 
 **`broken` is a reserved subcommand keyword**, the same tradeoff `tags list`/`tags notes` already makes
 — a note literally titled "broken" can't be looked up via `mnotes links broken` (it'll run the broken-
@@ -303,8 +301,8 @@ never requires the daemon to be up, unlike `reindex`.
 
 CLI-only, like `links`/`vectors` — no MCP equivalent, since there's no reason an agent would need to
 introspect its own audit trail through a tool call. `--file=<name>` picks which log file, defaulting to
-`audit` — that's the file that actually answers "what has an agent been doing through MCP," which is
-what this command exists for, so it's the default rather than requiring `--file=audit` explicitly every
+`audit` — the file that actually answers "what has an agent been doing through MCP," which is what
+this command exists for, so it's the default rather than requiring `--file=audit` explicitly every
 time. `<name>` is one of seven values, each mapping mechanically to `<name>.log` under the log
 directory (S008/S009):
 
@@ -367,8 +365,8 @@ CLI that requires a documented exception to the "every command returns one
 `{ stdout, stderr, exitCode }` from `dispatch()`" convention (see "Argument parsing" above): a live
 follow never finishes on its own, so `runLogsCommand` writes each matching line directly to
 `process.stdout` (or `deps.write` under test) as it arrives, rather than accumulating a return value —
-the same behavior `tail -f` itself has, ended by Ctrl-C or by a downstream pipe closing, with no
-special-case code needed for either. This is what makes `mnotes logs --follow | grep ...` (or
+the same behavior `tail -f` itself has, ended by Ctrl-C or a downstream pipe closing, needing no
+special-case code for either. This is what makes `mnotes logs --follow | grep ...` (or
 `mnotes logs --file=indexer --follow | grep ERROR`) work as a live filter, which plain buffered command
 output could not support. `followLogFile` (the underlying watcher) is file-format-agnostic — it just
 hands the caller each raw appended line; `--file=audit`'s caller parses/filters that line, every other
@@ -403,14 +401,13 @@ it does **not** wrap command dispatch in a `runWithLogger` context:
 - `mnotes write`/`edit`/`append`/`rename`/`attachment write` — after the command completes (success or
   a caught thrown error), the CLI calls `logAudit(getAuditLogger(defaultLogDir()), { tool, noteTitle,
   source: 'cli', outcome, errorMessage })` (`S008`) — `reason` is always absent (`source: 'cli'` never
-  carries one, per
-  "No `reason` flag" above). This is a direct call to `logAudit`, not a `runWithLogger`-wrapped
-  context, so — same as the read commands — `core/notes.js`'s own incidental logging (`S003`'s
-  caller-supplied-`id`-overwrite `debug` line) resolves to the no-op logger for CLI-driven mutations;
-  only the MCP server's tool calls get that detail captured. This is a deliberate consequence of
-  `S008`'s "CLI's only use of the logger is `audit.log`" decision, not an oversight — reintroducing a
-  `cli.log` for incidental `core/` debug output would be a new architectural surface `S008` explicitly
-  didn't add.
+  carries one, per "No `reason` flag" above). This is a direct call to `logAudit`, not a
+  `runWithLogger`-wrapped context, so — same as the read commands — `core/notes.js`'s own incidental
+  logging (`S003`'s caller-supplied-`id`-overwrite `debug` line) resolves to the no-op logger for
+  CLI-driven mutations; only the MCP server's tool calls get that detail captured. This is a deliberate
+  consequence of `S008`'s "CLI's only use of the logger is `audit.log`" decision, not an oversight —
+  reintroducing a `cli.log` for incidental `core/` debug output would be a new architectural surface
+  `S008` explicitly didn't add.
 - `mnotes reindex`/`stats` talk to the daemon over its socket (`S005`) — no CLI-side logging beyond
   what those commands print to stdout/stderr directly; the daemon's own `indexer.log` already captures
   the actual reindex work.

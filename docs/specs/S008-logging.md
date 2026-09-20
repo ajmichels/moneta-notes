@@ -18,51 +18,50 @@ S006), not just MCP tool calls as the README originally framed it.
 
 ## Library: none — hand-rolled plain-text writer
 
-No third-party logging library. One shared module (`src/logger.js`) that every other component
-imports rather than using `console.log` directly — matches CLAUDE.md's existing instruction that
-every log line carry a consistent shape (timestamp, component, level, message) regardless of which
-part of the system emitted it. `getLogger(component, logDir)` is an explicit factory: callers name
-their own component (`'indexer'`, `'mcp-server'`, `'audit'`) and get back a small object, one method
-per level, bound to `<logDir>/<component>.log`.
+No third-party logging library. One shared module (`src/logger.js`) that every component imports
+instead of calling `console.log` directly, so every log line carries the same shape (timestamp,
+component, level, message) per CLAUDE.md's instruction. `getLogger(component, logDir)` is an explicit
+factory: callers name their own component (`'indexer'`, `'mcp-server'`, `'audit'`) and get back an
+object with one method per level, bound to `<logDir>/<component>.log`.
 
 Plain, single-line, human-readable text — not JSON lines. Chosen over `pino`/structured JSON
 deliberately: these logs are read directly (`tail -f`, `grep`) far more often than fed through a JSON
-log processor, and `pino`'s dependency weight and binary-line format aren't worth it for this
-project's log volume. See "Log line format" below for the exact grammar — still consistently
-parseable, just without a JSON parser. The CLI does not use this logger for its normal output (that's
-stdout/stderr per S006); it only writes to the audit log for mutating commands (see below).
+log processor, and `pino`'s dependency weight and binary-line format aren't worth it at this project's
+log volume. See "Log line format" below for the exact grammar — still consistently parseable, just
+without a JSON parser. The CLI doesn't use this logger for its normal output (stdout/stderr per S006);
+it only writes to the audit log for mutating commands (see below).
 
 Each entry point (indexer daemon, MCP server, CLI) sets its own `process.title` at startup (e.g.
-`mnotes-indexer`), purely so it's identifiable in Activity Monitor/`ps`. This is unrelated to logging
-— `src/logger.js` never reads `process.title`. The log file path always comes from the explicit
+`mnotes-indexer`) purely to be identifiable in Activity Monitor/`ps` — unrelated to logging itself:
+`src/logger.js` never reads `process.title`, and the log file path always comes from the explicit
 `component` argument passed to `getLogger`, never inferred from the process.
 
 ## Context propagation into `core/`: `runWithLogger` / `getContextLogger`
 
 `core/` modules (`S001`-`S004`) throw on error and never touch CLI flags, MCP tool schemas, or output
-formatting — but per CLAUDE.md they still shouldn't reach for ad hoc `console.log` when something
-worth a line in the log is happening below the level of a thrown error (e.g. a schema migration
-applied, a drift condition detected and repaired). Passing an explicit `logger` parameter through
-every `core/` function would leak a boundary-layer concern (which log file, which component) into
-signatures that are supposed to stay plain-JS-in, plain-JS-out. Instead, `src/logger.js` exports a
-`node:async_hooks` `AsyncLocalStorage`-backed context:
+formatting — but per CLAUDE.md they still shouldn't reach for ad hoc `console.log` when something's
+worth a log line below the level of a thrown error (e.g. a schema migration applied, a drift condition
+detected and repaired). Passing an explicit `logger` parameter through every `core/` function would
+leak a boundary-layer concern (which log file, which component) into signatures meant to stay
+plain-JS-in, plain-JS-out. Instead `src/logger.js` exports a `node:async_hooks`
+`AsyncLocalStorage`-backed context:
 
-- `runWithLogger(logger, fn)` — each boundary layer calls this once, wrapping its main entry point
-  (the indexer daemon's run loop, the MCP server's per-request handler, the CLI's command dispatch),
-  passing the `getLogger(component, logDir)` instance for its own component. Every `core/` call made
+- `runWithLogger(logger, fn)` — each boundary layer calls this once around its main entry point (the
+  indexer daemon's run loop, the MCP server's per-request handler, the CLI's command dispatch), passing
+  the `getLogger(component, logDir)` instance for its own component. Every `core/` call made
   underneath — including across `await` boundaries — sees that same logger.
-- `getContextLogger()` — what `core/` code calls instead of importing `getLogger` directly. Returns
-  the logger passed to the nearest enclosing `runWithLogger`, or a no-op logger (every level resolves
-  immediately, writes nothing) when called with no such context — the case for `core/`'s own unit
-  tests, which call `core/` functions directly without any boundary layer running, per CLAUDE.md's
-  "unit-test `core/` directly" testing philosophy. `core/` code never has to special-case "am I being
-  tested" — the fallback makes that invisible.
+- `getContextLogger()` — what `core/` code calls instead of importing `getLogger` directly. Returns the
+  logger from the nearest enclosing `runWithLogger`, or a no-op logger (every level resolves
+  immediately, writes nothing) with no such context — the case for `core/`'s own unit tests, which call
+  `core/` functions directly with no boundary layer running, per CLAUDE.md's "unit-test `core/`
+  directly" philosophy. `core/` code never has to special-case "am I being tested" — the fallback makes
+  that invisible.
 
 Log lines written this way land in whichever file the calling boundary layer already owns
-(`indexer.log`, `mcp-server.log`, or — for CLI mutating commands — the CLI's own logger instance,
-see `S006`) under that same component name; `core/` never creates or names its own log file. This
-keeps the "one log file per boundary-layer component" file layout below intact — `core/` only ever
-borrows the active context's destination, it doesn't add new destinations.
+(`indexer.log`, `mcp-server.log`, or — for CLI mutating commands — the CLI's own logger instance, see
+`S006`) under that component's name; `core/` never creates or names its own log file, keeping the
+"one log file per boundary-layer component" layout below intact — `core/` only borrows the active
+context's destination, it never adds new destinations.
 
 ## Log line format
 
@@ -89,13 +88,13 @@ Example:
 - Fully `grep`/`awk`-able as plain text: `grep ERROR indexer.log`, `grep 'outcome=error' audit.log`.
 - **Write failures never throw or crash the process.** A failed `appendFile` (disk full, permissions)
   is reported via `console.error` — safe under MCP's stdio transport, since stdout is reserved for
-  JSON-RPC frames and stderr is the standard side channel for logs/diagnostics — and then swallowed;
-  the calling component keeps running. Each logger method returns the write's promise, so tests can
-  `await` a call and immediately read the file, but that promise always resolves, never rejects — a
-  production call site that doesn't await it (the normal fire-and-forget path) can never see an
-  unhandled rejection from a log call. This is distinct from `logAudit`'s shape-validation errors
-  (below), which throw synchronously and immediately — a malformed audit entry is a programming error
-  caught before any I/O is attempted, and CLAUDE.md's "fail loudly" applies there, not to I/O faults.
+  JSON-RPC frames and stderr is the standard side channel for diagnostics — then swallowed; the calling
+  component keeps running. Each logger method returns the write's promise, so tests can `await` a call
+  and immediately read the file, but that promise always resolves, never rejects — a fire-and-forget
+  production call site can never see an unhandled rejection from a log call. This differs from
+  `logAudit`'s shape-validation errors (below), which throw synchronously and immediately: a malformed
+  audit entry is a programming error caught before any I/O is attempted, and CLAUDE.md's "fail loudly"
+  applies there, not to I/O faults.
 
 ## Rotation: separate OS-managed service, not in-process, not `logrotate`/`newsyslog`
 
@@ -126,20 +125,19 @@ to on either OS.
 - **Check cadence**: on macOS, `RunAtLoad: true` (a check runs every time the LaunchAgent loads — i.e.
   every login/boot) plus `StartCalendarInterval` entries at four fixed times daily (`00:00`, `06:00`,
   `12:00`, `18:00`). This combination, not `StartInterval`, deliberately: `StartInterval` firings that
-  occur while the Mac is asleep are silently dropped on modern macOS with no catch-up, whereas
-  `StartCalendarInterval` *does* catch up a missed firing once the machine wakes from sleep (though
-  not after being fully powered off). On Linux, the `.timer` unit's `OnCalendar=*-*-* 00,06,12,18:00:00`
-  is the direct equivalent of the same four fixed times, and `Persistent=true` is the direct equivalent
-  of `StartCalendarInterval`'s wake catch-up — it triggers an immediate run on the next boot/login if
-  the machine was off/asleep through a scheduled firing, per `systemd.timer(5)`. Neither platform uses a
-  plain fixed-interval timer (`StartInterval` / systemd's `OnUnitActiveSec=`) for the same reason: both
-  drop missed firings silently instead of catching up. Between the login-triggered check and the
-  calendar-interval catch-up behavior, a personal machine that isn't always on still gets checked
-  reliably on either OS — and since log volume is driven by real file-change activity, a machine that's
-  off/asleep isn't generating log volume either; the two naturally track each other, so the worst case
+  occur while the Mac is asleep are silently dropped with no catch-up, whereas `StartCalendarInterval`
+  *does* catch up a missed firing once the machine wakes from sleep (though not after being fully
+  powered off). On Linux, the `.timer` unit's `OnCalendar=*-*-* 00,06,12,18:00:00` is the direct
+  equivalent of the same four fixed times, and `Persistent=true` is the direct equivalent of
+  `StartCalendarInterval`'s wake catch-up — it triggers an immediate run on the next boot/login if the
+  machine was off/asleep through a scheduled firing, per `systemd.timer(5)` — unlike a plain
+  fixed-interval timer (`OnUnitActiveSec=`), which, like macOS's `StartInterval`, drops missed firings
+  silently. Between the login-triggered check and the calendar-interval catch-up, a personal machine
+  that isn't always on still gets checked reliably on either OS — and since log volume tracks real
+  file-change activity, an off/asleep machine isn't generating log volume either, so the worst case
   from a missed window is a somewhat-overdue rotation, never unbounded growth. The rotation logic
-  itself is idempotent regardless of how long it's been since the last check — it just compares
-  current size/age against the threshold whenever it happens to run.
+  itself is idempotent regardless of elapsed time since the last check — it just compares current
+  size/age against the threshold whenever it runs.
 - **Rotation policy** (per log file, config-backed per the established pattern — flagged for S009):
   size threshold **10MB** or age threshold **7 days**, whichever comes first; **keep last 5** rotated
   files, oldest deleted beyond that. Identical on both platforms — the policy is evaluated entirely

@@ -40,7 +40,7 @@ preserve them verbatim.
 **Code-region exclusion**: matches inside fenced code blocks and inline code spans are excluded, same
 rationale as S004's tag scan (a `[[...]]`-shaped string in a code sample isn't a real link). Body text
 is run through `core/note-fs.js`'s shared `stripCodeRegions` (S010) before matching — the same
-primitive S004's tag extraction now also uses, rather than each module reimplementing the exclusion.
+primitive S004's tag extraction uses, so neither module reimplements the exclusion.
 
 ## `extractLinkTargets(body) -> string[]`
 
@@ -68,17 +68,17 @@ straight two-statement replace.
 Invoked from the per-note reindex step (S005), in the same place S004's tag extraction runs, using the
 same freshly-read body.
 
-## Target resolution (S010) — why these queries changed shape
+## Target resolution (S010)
 
 Everything below resolves `target_title` against the vault the same way `note_read`'s own title
 lookup does (S003/S010): exact title match, else a unique-basename match, else unresolved. This
 matters because a stored `target_title` is raw, as-typed link text (`syncNoteLinks`, above) — it might
 already be a full title, or it might be Obsidian's shortest-path short form (`[[Barbara Garn]]` for a
-note actually at `LoonStateHockey/JMS Hockey/Barbara Garn`). Comparing it against `notes.path` with a
-plain SQL equality/`LEFT JOIN` (this section's original design) gets the short-form case wrong in both
-directions — `getBacklinks` misses real backlinks written in short form, and `getBrokenLinks` flags a
-perfectly valid short-form link as broken. Fixed by resolving in JS via S010's `buildTitleIndex`/
-`resolveAgainstIndex` instead of comparing raw strings in SQL.
+note actually at `LoonStateHockey/JMS Hockey/Barbara Garn`). The original design compared it against
+`notes.path` with a plain SQL equality/`LEFT JOIN`, which got the short-form case wrong both ways —
+`getBacklinks` missed real backlinks written in short form, and `getBrokenLinks` flagged valid
+short-form links as broken. Fixed by resolving in JS via `buildTitleIndex`/`resolveAgainstIndex`
+instead of comparing raw strings in SQL.
 
 ## `getBacklinks(db, title) -> string[]`
 
@@ -86,11 +86,11 @@ Builds one `buildTitleIndex(db)` (S010), reads every `note_links` row (joined to
 path), resolves each row's `target_title` against the index, and keeps the source titles where that
 resolution equals `title` — deduplicated (a source note can reach `title` via two differently-written
 links that both resolve to it, e.g. one short-form and one full-path) and sorted alphabetically. `db`
-is required (there's no meaningful "no index" fallback for a bulk query like this) — same optional-
-at-the-`noteRead`-call-site, required-once-you're-here shape as before. Still **index-backed**, so it
+is required — no meaningful "no index" fallback exists for a bulk query like this, the same
+optional-at-`note_read`-call-site/required-here shape used elsewhere. Still **index-backed**: it
 reflects the vault as of each linking note's last reindex, same freshness contract `search`/
-`tag_notes` already have — target resolution is against *current* vault state (S010's index is built
-fresh per call), but which notes/links exist at all is still only as fresh as the last reindex.
+`tag_notes` already have. Target resolution is against *current* vault state (S010's index is built
+fresh per call), but which notes/links exist at all is only as fresh as the last reindex.
 
 ## `resolveLinkTargets(db, rawTargets) -> string[]`
 
@@ -98,9 +98,9 @@ Maps each raw target string to its resolved absolute title where one resolves, o
 raw literal text otherwise (an unresolved or ambiguous link has no better answer to give — same
 "don't guess" posture as `resolveAgainstIndex` itself). Builds `buildTitleIndex(db)` once for the
 whole batch, not once per target. This is what `note_read`'s `links_out` (S003) is built on: the raw
-targets straight from `extractLinkTargets(body)`, resolved through this function when `db` is
-available, so that following an outbound link chains straight into another `note_read` call without
-Claude needing to reason about whether the link text it saw was already an absolute title.
+targets from `extractLinkTargets(body)`, resolved through this function when `db` is available, so
+following an outbound link chains straight into another `note_read` call without Claude needing to
+reason about whether the link text it saw was already an absolute title.
 
 ## `replaceLinkTarget(body, oldTitle, newTitle, { titleIndex = null } = {}) -> { body, count }`
 

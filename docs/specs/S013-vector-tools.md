@@ -16,8 +16,8 @@ should," "which tags are redundant," "what's isolated from everything else," "wh
 threshold would actually separate linked from unlinked notes." Debugging/analysis tooling for a human
 at a terminal, not agent-facing — see "Not exposed via MCP."
 
-Seven subcommands: `compare`, `nearest`, `cluster`, `reduce`, `tag-fit`, `tag-redundancy`,
-`outliers`, plus `calibrate`. All read-only — nothing here writes to the vault or the index.
+Eight subcommands, all read-only (nothing here writes to the vault or the index): `compare`,
+`nearest`, `cluster`, `reduce`, `tag-fit`, `tag-redundancy`, `outliers`, `calibrate`.
 
 ## Not exposed via MCP
 
@@ -30,10 +30,10 @@ for now.
 
 ## New dependencies
 
-Five focused `ml-*` / clustering npm packages, matching the precedent already set by pulling in
-`@huggingface/transformers` for embeddings rather than hand-rolling a transformer runtime — these
-algorithms are easy to get subtly wrong by hand (especially UMAP's gradient-descent layout), and
-correctness matters more here than minimizing dependency count:
+Five focused `ml-*`/clustering npm packages, matching the precedent set by pulling in
+`@huggingface/transformers` for embeddings rather than hand-rolling: these algorithms (UMAP's
+gradient-descent layout especially) are easy to get subtly wrong by hand, and correctness matters more
+here than minimizing dependency count.
 
 | Package | Used for |
 |---|---|
@@ -48,36 +48,33 @@ Runtime" rule.
 
 ## Shared vocabulary
 
-Two flags standardize across every subcommand that takes them — not every subcommand takes both, see
-each command's table below.
+Two flags standardize across subcommands that take them (not every subcommand takes both — see each
+command's table below).
 
 - **`--level chunk|note`** — granularity of the vectors being operated on. `chunk` operates on raw
   stored `chunk_vectors` rows directly. `note` collapses each note's chunks into a single vector
   first.
-- **`--aggregate centroid|best-chunk|all-pairs`** — *only accepted where a command compares two
-  specific things* (`compare` and `nearest`'s query-side aggregation). `cluster`, `reduce`, and
-  `outliers` need exactly one vector per note at `--level note` and don't accept `--aggregate` at
-  all — passing it to one of those three is a CLI usage error (`--aggregate is not valid with this
-  command`), not a silently ignored flag. Where note-level aggregation is needed but not
-  caller-specified (`cluster --level note`, `reduce --level note`, `outliers --level note`), it is
-  always **centroid**, unconditionally — never configurable, never defaulting to something else. This
-  is deliberate: mixing aggregation strategies across `cluster`/`reduce`/`outliers` for the "same"
-  note-level view of the data would make the three commands' outputs subtly incomparable with each
-  other, defeating the point of having one note-level vector at all.
+- **`--aggregate centroid|best-chunk|all-pairs`** — only accepted by commands comparing two specific
+  things (`compare`, `nearest`'s query-side aggregation). `cluster`/`reduce`/`outliers` need exactly
+  one vector per note and don't accept `--aggregate` at all — passing it is a usage error
+  (`--aggregate is not valid with this command`), not silently ignored. Their note-level vector is
+  always **centroid**, unconditionally, never configurable: mixing aggregation strategies across the
+  three would make their outputs subtly incomparable with each other, defeating the point of having
+  one note-level view of the data.
 
 ### Shared core helper: `getNoteVector`
 
 `core/vectors.js` exports `getNoteVector(db, noteId, { aggregate = 'centroid' })`, returning
-`Float32Array | null` (`null` if the note has no chunks, e.g. empty file). Every code path in this
-spec that needs "one vector for this note" — `cluster --level note`, `reduce --level note`,
-`outliers --level note`, `compare`/`nearest` at note-level, `tag-fit`, `tag-redundancy`,
-`calibrate --level note` — calls this one function, never hand-rolls its own averaging. This is the
-CLAUDE.md "no duplicate logic" rule applied one layer down from `cli`/`mcp`: it would be easy for
-`cluster --level note` and `reduce --level note` to each grow their own slightly different centroid
-math over time and produce inconsistent-looking results across two views of the same data.
+`Float32Array | null` (`null` if the note has no chunks, e.g. empty file). Every code path needing
+"one vector for this note" — `cluster --level note`, `reduce --level note`, `outliers --level note`,
+`compare`/`nearest` at note-level, `tag-fit`, `tag-redundancy`, `calibrate --level note` — calls this
+one function rather than hand-rolling its own averaging. This is CLAUDE.md's "no duplicate logic" rule
+applied one layer below `cli`/`mcp`: without it, `cluster --level note` and `reduce --level note`
+could each grow slightly different centroid math over time and produce inconsistent results across
+two views of the same data.
 
 - **`centroid`**: mean of the note's chunk vectors, re-normalized to unit length (cosine distance
-  assumes unit vectors; a plain mean of unit vectors is not itself unit length).
+  assumes unit vectors; a plain mean of unit vectors isn't itself unit length).
 - **`best-chunk`**: not a `getNoteVector` mode — "best" is only meaningful relative to a comparison
   target, so it's implemented directly in `compare`/`nearest`, not as a third branch here.
 
@@ -94,23 +91,22 @@ function bufferToVector(buf) {
 
 the exact inverse of `search.js`'s existing `vectorToBuffer`. `core/vectors.js` exports
 `getChunkVectors(db, chunkIds)` (batched `SELECT rowid, embedding FROM chunk_vectors WHERE rowid IN
-(...)`, decoded) and `getAllChunkVectors(db, { noteIds } = {})` (every chunk for the current
-embedding model/version, optionally restricted to a note-id set — see "Scoping" below) as the two
-primitives everything else in this spec is built from. Both exclude chunks from a stale embedding
-model/version (same filter S002's semantic search already applies), for the same reason: comparing
-vectors across model versions is meaningless, not a degraded result.
+(...)`, decoded) and `getAllChunkVectors(db, { noteIds } = {})` (every chunk for the current embedding
+model/version, optionally restricted to a note-id set — see "Scoping" below) as the two primitives
+everything else here is built from. Both exclude chunks from a stale embedding model/version (the same
+filter S002's semantic search already applies) — comparing vectors across model versions is
+meaningless, not a degraded result.
 
 ### Cosine similarity
 
 `core/vectors.js` exports `cosineSimilarity(a, b) -> float` (`[-1, 1]`, `1` = identical direction).
-Every subcommand in this spec reports **similarity** (higher = closer), not sqlite-vec's raw cosine
-*distance* (`1 - similarity`, lower = closer) that `S002`'s `chunk_vectors` queries use internally —
-the words "similarity" throughout this spec and in every command's output always mean the similarity
-form, not distance, since a human reading `vectors` output benefits from "higher is better" being
-uniformly true. This is a distinct concern from CLAUDE.md's "don't show raw RRF/BM25/cosine scores"
-rule — that rule is about the MCP/CLI-shared `search` surface never leaking ranking internals;
-`vectors` is a CLI-only debug/analysis surface whose entire purpose is exposing exactly these numbers
-(same carve-out `--explain` already uses, per S006).
+Every subcommand reports **similarity** (higher = closer), not sqlite-vec's raw cosine *distance*
+(`1 - similarity`, lower = closer) that `S002`'s `chunk_vectors` queries use internally — "similarity"
+throughout this spec and in every command's output always means the similarity form, since a human
+benefits from "higher is better" being uniformly true. This is a distinct concern from CLAUDE.md's
+"don't show raw RRF/BM25/cosine scores" rule, which is about the MCP/CLI-shared `search` surface never
+leaking ranking internals; `vectors` is a CLI-only debug/analysis surface whose entire purpose is
+exposing exactly these numbers (same carve-out `--explain` already uses, per S006).
 
 ### Scoping: `--tag <tag>` / `--folder <path>`
 
@@ -121,7 +117,7 @@ to restrict the note-id set operated on, instead of the whole vault:
   tag with zero notes is an empty result set, not an error (consistent with `tagNotes` itself).
 - `--folder <path>` — a `notes.path` prefix match (`WHERE path LIKE ? || '%'` guarded against
   `%`/`_` wildcard injection from the caller-supplied path, since `path` is user input here in a way
-  it isn't elsewhere in this codebase). Matches on the vault-relative folder path, e.g. `--folder
+  it isn't elsewhere in this codebase). Matches the vault-relative folder path, e.g. `--folder
   "Weekly Notes"` matches every note under that directory.
 
 ## Commands
@@ -133,13 +129,13 @@ logic reduces to.
 
 | Flag | Values | Notes |
 |---|---|---|
-| `--level` | `chunk\|note`, default `note` | `chunk` mode: `<a>`/`<b>` are chunk ids (integers, `chunks.id`). `note` mode: `<a>`/`<b>` are note titles, resolved via `resolveTitle` (S010) — same exact-then-basename fallback `mnotes read` gets, since this is a read-only lookup. |
+| `--level` | `chunk\|note`, default `note` | `chunk` mode: `<a>`/`<b>` are chunk ids (integers, `chunks.id`). `note` mode: `<a>`/`<b>` are note titles, resolved via `resolveTitle` (S010) — the same exact-then-basename fallback `mnotes read` gets, since this is a read-only lookup. |
 | `--aggregate` | `centroid\|best-chunk\|all-pairs`, default `centroid` | Note-level only — chunk-level ignores this (a usage error if passed alongside `--level chunk`, since two specific chunks need no aggregation strategy). |
 
 Output:
 - `centroid`/`best-chunk`: `{ similarity }` — for `best-chunk`, also `{ chunk_a: {line_start,
-  line_end}, chunk_b: {line_start, line_end} }` identifying which chunk pair won (the pair across all
-  of A's chunks × B's chunks with the highest similarity — an O(chunks_a × chunks_b) exhaustive
+  line_end}, chunk_b: {line_start, line_end} }` identifying the winning chunk pair (the pair across
+  all of A's chunks × B's chunks with the highest similarity — an O(chunks_a × chunks_b) exhaustive
   comparison, acceptable at this vault's scale per S001's "thousands of notes, not millions" framing;
   revisit only if a single note's chunk count grows large enough for this to matter).
 - `all-pairs`: full `chunks_a × chunks_b` similarity matrix, JSON-only (`--format table` is a usage
@@ -156,10 +152,10 @@ is this note actually closest to" with no query-formulation step in between.
 | Flag | Values | Notes |
 |---|---|---|
 | `--level` | `chunk\|note`, default `note` | Query-side granularity: is `<note-title\|chunk-id>` a note (resolved via `resolveTitle`) or a raw chunk id? |
-| `--against` | `chunk\|note`, default matches `--level` | Corpus-side granularity — lets `--level note --against chunk` ask "which chunks are nearest this note's centroid," independent of what granularity the query side used. |
-| `--aggregate` | `centroid\|best-chunk`, default `centroid` | Only meaningful when `--level note` (the query side needs collapsing to one vector) — a usage error combined with `--level chunk`. `all-pairs` is not a valid value here (there is no pairwise matrix to speak of for a k-NN scan against a whole corpus). |
+| `--against` | `chunk\|note`, default matches `--level` | Corpus-side granularity — lets `--level note --against chunk` ask "which chunks are nearest this note's centroid," independent of the query side's granularity. |
+| `--aggregate` | `centroid\|best-chunk`, default `centroid` | Only meaningful at `--level note` (the query side needs collapsing to one vector) — a usage error combined with `--level chunk`. `all-pairs` isn't a valid value here (there's no pairwise matrix for a k-NN scan against a whole corpus). |
 | `--k` | int, default `10` | Config-backed default, `[vectors].nearest_k_default` — see "Config" below. |
-| `--score` | flag | Include raw similarity in output, not rank position only — the CLAUDE.md "no raw scores" rule is a `search`-surface rule (see "Cosine similarity" above), doesn't apply here; without this flag, output is rank-only. |
+| `--score` | flag | Include raw similarity in output, not rank position only — CLAUDE.md's "no raw scores" rule is a `search`-surface rule (see "Cosine similarity" above) and doesn't apply here; without this flag, output is rank-only. |
 
 The query note/chunk itself is always excluded from its own results.
 
@@ -170,10 +166,10 @@ chunk_line_end` (`--against chunk`), with a trailing `similarity` column when `-
 ### `mnotes vectors cluster`
 
 Whole-vault (or `--tag`/`--folder`-scoped) grouping. Always runs on full-dimensional vectors,
-regardless of any `reduce` output that may exist for the same scope — clustering on a 2D/3D
-projection throws away exactly the structure the clustering is trying to find, so `cluster` never
-reads a `reduce` output file as input, and `reduce`'s own `--color-by cluster` (below) is the only
-place the two commands' outputs meet.
+regardless of any `reduce` output that may exist for the same scope — clustering on a 2D/3D projection
+would throw away exactly the structure clustering is trying to find, so `cluster` never reads a
+`reduce` output as input; `reduce`'s own `--color-by cluster` (below) is the only place the two
+commands' outputs meet.
 
 | Flag | Values | Notes |
 |---|---|---|
@@ -208,47 +204,43 @@ the output directly in a terminal or saving it first.
 | `--format` | `csv\|json`, default `csv` | `csv` is the default because the primary consumer is a stdout-piped plotting tool, not a script parsing JSON — a bare header row (coordinate columns only by default: `x,y` at `--dims 2`, `x,y,z` at `--dims 3`) plus one data row per point, nothing else on stdout. `json` remains available for programmatic consumption (`{ points: [...], metadata: {...} }`, see below), always includes every field regardless of `--metadata`, and is unaffected by `--output`. |
 | `--metadata` | flag, default off | `csv` only (a no-op — not an error — combined with `--format json`, which already includes everything). Appends `id, title[, chunk_line_start, chunk_line_end at --level chunk], label` after the coordinate columns. Off by default: see "Output shape" below for why extra columns break the default `\| uplot scatter` pipeline this command is designed around. |
 
-If `--color-by cluster` and the caller wants to reuse an already-inspected clustering rather than a
-freshly (and differently-parameterized) computed one, they run `cluster --format json --output
-clusters.json` themselves first and pass it via `--clusters clusters.json` — same reproducibility
-rationale `outliers --mode bridge` uses its own `--clusters` flag for (see below). Without
-`--clusters`, the internal fixed-heuristic run is exactly that: a convenience default, not
-reproducible against a specific clustering decision. At `--format json`, the output's `metadata`
-records `{ cluster_source: "internal" | "<path>" }` so a later reader can tell which happened; at
-`--format csv` there is no metadata home for this specifically (stdout must stay a clean,
-tool-parseable data table with nothing but point data mixed in, even with `--metadata`, which adds
-per-point columns, not run-level provenance) — tracking `cluster_source` means using `--format json`,
-not a `#`-comment smuggled into the CSV.
+To reuse an already-inspected clustering with `--color-by cluster` rather than a freshly (and
+differently-parameterized) computed one, run `cluster --format json --output clusters.json` first and
+pass it via `--clusters clusters.json` — the same reproducibility rationale `outliers --mode bridge`
+uses its own `--clusters` flag for (see below). Without `--clusters`, the internal fixed-heuristic run
+is a convenience default only, not reproducible against a specific clustering decision. `--format json`
+output records `{ cluster_source: "internal" | "<path>" }` in `metadata` so a later reader can tell
+which happened; `--format csv` has no home for this (stdout must stay a clean point-data table, even
+with `--metadata`'s per-point columns, not run-level provenance) — tracking `cluster_source` requires
+`--format json`, not a `#`-comment smuggled into the CSV.
 
-Output shape, per point: `id, title, x, y, z, label` (`z` present only at `--dims 3`, `null` in
-`--format json` and omitted as a column entirely in `--format csv` at `--dims 2`). At `--format json`:
-`{ points: [{id, title, x, y, z?, label}], metadata: {...} }` — field order is irrelevant, a JSON
-consumer reads by key, and every field is always present regardless of `--metadata` (that flag only
-affects `--format csv`).
+Output shape, per point: `id, title, x, y, z, label` (`z` present only at `--dims 3`; `null` in
+`--format json`, omitted as a column entirely in `--format csv` at `--dims 2`). At `--format json`:
+`{ points: [{id, title, x, y, z?, label}], metadata: {...} }` — field order is irrelevant, and every
+field is always present regardless of `--metadata` (that flag only affects `--format csv`).
 
-At `--format csv` (the default), the columns present and their order matter a great deal, and it's
-**coordinates-only by default** — `x, y` (or `x, y, z` at `--dims 3`), nothing else — not merely
-coordinates-first. The reason isn't just "a scatter tool reads columns positionally, so put x/y up
-front" (an earlier draft of this spec assumed reordering alone was sufficient, which turned out to be
-wrong in practice): `uplot scatter` has no way to *ignore* extra columns at all — it treats column 1 as
-`x` and plots **every remaining column** as its own additional y-series overlaid on the same axes.
-Tacking `id`/`title`/`label` onto the end (or anywhere) doesn't get silently skipped, it renders as
-bogus extra series cluttering the plot, which is a real, observed failure of `mnotes vectors reduce
---algo pca | uplot scatter -H -d,` when the CSV carried metadata columns. Coordinates-only by default
-is what makes that exact pipeline work with zero column-selection flags. Pass `--metadata` to append
-`id, title[, chunk_line_start, chunk_line_end at --level chunk], label` after the coordinate columns
-when that's actually wanted — importing into a spreadsheet or a script (pandas, etc.) that handles
-extra columns fine, rather than piping into a positional scatter tool.
+At `--format csv` (the default), column presence and order matter a great deal: the output is
+**coordinates-only by default** — `x, y` (or `x, y, z` at `--dims 3`), nothing else. This is stronger
+than "coordinates-first": an earlier draft of this spec assumed reordering alone was sufficient, which
+turned out to be wrong in practice, because `uplot scatter` has no way to *ignore* extra columns at
+all — it treats column 1 as `x` and plots **every remaining column** as its own additional y-series
+overlaid on the same axes. Tacking `id`/`title`/`label` onto the end (or anywhere) doesn't get silently
+skipped; it renders as bogus extra series cluttering the plot, a real, observed failure of `mnotes
+vectors reduce --algo pca | uplot scatter -H -d,` when the CSV carried metadata columns.
+Coordinates-only by default is what makes that exact pipeline work with zero column-selection flags.
 
-For the `--metadata` case, the coordinate columns still come first, ahead of every other column — a
-scatter tool that reads plot columns positionally (`uplot scatter -H -d,`, gnuplot's `using 1:2`) needs
-the coordinates at the front with nothing non-numeric ahead of them, or it silently plots the wrong
-columns (e.g. treating a leading `id` column as `x`) on top of the already-extra-series problem
-`--metadata` opts into knowingly. No surrounding object either way — the stream is
-directly consumable by a plotting tool's stdin with no unwrapping step. `id` is `note_id`/`chunk_id`
-depending on `--level`; `title` is the note title (`--level chunk` still reports the parent note's
-title alongside the chunk, plus `chunk_line_start`/`chunk_line_end` columns, since a bare chunk id is
-meaningless on a plot's hover tooltip without it).
+Pass `--metadata` to append `id, title[, chunk_line_start, chunk_line_end at --level chunk], label`
+after the coordinate columns, for uses that tolerate extra columns (importing into a spreadsheet, or a
+script like pandas) rather than piping into a positional scatter tool. Even with `--metadata`, the
+coordinate columns stay first, ahead of every other column — a scatter tool that reads plot columns
+positionally (`uplot scatter -H -d,`, gnuplot's `using 1:2`) needs the coordinates at the front with
+nothing non-numeric ahead of them, or it silently plots the wrong columns (e.g. treating a leading `id`
+column as `x`) on top of the already-extra-series problem `--metadata` opts into knowingly. No
+surrounding object either way — the stream is directly consumable by a plotting tool's stdin with no
+unwrapping step. `id` is `note_id`/`chunk_id` depending on `--level`; `title` is the note title
+(`--level chunk` still reports the parent note's title alongside the chunk, plus
+`chunk_line_start`/`chunk_line_end` columns, since a bare chunk id is meaningless on a plot's hover
+tooltip without it).
 
 ### `mnotes vectors tag-fit [--tag <tag>]`
 
@@ -263,11 +255,10 @@ tag at once.
 
 For each `(tag, note)` pair where the note carries that tag, computes similarity between the note's
 centroid (`getNoteVector`, `centroid`) and the tag's centroid (mean of every member note's centroid,
-re-normalized — the same `getNoteVector`-style unit-renormalization, computed once per tag per
-invocation, not memoized across a whole-vault `--tag`-omitted run beyond that). A tag with only one
-member note is skipped (that note *is* the centroid — similarity 1.0 is a definitionally
-uninteresting result, not a real signal, so it's excluded rather than clutter every single-note tag
-into the output).
+re-normalized the same way — computed once per tag per invocation, not memoized across a whole-vault
+`--tag`-omitted run beyond that). A tag with only one member note is skipped (that note *is* the
+centroid — similarity 1.0 is a definitionally uninteresting result, not a real signal, so it's
+excluded rather than cluttering every single-note tag into the output).
 
 Output (table): `tag | note_title | similarity_to_centroid`, sorted ascending by similarity (worst
 fit first — the point of this command is finding the outliers).
@@ -330,10 +321,9 @@ Two populations, both at whatever `--level`'s vector granularity resolves to:
    has no target vector to compare — silently excluded, not an error, since `mnotes links broken`
    already owns surfacing that condition). Every such pair's similarity is computed — no sampling on
    this side, since the point is the *actual* linked-pair distribution, not an estimate of it.
-2. **Unlinked baseline**: `--sample-size` pairs drawn uniformly at random from all pairs of indexed
-   notes that have **no** `note_links` row between them in either direction, with a fixed-seed PRNG
-   (`node:crypto`'s `randomInt`... no — deterministic reproducibility isn't a stated goal here, plain
-   `Math.random()`-backed sampling is fine) — re-running `calibrate` is expected to give a very
+2. **Unlinked baseline**: `--sample-size` pairs drawn uniformly at random (plain `Math.random()`-backed
+   — deterministic reproducibility isn't a goal here) from all pairs of indexed notes that have **no**
+   `note_links` row between them in either direction. Re-running `calibrate` is expected to give a
    similar, not byte-identical, unlinked-pair sample each time, which is acceptable since the point is
    the *distribution*, not any individual sampled pair.
 
@@ -382,8 +372,8 @@ even a concept — that all lives in `cli/vectors.js`, per CLAUDE.md's core/cli 
 
 Per S008's pattern, `core/vectors.js` calls `getContextLogger()`, never `getLogger` directly. Matching
 S006's treatment of every other CLI-only, non-mutating command (`search`, `grep`, `tags`, `links`):
-`cli/vectors.js` establishes no `runWithLogger` context, so these calls resolve to the no-op logger
-in normal CLI use — there's no daemon or MCP caller of this module for a real logging context to ever
+`cli/vectors.js` establishes no `runWithLogger` context, so these calls resolve to the no-op logger in
+normal CLI use — there's no daemon or MCP caller of this module for a real logging context to ever
 attach to. No audit-log entry either: every subcommand here is read-only, and S008's audit trail is
 specifically for mutations.
 

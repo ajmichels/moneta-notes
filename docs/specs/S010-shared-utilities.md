@@ -13,17 +13,15 @@ primitive `titleToPath` is now built on), `S015-readonly-paths` (adds `loadReado
 Small, dependency-free primitives for converting between a note's **title** (the tool-facing
 identifier, per CLAUDE.md — "note title is the identifier, never the raw file path") and its
 vault-relative file path, and for counting a note body's logical lines. Every `core/` module that
-touches a note file needs at least one of these, and — before this spec — each reimplemented its own
-copy rather than sharing one. This module exists to hold the one correct implementation so nothing
-else has to.
+touches a note file needs at least one of these; before this spec, each reimplemented its own copy.
+This module holds the one shared implementation.
 
 Originally every function here was pure (no I/O, no `db` argument) — `titleToPath`/`pathToTitle` are
-a deterministic string transform, nothing more. **Title resolution** (added below) is the one
-deliberate exception: it needs to know what notes currently exist, so it takes a `db` handle and
-queries the `notes` table. It still belongs here rather than in a new module, because it's the same
-"title ↔ path" concern this spec already owns — see "Title resolution" below for why a second concern
-(disambiguating a title Claude didn't get from an authoritative source) needed to join the first
-(converting a title Claude already has into a path).
+a deterministic string transform, nothing more. **Title resolution** (below) is the one deliberate
+exception: it needs to know what notes currently exist, so it takes a `db` handle and queries the
+`notes` table. It stays in this module rather than a new one because it's the same "title ↔ path"
+concern: disambiguating a title Claude didn't get from an authoritative source is just the other half
+of converting a title Claude already has into a path (see "Title resolution" below).
 
 This spec was split out after implementing S006 surfaced two real problems with the un-shared state:
 
@@ -73,22 +71,19 @@ This spec was split out after implementing S006 surfaced two real problems with 
   extra line (`'a\nb\nc\n'` is 3 lines, not 4). **This function is content-shape-agnostic — the caller
   is responsible for passing frontmatter-stripped body content, never raw file bytes.** This matches
   what `notes.line_count` (S001) stores and what `noteRead`'s `total_lines` (S003) returns. Every
-  caller of `file_line_count` in the tool surface (`search`, `tag_notes`, `stats`, `read`, `grep`) must
-  mean the same thing by it; `core/grep.js` — the one caller reading straight off disk instead of
-  through the index — parses frontmatter out via `gray-matter` before calling this, specifically so its
-  output means the same thing as every other command's despite `grep` intentionally bypassing the
-  index (S004's "operating on the vault directly rather than the index").
+  caller of `file_line_count` (`search`, `tag_notes`, `stats`, `read`, `grep`) must mean the same thing
+  by it — see the frontmatter-stripping fix above for why `grep` in particular routes through
+  `gray-matter` first despite reading off disk rather than through the index.
 
 - **`stripCodeRegions(body) -> string`** — blanks out fenced code blocks (` ```...``` `) and inline
   code spans (`` `...` ``), replacing each match with an equal-length run of spaces so every other
-  character's offset in the string is preserved (a caller doing offset-based work afterward, e.g.
-  matching against the original string's indices, doesn't need to re-map anything). Originally a
-  private `stripCode`/`blank` pair inside `core/tags.js` (S004's inline-`#hashtag` scan); pulled out
-  here when S011's wikilink extraction needed the exact same exclusion rule (don't treat `[[...]]`
-  found inside a fenced block or inline code span as a real link, for the same reason a `#hashtag`
-  inside one isn't a real tag) — this is precisely the kind of duplicated-primitive drift this spec
-  exists to prevent (see "Purpose" above). `core/tags.js` now imports this instead of keeping its own
-  copy.
+  character's offset is preserved (a caller doing offset-based work afterward, e.g. matching against
+  the original string's indices, doesn't need to re-map anything). Originally a private
+  `stripCode`/`blank` pair inside `core/tags.js` (S004's inline-`#hashtag` scan); pulled out here when
+  S011's wikilink extraction needed the same exclusion rule (`[[...]]` inside a fenced block or inline
+  code span isn't a real link, for the same reason a `#hashtag` inside one isn't a real tag) — exactly
+  the duplicated-primitive drift this spec exists to prevent. `core/tags.js` now imports this instead
+  of keeping its own copy.
 
 ## `.mnotesignore`
 
@@ -104,21 +99,21 @@ This spec was split out after implementing S006 surfaced two real problems with 
   Templater/core-Templates placeholder like `id: {{title}}`. YAML parses `{{title}}` as flow-mapping
   syntax (a mapping whose key is itself a mapping, with an implicit `null` value) rather than the
   literal string it's meant to be — so an indexed template note ends up with a nested-object `id`
-  instead of a scalar, which is exactly the kind of malformed metadata `S014`'s `metadata_keys`/
+  instead of a scalar, which is exactly the malformed metadata `S014`'s `metadata_keys`/
   `metadata_query` assume never happens. `.mnotesignore` is the general fix (exclude the folder rather
-  than special-case template syntax), modeled directly on how Obsidian itself scopes both its core
-  Templates plugin and the Templater community plugin: a single configurable template folder, no
-  frontmatter marker or naming convention involved (verified against Obsidian's own help docs and
-  Templater's settings docs before choosing this shape).
+  than special-case template syntax), modeled on how Obsidian itself scopes both its core Templates
+  plugin and the Templater community plugin — a single configurable template folder, no frontmatter
+  marker or naming convention involved (verified against both plugins' own docs before choosing this
+  shape).
 - **Where a vault-relative path comes from before calling `.ignores()`**: the same `toVaultRelativePath`
   (S005) / `pathToTitle`-adjacent conventions already used everywhere else in this file — `/`-separated,
   no leading slash, no `./` prefix.
-- **Two consumers, two different mechanisms** — this function itself is only used by S005's indexer
-  (which walks the filesystem in plain JS via `readdirSync`, so it needs an in-process matcher to prune
-  the walk and to purge already-indexed rows). S004's `grep` shells out to a real `rg` binary instead,
-  so rather than loading a second copy of the same patterns into JS, it points ripgrep directly at the
-  file with `--ignore-file <vaultRoot>/.mnotesignore` — see S004 for why. Both read the same file, at
-  the same path, with the same gitignore syntax; only the enforcement mechanism differs.
+- **Two consumers, two different mechanisms** — `loadIgnoreMatcher` itself is only used by S005's
+  indexer (which walks the filesystem in plain JS via `readdirSync`, so it needs an in-process matcher
+  to prune the walk and purge already-indexed rows). S004's `grep` shells out to a real `rg` binary
+  instead, so rather than loading a second copy of the same patterns into JS, it points ripgrep
+  directly at the file with `--ignore-file <vaultRoot>/.mnotesignore` — see S004 for why. Both read the
+  same file, at the same path, with the same gitignore syntax; only the enforcement mechanism differs.
 - **Scope, deliberately**: only S005 (indexing) and S004 (grep) consult `.mnotesignore`. A caller that
   already knows a note's exact title — `note_read`, `note_write`, `note_edit`, etc. — is never blocked
   from reading or writing it just because it lives under an ignored path; exclusion only prevents a
@@ -176,9 +171,8 @@ frontmatter field, S003) whenever exactly one note in the vault has that basenam
   (S011's `getBacklinks`/`getBrokenLinks`/`resolveLinkTargets`, `note_rename`'s link cascade) builds
   the index once and reuses it, rather than re-querying `notes` per string. Exact title match wins
   first; otherwise, a unique basename match; otherwise `null` (not found, or ambiguous — this
-  function deliberately doesn't distinguish the two, since both mean "don't guess," and Obsidian
-  itself has no published, guaranteed tie-break rule for the ambiguous case — see S011 for where that
-  research is captured. Not this function's job to invent one).
+  function deliberately doesn't distinguish the two, since both mean "don't guess"; see "Explicitly
+  out of scope here" below for why no tie-break is attempted for the ambiguous case).
 - **`resolveTitle(db, rawTitle) -> string | null`** — the single-shot convenience wrapper
   (`resolveAgainstIndex(buildTitleIndex(db), rawTitle)`) for a caller that only needs to resolve one
   title, e.g. `note_read`'s own title argument (S003).
@@ -214,5 +208,5 @@ never a separately-persisted value that could drift from it.
 - **Replicating Obsidian's ambiguous-basename tie-break** — deliberately not attempted. Obsidian
   itself doesn't publish or guarantee one (community/developer analysis of its resolver suggests
   something like same-folder-first then alphabetical, but it isn't documented or stable across
-  versions), so there's no "correct" behavior to copy. `resolveAgainstIndex` returns `null` for an
-  ambiguous match rather than guessing.
+  versions — see S011 for where that research is captured), so there's no "correct" behavior to copy.
+  `resolveAgainstIndex` returns `null` for an ambiguous match rather than guessing.

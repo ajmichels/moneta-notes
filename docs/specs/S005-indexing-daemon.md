@@ -97,99 +97,15 @@ A single-title `mnotes reindex <title>` for a path matching either kind of exclu
 already indexed) rather than indexing it — naming a note explicitly doesn't override the exclusion,
 it just triggers the same cleanup a background pass would eventually do anyway.
 
-## Symlinked directories
-
-Obsidian officially supports symlinked directories inside a vault (not symlinked files), and this
-indexer follows that: content inside a symlinked directory is indexed as if it were native vault
-content, under a title built from the symlink's own name (e.g. a vault-root symlink named `Memory`
-pointing anywhere on disk produces titles like `Memory/some-note`) — never the resolved realpath.
-This is what lets `.mnotesignore`, `resolveVaultPath`'s containment check (S010), and any future
-glob-based path matching apply to symlinked content with no special-casing: as far as every
-path-facing surface is concerned, the symlink's name in the vault tree *is* the note's location.
-
-**Symlinked files are ignored, not indexed** — matching Obsidian, which doesn't support them.
-`walkVaultForMarkdown` and the live-discovery logic below both apply the same three-way check to a
-symlink entry: `realpathSync` + `statSync` it, then descend if the target is a directory, skip if
-it's a regular file, and skip (rather than throw) if the target doesn't exist (a dangling symlink) —
-this must not crash a startup walk or a full `mnotes reindex` over one stale link. Nested symlinked
-directories (a symlinked directory that itself contains further symlinked directories) are walked
-and watched recursively, with realpath-based cycle detection (a set of already-visited realpaths)
-guarding against a symlink loop or a symlink pointing at an ancestor of itself.
-
-### Why a single recursive `fswatch` isn't enough
-
-Empirically (macOS 1.22.0, kqueue/FSEvents backend — see the platform caveat above), a single
-`fswatch -r vaultRoot` never reports events for changes *inside* a symlinked directory nested in
-that tree, with or without `-L`/`--follow-links` — confirmed by direct testing, not assumed from
-fswatch's documentation. It **does** report `Created`/`Removed` for the symlink entry itself (that's
-a normal change to the real, non-symlinked parent directory), which is the mechanism live discovery
-(below) is built on. Watching a symlinked directory's contents at all requires giving `fswatch` that
-directory as its own explicit watch root — which is why this indexer runs **one additional `fswatch`
-process per currently-known symlinked directory**, alongside the one main process that covers the
-rest of the (non-symlinked) vault tree. The two families never double-report the same event: the
-main watcher's blindness to symlinked subtrees is total, so no dedup logic is needed between them.
-
-Every per-symlink watcher process reports its events using the **resolved realpath** of the watched
-directory, never the vault-relative alias path it was discovered under — true even when the watch
-root argument passed to `fswatch` was the symlink path itself, not its target. `live-watcher.js`
-therefore maintains a live registry (`alias vault-relative path → { realpath, childProcess }`) built
-from every symlinked directory found during the walk (`vault-walk.js`'s `walkVaultForMarkdown`), and
-rewrites each per-symlink watcher's reported absolute path (`vault-walk.js`'s `rewriteEventPath`) by
-substituting its realpath prefix for the corresponding alias prefix *before* that path reaches the
-same `isDotPath`/ignore-matcher/debounce pipeline the main watcher's paths go through
-(`live-watcher.js`'s `createFsWatcher`) — anything reaching `enqueuePath`/`notes.path` must already
-be a clean vault-relative alias path, never a realpath, per S001's path-is-identity contract.
-Skipping this rewrite would produce `../`-prefixed paths that corrupt `notes.path` and fail
-`resolveVaultPath` (S010)'s containment check the next time anyone looks the note up by title.
-
-### Live discovery and teardown
-
-Newly created or removed symlinked directories are picked up live, without requiring a daemon
-restart — matching how ordinary file changes are handled, not the restart-required cadence
-`.mnotesignore` edits still use. The mechanism reuses the main watcher's existing debounce-then
--recheck-reality design (see "Unified per-path debounce" below) rather than branching on
-`fswatch`'s raw event type:
-
-- When a debounced path settles and `lstatSync` shows it's now a symlink, `realpathSync` + `statSync`
-  the target to decide: a directory registers it (adds it to the registry, spawns its `fswatch`
-  child, and enqueues its existing contents via a scoped version of watermark catch-up, recursing
-  into any symlinked directories found within); a file or a dangling target is ignored (tearing down
-  any prior registration at that alias first, in case a directory symlink was replaced in place).
-- When a debounced path settles and no longer exists at all, and it was a registered alias: kill its
-  `fswatch` child, remove it (and any nested registrations under it) from the registry, and bulk
-  -delete every `notes` row whose path starts with that alias prefix — a removed or renamed symlink
-  takes its whole indexed subtree with it, unlike a single note's deletion.
-
-### Process resilience
-
-Because this multiplies the number of long-running `fswatch` children from one to (potentially)
-many, every child — the main watcher included — gets an `'exit'` handler: an unexpected exit (the
-process wasn't killed by this daemon's own teardown/`stop()` logic, tracked with the same kind of
-`stopped`-flag guard `defaultCreateWatcher` already uses to no-op a debounce firing after shutdown)
-triggers a respawn using the same exponential-backoff schedule the queue drainer uses for failed
-reindex attempts (default: 30s, 2m, 10m; 4 attempts total — see Config knobs; no separate config
-knob is introduced for this). Before respawning a per-symlink child specifically, its realpath is
-rechecked: if the target genuinely no longer resolves to a directory, this isn't a crash to recover
-from — it's routed through the same teardown path live-removal detection uses (above), rather than
-retried into a certain-failure loop. A main-watcher exit is always retried on the same schedule (the
-vault root itself never legitimately disappears out from under a running daemon).
-
-Resource overhead of running many `fswatch` processes was measured directly (not assumed): ~5.8MB
-RSS and 8 open file descriptors per process, ~10ms spawn latency each, no OS-imposed ceiling reached
-scaling to 30 concurrent processes on macOS. No artificial cap on the number of symlinked
-directories is imposed by this indexer as a result. Linux's `fs.inotify.max_user_instances`
-(commonly defaulting to 128, one inotify instance per `fswatch` process) is a real platform ceiling
-this design can hit on a vault with many symlinked directories — handled as a clear, fail-loud
-startup/discovery error surfaced to the user (per CLAUDE.md's fail-loudly rule) rather than a
-self-imposed limit.
-
 ## Live file-change handling
 
 ### Unified per-path debounce
 
 Every `fswatch` event (create, modify, delete, rename) for a given path resets a single **15-second**
-per-path in-memory debounce timer — there's no separate immediate-delete path. When the timer fires
-(15s of quiet for that path), the daemon rechecks the filesystem directly:
+per-path in-memory debounce timer (a config value, see Config knobs below, not a hardcoded constant) —
+there's no separate immediate-delete path. The window exists to absorb rapid write sessions (multiple
+saves in a short span while actively editing) into one reindex pass rather than one per save. When the
+timer fires (quiet for the full window), the daemon rechecks the filesystem directly:
 
 - **File exists** → enqueue the path into `index_queue` (handles create, modify, and the tail end of
   a rename-into-place the same way).
@@ -199,13 +115,9 @@ per-path in-memory debounce timer — there's no separate immediate-delete path.
 This single "recheck reality after debounce" design (rather than reacting differently per raw event
 type) is what makes atomic-save patterns safe: an editor that writes via temp-file-then-rename (e.g.
 Neovim's default write behavior) produces a delete-then-create pair for the same path in quick
-succession. Reacting immediately to the delete would make the note briefly vanish from the index mid
--save; deferring to a single post-debounce existence check means it only ever settles into "file
+succession. Reacting immediately to the delete would make the note briefly vanish from the index
+mid-save; deferring to a single post-debounce existence check means it only ever settles into "file
 exists, enqueue it."
-
-The debounce window (default 15s) exists to absorb rapid write sessions (multiple saves in a short
-span while actively editing) into one reindex pass rather than one per save. It's a config value (see
-Config knobs below), not a hardcoded constant.
 
 **Crash-during-debounce is a non-issue**: the debounce timer lives in memory, not the DB. If the
 daemon crashes before a pending debounce fires, that specific change is simply picked up by the next
@@ -238,8 +150,8 @@ correct:
 
 This makes the write-through purely additive: the fswatch-driven path above is unmodified and remains
 the only mechanism for renames that don't go through `note_rename` with a `db` handle (Obsidian's own
-rename, a bare `mv`, a `git` checkout that moves a file). Those still cost the full delete+create cycle
-described above, same as before this change.
+rename, a bare `mv`, a `git` checkout that moves a file) — those still pay the full delete+create cost
+described above.
 
 **`note_rename`'s link cascade (S003/S011) reuses `core/db.js`'s `enqueuePath`** (S001; this file
 re-exports it for its own call sites, but doesn't own the implementation — see S001 for why). After
@@ -295,6 +207,93 @@ picks up anything still in `index_queue` — while an IPC request queues behind 
 rather than racing it. Without this, a manual reindex issued mid-drain-pass could re-embed the same
 note twice concurrently (wasted work, and two interleaved delete+insert passes racing to write the same
 `chunks`/`chunk_vectors` rows).
+
+## Symlinked directories
+
+Obsidian officially supports symlinked directories inside a vault (not symlinked files), and this
+indexer follows that: content inside a symlinked directory is indexed as if it were native vault
+content, under a title built from the symlink's own name (e.g. a vault-root symlink named `Memory`
+pointing anywhere on disk produces titles like `Memory/some-note`) — never the resolved realpath.
+This is what lets `.mnotesignore`, `resolveVaultPath`'s containment check (S010), and any future
+glob-based path matching apply to symlinked content with no special-casing: as far as every
+path-facing surface is concerned, the symlink's name in the vault tree *is* the note's location.
+
+**Symlinked files are ignored, not indexed** — matching Obsidian, which doesn't support them.
+`walkVaultForMarkdown` and the live-discovery logic below both apply the same three-way check to a
+symlink entry: `realpathSync` + `statSync` it, then descend if the target is a directory, skip if
+it's a regular file, and skip (rather than throw) if the target doesn't exist (a dangling symlink) —
+this must not crash a startup walk or a full `mnotes reindex` over one stale link. Nested symlinked
+directories (a symlinked directory that itself contains further symlinked directories) are walked
+and watched recursively, with realpath-based cycle detection (a set of already-visited realpaths)
+guarding against a symlink loop or a symlink pointing at an ancestor of itself.
+
+### Why a single recursive `fswatch` isn't enough
+
+Empirically (macOS 1.22.0, kqueue/FSEvents backend — see the platform caveat above), a single
+`fswatch -r vaultRoot` never reports events for changes *inside* a symlinked directory nested in
+that tree, with or without `-L`/`--follow-links` — confirmed by direct testing, not assumed from
+fswatch's documentation. It **does** report `Created`/`Removed` for the symlink entry itself (that's
+a normal change to the real, non-symlinked parent directory), which is the mechanism live discovery
+(below) is built on. Watching a symlinked directory's contents at all requires giving `fswatch` that
+directory as its own explicit watch root — which is why this indexer runs **one additional `fswatch`
+process per currently-known symlinked directory**, alongside the one main process that covers the
+rest of the (non-symlinked) vault tree. The two families never double-report the same event: the
+main watcher's blindness to symlinked subtrees is total, so no dedup logic is needed between them.
+
+Every per-symlink watcher process reports its events using the **resolved realpath** of the watched
+directory, never the vault-relative alias path it was discovered under — true even when the watch
+root argument passed to `fswatch` was the symlink path itself, not its target. `live-watcher.js`
+therefore maintains a live registry (`alias vault-relative path → { realpath, childProcess }`) built
+from every symlinked directory found during the walk (`vault-walk.js`'s `walkVaultForMarkdown`), and
+rewrites each per-symlink watcher's reported absolute path (`vault-walk.js`'s `rewriteEventPath`) by
+substituting its realpath prefix for the corresponding alias prefix *before* that path reaches the
+same `isDotPath`/ignore-matcher/debounce pipeline the main watcher's paths go through
+(`live-watcher.js`'s `createFsWatcher`) — anything reaching `enqueuePath`/`notes.path` must already
+be a clean vault-relative alias path, never a realpath, per S001's path-is-identity contract.
+Skipping this rewrite would produce `../`-prefixed paths that corrupt `notes.path` and fail
+`resolveVaultPath` (S010)'s containment check the next time anyone looks the note up by title.
+
+### Live discovery and teardown
+
+Newly created or removed symlinked directories are picked up live, without requiring a daemon
+restart — matching how ordinary file changes are handled, not the restart-required cadence
+`.mnotesignore` edits still use. The mechanism reuses the main watcher's existing debounce-then
+-recheck-reality design (see "Unified per-path debounce" above) rather than branching on
+`fswatch`'s raw event type:
+
+- When a debounced path settles and is now a symlink, the same three-way check as the startup walk
+  (above) decides what happens: a directory registers it (adds it to the registry, spawns its
+  `fswatch` child, and enqueues its existing contents via a scoped version of watermark catch-up,
+  recursing into any symlinked directories found within); a file or a dangling target is ignored
+  (tearing down any prior registration at that alias first, in case a directory symlink was replaced
+  in place).
+- When a debounced path settles and no longer exists at all, and it was a registered alias: kill its
+  `fswatch` child, remove it (and any nested registrations under it) from the registry, and bulk
+  -delete every `notes` row whose path starts with that alias prefix — a removed or renamed symlink
+  takes its whole indexed subtree with it, unlike a single note's deletion.
+
+### Process resilience
+
+Because this multiplies the number of long-running `fswatch` children from one to (potentially)
+many, every child — the main watcher included — gets an `'exit'` handler: an unexpected exit (the
+process wasn't killed by this daemon's own teardown/`stop()` logic, tracked with the same kind of
+`stopped`-flag guard `defaultCreateWatcher` already uses to no-op a debounce firing after shutdown)
+triggers a respawn using the same exponential-backoff schedule the queue drainer uses for failed
+reindex attempts (see Config knobs; no separate config knob is introduced for this). Before
+respawning a per-symlink child specifically, its realpath is rechecked: if the target genuinely no
+longer resolves to a directory, this isn't a crash to recover from — it's routed through the same
+teardown path live-removal detection uses (above), rather than retried into a certain-failure loop. A
+main-watcher exit is always retried on the same schedule (the vault root itself never legitimately
+disappears out from under a running daemon).
+
+Resource overhead of running many `fswatch` processes was measured directly (not assumed): ~5.8MB
+RSS and 8 open file descriptors per process, ~10ms spawn latency each, no OS-imposed ceiling reached
+scaling to 30 concurrent processes on macOS. No artificial cap on the number of symlinked
+directories is imposed by this indexer as a result. Linux's `fs.inotify.max_user_instances`
+(commonly defaulting to 128, one inotify instance per `fswatch` process) is a real platform ceiling
+this design can hit on a vault with many symlinked directories — handled as a clear, fail-loud
+startup/discovery error surfaced to the user (per CLAUDE.md's fail-loudly rule) rather than a
+self-imposed limit.
 
 ## Chunking
 
@@ -427,8 +426,7 @@ created" at `info`, "schema version mismatch, rebuilding" at `warn`) and `core/t
 `core/links.js`'s extraction calls during reindex, lands in `indexer.log` under this one context.
 Nothing else in this spec needs its own `runWithLogger` call — it's set up once, at the top.
 
-Concrete events, replacing this spec's earlier vague "log an error-level entry (S008)" phrasing with
-the actual `getContextLogger()` call sites and levels:
+Concrete events below, with the exact `getContextLogger()` call sites and levels:
 
 - **Daemon started** — `info`, `"daemon started"`, before the schema check.
 - **Schema check/rebuild** — handled entirely by `core/db.js`'s own logging (`S001`); this spec doesn't

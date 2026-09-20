@@ -10,59 +10,54 @@ Consumed by: `S006-cli`, `S007-mcp-server`
 
 ## Purpose
 
-Defines note CRUD semantics: reading, creating, replacing, surgically editing, appending to, and
-renaming notes, plus the content-hash concurrency guard, frontmatter/metadata handling, and the
-auto-managed `id` frontmatter field. This spec introduces one tool beyond what's currently documented
-in the README — `note_rename` — and adds a `metadata` param to `note_edit` that the README's current
-table is missing. Both are flagged here for reconciliation in the README and in S007 (MCP tool
-schemas).
+Defines note CRUD semantics — reading, creating, replacing, surgically editing, appending to, and
+renaming notes — plus the content-hash concurrency guard, frontmatter/metadata handling, and the
+auto-managed `id`/`created` frontmatter fields. `note_rename` and `note_edit`'s `metadata` param are
+both flagged here for reconciliation with the README's tool table and S007's MCP tool schemas (neither
+is reflected there yet).
 
-## The `id` frontmatter field
+## System-managed frontmatter fields: `id` and `created`
 
-Every note has an `id` key in its YAML frontmatter, matching `obsidian.nvim`'s own convention (`id`
-is one of its three special frontmatter keys, alongside `aliases`/`tags` — see
+Two frontmatter keys are **entirely system-managed**: computed by `core/notes.js`, never read from or
+settable by a caller. If a caller includes either key in a `metadata` object passed to `note_write` or
+`note_edit`, it's silently dropped and replaced with the computed value — no error, since neither was
+ever a real input in the first place. Each overwrite is logged at `debug` level (see "Logging" below).
+
+### `id`
+
+Matches `obsidian.nvim`'s own convention (`id` is one of its three special frontmatter keys, alongside
+`aliases`/`tags` — see
 [obsidian.nvim's Frontmatter docs](https://github.com/obsidian-nvim/obsidian.nvim/wiki/Frontmatter)).
 Per `obsidian.nvim`'s actual usage (the `id` value *is* the note's filename when notes are created
 through it), `id` here is the **bare filename without extension** — no folder prefix, distinct from
-`title` which includes the folder path (e.g. a note at `Weekly Notes/2026-W32.md` has
-`id: 2026-W32`, `title: Weekly Notes/2026-W32`).
+`title` which includes the folder path (e.g. a note at `Weekly Notes/2026-W32.md` has `id: 2026-W32`,
+`title: Weekly Notes/2026-W32`).
 
-- `id` is **entirely system-managed**. It's computed by `core/notes.js` from the note's current path
-  on every create/write/edit/rename — never read from or settable by a caller.
-- If a caller includes an `id` key in a `metadata` object passed to `note_write` or `note_edit`, it's
-  silently dropped and replaced with the computed value. No error — this isn't treated as caller
-  error, just an ignored field, since `id` was never a real input in the first place.
-- `id` only ever changes as a side effect of `note_rename` (see below) — no other tool changes a
-  note's path, so no other tool can cause `id` to change.
+`id` is recomputed from the note's current path on every create/write/edit/rename, and only ever
+changes as a side effect of `note_rename` (see below) — no other tool changes a note's path, so no
+other tool can cause `id` to change.
 
-## The `created` frontmatter field
+### `created`
 
-Every note also gets a `created` key in its YAML frontmatter: an ISO 8601 UTC timestamp (e.g.
-`2026-08-29T14:03:11.482Z`, `Date.prototype.toISOString()`'s format) capturing when the note was
-first written. This exists because there's otherwise no reliable way to answer "when was this note
-created" — filesystem mtime/birthtime don't survive a vault sync/backup restore, and the index is
-ephemeral (rebuildable from scratch, not a system of record).
+An ISO 8601 UTC timestamp (e.g. `2026-08-29T14:03:11.482Z`, `Date.prototype.toISOString()`'s format)
+capturing when the note was first written. This exists because there's otherwise no reliable way to
+answer "when was this note created" — filesystem mtime/birthtime don't survive a vault sync/backup
+restore, and the index is ephemeral (rebuildable from scratch, not a system of record).
 
-- `created` is **entirely system-managed**, same posture as `id`: computed by `core/notes.js` at
-  creation time only — never read from or settable by a caller.
-- If a caller includes a `created` key in a `metadata` object passed to `note_write` on creation,
-  it's silently dropped and replaced with the actual creation timestamp, logged the same way as an
-  overwritten caller-supplied `id` (`getContextLogger().debug('overwrote caller-supplied created', …)`
-  — see "Logging" below).
-- Unlike `id`, `created` is **never recomputed after creation**. `note_write` (update), `note_edit`,
-  `note_append`, and `note_rename` all carry the existing `created` value forward untouched — it isn't
-  part of any of their metadata-merge logic, just existing frontmatter that survives the shallow merge
-  like any other caller-set key.
-- A note that predates this field (created before this behavior existed) simply has no `created` key
-  — nothing back-fills it retroactively, and its absence isn't treated as an error.
-- `obsidian.nvim` (see `CLAUDE.local.md`) is configured with a matching `note_frontmatter_func` so
-  notes created directly through Neovim get the same `created` field, in the same format, without
-  going through `core/notes.js` at all. That function runs on *every* save, not just the first, so it
-  can't use "is `created` already present" as its create-vs-update signal — plenty of pre-existing
-  notes have no `created` key at all, and stamping one in on their next ordinary edit would fabricate
-  a false creation time. It instead checks whether the note's file exists on disk yet (same signal
-  `obsidian.nvim` itself uses internally to log "Created" vs "Updated"), only ever stamping `created`
-  on the save where the file doesn't exist yet.
+Unlike `id`, `created` is computed only at creation time and **never recomputed after**: `note_write`
+(update), `note_edit`, `note_append`, and `note_rename` all carry the existing value forward untouched
+— it isn't part of any of their metadata-merge logic, just existing frontmatter that survives the
+shallow merge like any other caller-set key. A note that predates this field simply has no `created`
+key — nothing back-fills it retroactively, and its absence isn't treated as an error.
+
+`obsidian.nvim` (see `CLAUDE.local.md`) is configured with a matching `note_frontmatter_func` so notes
+created directly through Neovim get the same `created` field, in the same format, without going
+through `core/notes.js` at all. That function runs on *every* save, not just the first, so it can't
+use "is `created` already present" as its create-vs-update signal — plenty of pre-existing notes have
+no `created` key at all, and stamping one in on their next ordinary edit would fabricate a false
+creation time. It instead checks whether the note's file exists on disk yet (the same signal
+`obsidian.nvim` itself uses internally to log "Created" vs "Updated"), only stamping `created` on the
+save where the file doesn't exist yet.
 
 ## Flat frontmatter only
 
@@ -352,11 +347,9 @@ content_hash), `reason<string>`.
      fixed when `db` is available. `replaceLinkTarget` preserves any `#Heading`/`|Alias` segment
      untouched. If `count > 0`, write the file back. No caller-supplied hash here — this is internal
      machinery inside the single `noteRename` call, not a separate caller-initiated mutation, so
-     CLAUDE.md's hash-guard requirement doesn't apply the way it does to
-     `note_write`/`note_edit`/`note_append` (those exist to protect against an *agent* clobbering a
-     concurrent *external* edit across a read/decide/write round trip it controls; there's no such round
-     trip here). The read-immediately-before-write sequence still keeps the race window as small as the
-     primary rename's own file swap.
+     CLAUDE.md's hash-guard requirement doesn't apply (see "Concurrency model" below for why). The
+     read-immediately-before-write sequence keeps the race window as small as the primary rename's own
+     file swap.
   3. **Re-indexing the rewritten notes**: if `db` was passed, each rewritten note's vault-relative path
      is enqueued via `core/db.js`'s `enqueuePath(db, path)` (S001; also re-exported by
      `indexer/daemon.js` for its own call sites) — the
@@ -420,40 +413,34 @@ only the first is what `.mnotesreadonly` protects. See S015 for the full reasoni
 
 Every tool here is a mutation, and per `S008`, mutations are already fully covered by `logAudit` at
 the boundary layer (MCP tool call or CLI mutating command) — `tool`, `note_title`, `outcome`, and
-`error_message` on failure land in `audit.log` regardless of which of these functions ran or why it
-failed. `core/notes.js` does **not** duplicate that via `getContextLogger()`: a hash mismatch, an
-ambiguous `old_txt` match (zero or multiple), and a size-drop-guard trip all just throw a specific,
-descriptive error (per CLAUDE.md's "fail loudly"), same as they would with no logging infrastructure
-at all — the thrown message *is* what ends up as `audit.log`'s `error_message`, so a second `warn` line
-from inside `core/` would only repeat it under a different component name.
+`error_message` on failure land in `audit.log` regardless of which function ran or why it failed.
+`core/notes.js` does **not** duplicate that via `getContextLogger()`: a hash mismatch, an ambiguous
+`old_txt` match (zero or multiple), and a size-drop-guard trip all just throw a specific, descriptive
+error (per CLAUDE.md's "fail loudly") — the thrown message *is* what ends up as `audit.log`'s
+`error_message`, so a second `warn` line from inside `core/` would only repeat it under a different
+component name.
 
-One exception, matching `S002`'s "silent-by-design but worth a low-noise trail" pattern: when a caller
-passes an `id` key in `metadata` and it's silently dropped/overwritten with the computed value (see
-"The `id` frontmatter field" above), `core/notes.js` calls `getContextLogger().debug('overwrote
-caller-supplied id', { note_title, supplied_id, computed_id })`. This is information `audit.log`
-wouldn't otherwise carry (it records the mutation's outcome, not what happened to an individual
-input field), and unlike a hash-mismatch or guard trip it isn't an error — there's genuinely nothing
-else to log it as. The same pattern applies to a caller-supplied `created` key on creation (see "The
-`created` frontmatter field" above): `getContextLogger().debug('overwrote caller-supplied created',
-{ note_title, supplied_created })` — no `computed_created` field, since unlike `id` the computed value
-is just "now" at the moment of the call, not a derived value worth echoing back.
+Three exceptions, each matching `S002`'s "silent-by-design but worth a low-noise trail" pattern:
+information `audit.log` wouldn't otherwise carry, since it records the mutation's outcome, not what
+happened to an individual input field or an internal side effect.
 
-A second exception, new here: when `note_rename`'s link cascade skips a candidate because reading or
-writing it failed, `core/notes.js` calls `getContextLogger().warn('link cascade: failed to update
-candidate', { note_title: new_title, candidate_title, error_message })`. If candidate discovery itself
-fails (see "Failure handling is best-effort" above), it logs `getContextLogger().warn('link cascade:
-candidate discovery failed', { note_title: new_title, error_message })` once instead, and skips the
-rest of the cascade. Both are `warn`, not `debug`, unlike the `id`-overwrite case above — either case
-means a note is left with a stale link the caller has no other way of finding out about (the overall
-`note_rename` call still succeeds and returns normally), which is worth a durable trail even though it
-isn't itself a thrown error.
-
-A third exception, new here (S015): when the link cascade rewrites a candidate that matches a
-`.mnotesreadonly` pattern — the carve-out described in "Concurrency model" above — `core/notes.js`
-calls `getContextLogger().debug('link cascade: rewrote read-only candidate', { note_title: new_title,
-candidate_title })`. `debug`, not `warn`, since nothing failed here; this is purely a visibility trail
-for "why did a read-only file's content change," matching the `id`/`created`-overwrite lines' tier
-rather than the failure-tier lines directly above.
+1. **Caller-supplied `id`/`created` overwritten** (see above): `debug('overwrote caller-supplied id',
+   { note_title, supplied_id, computed_id })`, or `debug('overwrote caller-supplied created',
+   { note_title, supplied_created })` — no `computed_created` field, since unlike `id` the computed
+   value is just "now" at the moment of the call, not a derived value worth echoing back. Neither is
+   an error, so `debug` is the only fitting level.
+2. **`note_rename`'s link cascade skips a candidate**: `warn('link cascade: failed to update
+   candidate', { note_title: new_title, candidate_title, error_message })` when reading/writing one
+   candidate fails; `warn('link cascade: candidate discovery failed', { note_title: new_title,
+   error_message })` once instead, skipping the rest of the cascade, if discovery itself fails (see
+   "Failure handling is best-effort" above). Both are `warn`, not `debug`: the overall `note_rename`
+   call still succeeds and returns normally, but a note is left with a stale link the caller has no
+   other way of finding out about — worth a durable trail even though it isn't itself a thrown error.
+3. **Link cascade rewrites a read-only candidate** (S015, the carve-out in "Concurrency model" above):
+   `debug('link cascade: rewrote read-only candidate', { note_title: new_title, candidate_title })`.
+   `debug`, not `warn` — nothing failed here; this is purely a visibility trail for "why did a
+   read-only file's content change," matching the `id`/`created`-overwrite tier rather than the
+   failure-tier lines above.
 
 ## Explicitly out of scope here
 

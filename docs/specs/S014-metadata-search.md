@@ -53,11 +53,11 @@ that path is a one-line, additive change (verified: brings a scalar equality che
 **Note (S003):** `note_write`/`note_edit` now reject any *new* nested-object frontmatter (bare or
 inside an array, including the `depends_on: [{project: ..., source: ...}]` shape used as the running
 example above) — Obsidian/`obsidian.nvim` can't round-trip that shape through its on-save
-reformatting. That's a write-time guard in `core/notes.js`, not a change here: this query engine and
-its `json_tree`/`json_each` approach still fully apply to whatever nested structures already exist in
-a vault (pre-dating the rule, or written by something other than `mnotes`), so the array-of-objects
-examples below remain accurate reads of legacy or externally-authored data — just not something
-`mnotes` itself will write going forward.
+reformatting. That's a write-time guard in `core/notes.js`, not a change here: this query engine's
+`json_tree`/`json_each` approach still fully applies to whatever nested structures already exist in a
+vault (pre-dating the rule, or written by something other than `mnotes`), so the array-of-objects
+examples above remain accurate reads of legacy or externally-authored data — just not something
+`mnotes` itself writes going forward.
 
 ### What's excluded: `tags`
 
@@ -166,10 +166,10 @@ container/leaf resolves non-null for at least one element). There is no `ne` —
 
 Every condition carries an optional `negate<bool>` (default `false`), implemented by wrapping that
 condition's *entire* `EXISTS(...)` in `NOT EXISTS(...)` — not by flipping the comparison operator.
-This distinction is load-bearing for multi-valued keys, not stylistic: verified concretely that a note
-depending on both `foo/bar` and `biz/buz` is (wrongly) matched by a naive per-element `!=
-'foo/bar'` check, because it has *some* element that isn't `foo/bar` — even though it also depends on
-`foo/bar`, which is exactly what negating "depends on foo/bar" should exclude. `NOT EXISTS` around the
+This distinction is load-bearing for multi-valued keys, not stylistic: verified that a note depending
+on both `foo/bar` and `biz/buz` is (wrongly) matched by a naive per-element `!= 'foo/bar'` check,
+because it has *some* element that isn't `foo/bar` — even though it also depends on `foo/bar`, which is
+exactly what negating "depends on foo/bar" should exclude. `NOT EXISTS` around the
 whole per-key check — "no element satisfies this" — is the only version that's correct in both the
 scalar and array-valued case, so it's the only negation mechanism this spec defines. (This is also why
 `exists` needs no separate `value: true|false` — `negate` already expresses "missing.")
@@ -229,16 +229,16 @@ Discovery: walks every note's `metadata_json` via `json_tree`, normalizes each `
 names) down to the same dot-path shape `metadata_query` addresses, and groups by that normalized key.
 `type` is inferred from one sampled non-null value's actual JSON type: a JSON number → `number`; a JSON
 string matching the ISO-date pattern → `date`; any other string → `string`; boolean → `boolean`. This
-is a sampled hint, not an enforced schema — frontmatter has no enforced schema across notes today
-either, so nothing changes there. `tags` never appears as a row here — `tag_list` (S004) remains the
-single discovery surface for the tag vocabulary; `metadata_query`'s tool description documents `tags`
-as an always-available special-cased key.
+is a sampled hint, not an enforced schema — matching frontmatter's own lack of one across notes.
+`tags` never appears as a row here — `tag_list` (S004) remains the single discovery surface for the tag
+vocabulary; `metadata_query`'s tool description documents `tags` as an always-available special-cased
+key.
 
 Sampling prefers a value that doesn't start with a digit over one that does (a large opaque integer —
 e.g. an obsidian.nvim `id` like `20240708102843484` — reads misleadingly like a date to an agent
 skimming this output otherwise): among a key's sampled values, the first non-numeric-leading one wins;
-if every value for that key is numeric-leading, the first non-null value sampled is used instead, same
-as before this preference existed.
+if every value is numeric-leading, the first non-null value sampled is used (the pre-existing
+fallback).
 
 ### `metadata_query`
 
@@ -284,13 +284,13 @@ rationale as `S002`/`S004`: normal, high-frequency, no diagnostic value beyond t
 
 - **Nested/mixed boolean expression trees** (`(A OR B) AND C`) — `match` is a single flat toggle over
   one filters array; genuine nested logic requires multiple calls merged by the caller.
-- **Per-key expression indexes** — additive future work if a specific key turns out to need it; not
-  built speculatively given the benchmarked full-scan cost at this project's scale.
+- **Per-key expression indexes** — see "Storage" above: additive if a key ever gets hot enough to
+  need it, not built speculatively given the benchmarked full-scan cost at this project's scale.
 - **Combining `metadata_query` filters directly into `search`'s ranked modes** (S002) — a plausible
   future extension ("notes about X where status=active"), not this spec.
 - **Compound same-entry matching** (`depends_on.project=X AND depends_on.source=Y`, same array entry)
-  — the storage model supports it (see "Storage" above) but `metadata_query`'s query language doesn't
-  expose it yet; no stated need for it today.
+  — see "Storage" above: the storage model supports it, but `metadata_query`'s query language doesn't
+  expose it yet, and there's no stated need for it today.
 - **Keys nested more than one level deep** — unaddressable by `metadata_query`, still fully visible via
   `note_read`'s raw `metadata` output.
 - **The CLI `--filter` string grammar's exact tokenizer** — S006, this spec only defines the semantic

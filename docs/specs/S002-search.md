@@ -8,23 +8,21 @@ Consumed by: `S006-cli`, `S007-mcp-server`
 
 ## Purpose
 
-Defines how `core/search.js` answers `fulltext`, `semantic`, and `hybrid` queries over the tables
-defined in S001, and how results collapse and merge into the note-level output shape the README
-commits to. `hybrid` mode is rank-only (no raw RRF score — it's a fused signal, not independently
-meaningful); `fulltext` and `semantic` mode also surface their native single-signal score (raw BM25 /
+Defines how `core/search.js` answers `fulltext`, `semantic`, and `hybrid` queries over the S001
+tables, and how results collapse and merge into the note-level output shape the README commits to.
+`hybrid` mode reports rank only, never a raw RRF score (it's a fused signal, not independently
+meaningful); `fulltext` and `semantic` mode also surface their native single-signal score (BM25 /
 cosine distance) alongside rank, since that number is meaningful on its own in those modes.
 
 ## Input
 
-`query<string>`, `?mode<fulltext|semantic|hybrid>=hybrid`, `?limit<int>=20>` (max `100`),
-`?vaultRoot<string>` (S015 — see "Output" below; `db`-only callers get no `readonly` field, same
+`query<string>`, `?mode<fulltext|semantic|hybrid>=hybrid`, `?limit<int>=20` (max `100`),
+`?vaultRoot<string>` (S015 — see "Output" below; `db`-only callers get no `readonly` field, the same
 additive-only posture S010's optional-`db` title-resolution parameters already established).
 
-This adds `limit` to what's currently documented in the README's `search` tool section — flagged as
-a deviation to reconcile there.
-
-The default (`20`) and max (`100`) are `config.toml` values, not hardcoded constants — flagged for
-S009, same treatment as S005's tunables.
+`limit` isn't yet documented in the README's `search` tool section — flagged as a deviation to
+reconcile there. The default (`20`) and max (`100`) are `config.toml` values, not hardcoded
+constants — flagged for S009, same treatment as S005's tunables.
 
 ## Modes
 
@@ -57,20 +55,19 @@ possibility in the default mode, not just an opt-in `fulltext` mode.
    (`embedQuery()`, not the document-side `embed()` chunks are indexed with — see S005's "Embedding
    pipeline lifecycle").
 2. Query `chunk_vectors` for the nearest `min(limit × 5, 500)` chunks by cosine distance, filtered to
-   `chunks.embedding_model` / `chunks.embedding_version` matching the currently configured model.
-   Chunks from a stale (not-yet-re-embedded) model version are silently excluded — comparing vectors
-   across different embedding models is meaningless, not a degraded result, so there's nothing to
-   surface to the caller here. Staleness is visible via `mnotes stats`, not search output.
+   `chunks.embedding_model` / `chunks.embedding_version` matching the currently configured model. The
+   `×5` over-fetch (capped at `500`) exists because multiple chunks from the same note can dominate
+   the raw top-N chunk hits (e.g. three chunks of one long note outranking single chunks from three
+   different notes) — fetching more chunks than the final note limit, then collapsing, keeps the
+   note-level result list from being starved by chunk clustering. Both the multiplier and the cap are
+   `config.toml` values — flagged for S009. Chunks from a stale (not-yet-re-embedded) model version
+   are silently excluded: comparing vectors across different embedding models is meaningless, not a
+   degraded result, so there's nothing to surface to the caller here. Staleness is visible via
+   `mnotes stats`, not search output.
 3. Collapse to one row per note: **best chunk wins** — keep each note's single lowest-distance chunk,
    discard the rest. A note's semantic rank is its best chunk's rank among the collapsed list. The
    winning chunk's `line_start`/`line_end` (S001) travel with it through the collapse and surface on
    the note's result row as `chunk_line_start`/`chunk_line_end` — see "Output" below.
-
-The `limit × 5` (capped at `500`) over-fetch exists because multiple chunks from the same note can
-dominate the raw top-N chunk hits (e.g. three chunks of one long note outranking single chunks from
-three different notes) — fetching more chunks than the final note limit, then collapsing, ensures the
-note-level result list isn't artificially starved by chunk clustering. The multiplier (`5`) and cap
-(`500`) are `config.toml` values — flagged for S009.
 
 ### Fulltext retrieval
 
@@ -91,29 +88,24 @@ list). A note present in only one list gets just that one term — there's no im
 penalty term for the list it's absent from, it simply doesn't contribute. Sort descending by
 `score(note)`, take top `limit`. `k` (`60`) is a `config.toml` value — flagged for S009.
 
-### Tie-breaking
+### Tie-breaking and single-mode ranking
 
 Equal RRF score (hybrid) or equal native rank (single-mode) breaks by `notes.mtime` descending — most
-recently modified note wins. Uses a column already in the S001 schema, no extra bookkeeping.
-
-### Single-mode ranking
-
+recently modified note wins, using a column already in the S001 schema (no extra bookkeeping).
 `fulltext`-only and `semantic`-only searches skip the RRF step entirely and sort directly by their
-native ranking (BM25 ascending / cosine distance ascending after chunk collapse), then apply the same
-`notes.mtime` descending tie-break.
+native ranking (BM25 ascending / cosine distance ascending after chunk collapse), then apply this
+same tie-break.
 
 ## Output
 
 `note_title`, `file_line_count`, and (in `hybrid` mode) `fulltext_rank` / `semantic_rank` — rank
-position only, never a raw RRF score. `file_line_count` and `note_title` are read from the `notes` row
-(`line_count` column, `path` → title derivation per S010); no additional query needed beyond what's
-already fetched during ranking.
+position only, never a raw RRF score (see Purpose). `file_line_count` and `note_title` are read from
+the `notes` row (`line_count` column, `path` → title derivation per S010); no additional query is
+needed beyond what's already fetched during ranking.
 
 **`bm25_score`** (`fulltext` mode) / **`cosine_distance`** (`semantic` mode): the note's native
-single-signal score, alongside rank — unlike RRF's fused score, a raw BM25 or cosine number is
-meaningful on its own when there's only one ranking signal in play, so single-mode output isn't
-rank-only the way `hybrid` mode's `fulltext_rank`/`semantic_rank` are. Neither field appears in
-`hybrid` mode; `hybrid`'s per-side rank fields carry no accompanying raw score.
+single-signal score, alongside rank. Present only in their respective single mode; absent in `hybrid`
+mode, whose per-side rank fields carry no accompanying raw score.
 
 **`chunk_line_start` / `chunk_line_end`** (added by this change): the winning chunk's `line_start`/
 `line_end` (S001), present on a result row whenever that note has a semantic side to its match —
