@@ -69,16 +69,23 @@ which nothing at runtime needs — `pnpm add --global` (step 10 below) links the
 same `node_modules`, so whatever's installed here is what the running app gets. If you're going to
 modify the code, run plain `pnpm install` (no `--prod`) instead so the test/lint tooling is available.
 
-You'll be prompted for two paths, each with a sensible default (press Enter to accept):
+You'll be prompted for four things — the vault's path, name, description, and index DB path — each
+with a sensible default (press Enter to accept):
 
 ```
 Vault path [~/Documents/Notes]:
-Index DB path [~/Library/Application Support/mnotes/index.db]:    # macOS
-Index DB path [~/.local/share/mnotes/index.db]:                    # Linux
+Vault name [notes]:
+Vault description (optional) []:
+Index DB path [~/Library/Application Support/mnotes/index-notes.db]:    # macOS
+Index DB path [~/.local/share/mnotes/index-notes.db]:                    # Linux
 ```
 
-Both prompts support `~`-relative paths, relative paths, arrow-key editing, and Tab-completion.
-Whatever you type is resolved to an absolute path before use.
+The path/name/description prompts support `~`-relative paths, relative paths, arrow-key editing, and
+Tab-completion. Whatever you type is resolved to an absolute path before use. The vault name defaults
+to a slugified form of the path (lowercase, non-alphanumeric runs collapsed to `-`) and must match
+`^[a-z0-9][a-z0-9_-]*$` — an invalid name re-prompts rather than silently mangling it. This installer
+only ever sets up one (the primary) vault; adding a second is a manual `config.toml` edit afterward —
+see [Configuration](configuration.md#vaults--vaultsname-and-default_vault).
 
 ## What the installer does
 
@@ -86,18 +93,20 @@ In order (macOS/Linux differences noted inline — see S009 for the exact per-OS
 
 1. **Preflight checks** — warns (doesn't block) if `rg` or `fswatch` are missing, with the platform-
    appropriate install hint from above.
-2. **Prompts** for vault path and DB path (above).
-3. **Writes `~/.config/mnotes/config.toml`** — but only if it doesn't already exist, and only if at
-   least one answer differs from its suggested default. If you accept both defaults, **no file is
-   written at all** — every value already has a built-in default in `src/config.js`, and the file only
-   ever contains genuinely-overridden keys. Identical on both OSes. See [Configuration](configuration.md)
-   for every tunable that can go in this file (or [config.example.toml](../config.example.toml) for the
+2. **Prompts** for the primary vault's path, name, description, and DB path (above).
+3. **Writes `~/.config/mnotes/config.toml`** — but only if it doesn't already exist. Unlike a single
+   flat override, this step always writes at least `default_vault = "<name>"` plus `[vaults.<name>]`'s
+   `path`, even if every prompt was accepted as-is — a vault needs somewhere to point, and
+   `default_vault` must always be set so a later, hand-added second vault doesn't trip `mnotes`'s
+   "multiple vaults, no default_vault" error. `description`/`db_path` are only written when they differ
+   from their suggested defaults. Identical on both OSes. See [Configuration](configuration.md) for
+   every tunable that can go in this file (or [config.example.toml](../config.example.toml) for the
    same schema as a copy-pasteable file). An existing `config.toml` (e.g. re-running install after an
    upgrade) is always left untouched.
 4. **Creates the app-support directory** — `~/Library/Application Support/mnotes/` on macOS,
-   `~/.local/share/mnotes/` on Linux (respects `$XDG_DATA_HOME` if set). Holds the SQLite index
-   (`index.db`, schema created by the daemon on first run, not by this script) and the daemon's Unix
-   socket (`daemon.sock`).
+   `~/.local/share/mnotes/` on Linux (respects `$XDG_DATA_HOME` if set). Holds every configured vault's
+   own SQLite index (`index-<name>.db`, schema created by the daemon on first run, not by this script)
+   and the daemon's Unix socket (`daemon.sock`).
 5. **Creates the logs directory** — `~/Library/Logs/com.ajmichels.mnotes/` on macOS,
    `~/.local/state/mnotes/log/` on Linux (respects `$XDG_STATE_HOME`) — see
    [Process Management](process-management.md#logs) for what lands here.

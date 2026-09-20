@@ -6,10 +6,11 @@ import { PDFDocument } from 'pdf-lib';
 import { openDb } from '../core/db.js';
 import { syncNoteTags } from '../core/tags.js';
 import { getAuditLogger, getLogger, getContextLogger } from '../logger.js';
+import { buildDefaultConfig } from '../config.js';
 import {
     callTool, searchTool, grepTool, tagListTool, tagNotesTool, metadataKeysTool, metadataQueryTool,
     noteReadTool, noteWriteTool, noteEditTool, noteAppendTool, noteRenameTool, attachmentReadTool,
-    attachmentWriteTool,
+    attachmentWriteTool, listVaultsTool,
 } from './tools.js';
 import { cleanupTempDir } from '../../vitest.helpers.js';
 
@@ -895,5 +896,141 @@ describe('attachmentWriteTool', () => {
 
         expect(result.isError).toBeUndefined();
         expect(readFileSync(join(vaultRoot, 'Attachments/logo.png'), 'utf8')).toBe('new bytes');
+    });
+});
+
+function makeTwoVaultConfig(rootA, dbPathA, rootB, dbPathB) {
+    return {
+        ...buildDefaultConfig(),
+        vaults: { alpha: { path: rootA, db_path: dbPathA }, beta: { path: rootB, db_path: dbPathB } },
+    };
+}
+
+describe('multi-vault: vault argument resolution (S007/S009)', () => {
+    it('a representative read tool (note_read) resolves `vault` via config to the right dbPath', async () => {
+        const rootA = makeTempVault({});
+        writeRawNote(rootA, 'InAlpha', 'alpha body');
+        const rootB = makeTempVault({});
+        writeRawNote(rootB, 'InBeta', 'beta body');
+        const config = makeTwoVaultConfig(rootA, makeTempDbPath(), rootB, makeTempDbPath());
+        openDb(config.vaults.alpha.db_path).db.close();
+        openDb(config.vaults.beta.db_path).db.close();
+
+        const result = await noteReadTool(
+            makeDeps({ config }), { note_title: 'InBeta', vault: 'beta', reason: 'testing vault resolution' },
+        );
+
+        expect(JSON.parse(result.content[0].text).content).toBe('beta body');
+    });
+
+    it('a representative write tool (note_write) resolves `vault` via config to the right vaultRoot', async () => {
+        const rootA = makeTempVault({});
+        const rootB = makeTempVault({});
+        const config = { ...buildDefaultConfig(), vaults: { alpha: { path: rootA }, beta: { path: rootB } } };
+
+        const result = await noteWriteTool(makeDeps({ config }), {
+            note_title: 'New', hash: null, content: 'body', vault: 'beta', reason: 'testing vault resolution',
+        });
+
+        expect(result.isError).toBeUndefined();
+        expect(readFileSync(join(rootB, 'New.md'), 'utf8')).toContain('body');
+    });
+
+    it('an unresolvable vault argument produces isError with the exact message, logged as outcome: error', async () => {
+        const config = { vaults: { alpha: { path: makeTempVault({}) } } };
+        const deps = makeDeps({ config });
+
+        const result = await noteReadTool(deps, { note_title: 'X', vault: 'bogus', reason: 'testing' });
+
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toMatch(/unknown vault "bogus"/);
+        const [ line ] = await waitForAuditLines(deps.logDir, 1);
+        expect(line).toContain('outcome=error');
+    });
+
+    it('list_vaults returns the configured vaults with no path leaked, read-only annotations implied', async () => {
+        const config = {
+            default_vault: 'alpha',
+            vaults: { alpha: { path: '/x/Alpha', description: 'Alpha vault' }, beta: { path: '/x/Beta' } },
+        };
+
+        const result = await listVaultsTool(makeDeps({ config }), { reason: 'testing list_vaults' });
+
+        expect(result.isError).toBeUndefined();
+        expect(result.content[0].text).toContain('alpha');
+        expect(result.content[0].text).toContain('Alpha vault');
+        expect(result.content[0].text).not.toContain('/x/Alpha');
+    });
+
+    it('search fans out across a 2-vault config, tagging rows with vault and logging two audit entries', async () => {
+        const rootA = makeTempVault({});
+        const rootB = makeTempVault({});
+        const dbPathA = makeTempDbPath();
+        const dbPathB = makeTempDbPath();
+        const { db: dbA } = openDb(dbPathA);
+        const idA = insertNote(dbA, { path: 'A.md' });
+        insertFtsRow(dbA, idA, 'A', 'shared word');
+        const { db: dbB } = openDb(dbPathB);
+        const idB = insertNote(dbB, { path: 'B.md' });
+        insertFtsRow(dbB, idB, 'B', 'shared word');
+        const config = makeTwoVaultConfig(rootA, dbPathA, rootB, dbPathB);
+        const deps = makeDeps({ config, embed: fakeEmbed, embeddingModel: 'm', embeddingVersion: 'v1' });
+
+        const result = await searchTool(deps, { query: 'shared', mode: 'fulltext', reason: 'testing fan-out' });
+
+        expect(result.isError).toBeUndefined();
+        expect(result.content[0].text).toContain('vault');
+        expect(result.content[0].text).toMatch(/alpha/);
+        expect(result.content[0].text).toMatch(/beta/);
+        const lines = await waitForAuditLines(deps.logDir, 2);
+        expect(lines.filter((l) => l.includes('outcome=success')).length).toBe(2);
+        expect(lines.some((l) => l.includes('vault="alpha"'))).toBe(true);
+        expect(lines.some((l) => l.includes('vault="beta"'))).toBe(true);
+    });
+
+    it('the same fan-out call against a 1-vault config carries no vault key and logs exactly one entry', async () => {
+        const rootA = makeTempVault({});
+        const dbPathA = makeTempDbPath();
+        const { db: dbA } = openDb(dbPathA);
+        const idA = insertNote(dbA, { path: 'A.md' });
+        insertFtsRow(dbA, idA, 'A', 'shared word');
+        const config = { ...buildDefaultConfig(), vaults: { alpha: { path: rootA, db_path: dbPathA } } };
+        const deps = makeDeps({ config, embed: fakeEmbed, embeddingModel: 'm', embeddingVersion: 'v1' });
+
+        const result = await searchTool(deps, { query: 'shared', mode: 'fulltext', reason: 'testing single-vault' });
+
+        expect(result.content[0].text).not.toContain('vault');
+        const lines = await waitForAuditLines(deps.logDir, 1);
+        expect(lines).toHaveLength(1);
+        expect(lines[0]).toContain('outcome=success');
+    });
+
+    it('a fan-out call aborts immediately on a per-vault core/ error: one audit entry, no partial rows', async () => {
+        const rootA = makeTempVault({});
+        writeRawNote(rootA, 'A', 'apple pie');
+        const rootB = makeTempVault({});
+        const dbPathA = makeTempDbPath();
+        const dbPathB = makeTempDbPath();
+        openDb(dbPathA).db.close();
+        openDb(dbPathB).db.close();
+        const config = makeTwoVaultConfig(rootA, dbPathA, rootB, dbPathB);
+        const deps = makeDeps({ config });
+
+        // grep against a pattern core/grep.js treats as invalid regex — the second vault (beta)
+        // never even gets a chance to run since vaults are processed in name-sorted order (alpha
+        // first) and this throws on the very first one.
+        const result = await grepTool(deps, { pattern: '[', regex: true, reason: 'testing abort-on-error' });
+
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).not.toBe('');
+        // The ripgrep error message itself spans multiple lines, so this counts audit *entries*
+        // (each starting a fresh timestamp) rather than raw newline-split lines.
+        await waitForAuditLines(deps.logDir, 1);
+        const raw = readFileSync(join(deps.logDir, 'audit.log'), 'utf8');
+        const entryStarts = raw.match(/^\d{4}-\d{2}-\d{2}T/gm);
+        expect(entryStarts).toHaveLength(1);
+        expect(raw).toContain('[audit] grep');
+        expect(raw).toContain('outcome=error');
+        expect(raw).toContain('vault="alpha"');
     });
 });

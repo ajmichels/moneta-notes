@@ -100,7 +100,7 @@ function makeTempDbPath() {
 }
 
 describe('createServer', () => {
-    it('registers all 13 tools, listable over a real (in-memory) MCP connection', async () => {
+    it('registers all 14 tools, listable over a real (in-memory) MCP connection', async () => {
         const dbPath = makeTempDbPath();
         openDb(dbPath).db.close();
 
@@ -108,7 +108,7 @@ describe('createServer', () => {
         const { tools } = await client.listTools();
 
         expect(tools.map((t) => t.name).sort()).toEqual([
-            'attachment_read', 'attachment_write', 'grep', 'metadata_keys', 'metadata_query',
+            'attachment_read', 'attachment_write', 'grep', 'list_vaults', 'metadata_keys', 'metadata_query',
             'note_append', 'note_edit', 'note_read', 'note_rename', 'note_write', 'search',
             'tag_list', 'tag_notes',
         ]);

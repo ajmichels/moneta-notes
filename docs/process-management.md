@@ -7,7 +7,7 @@ Two long-running background processes are installed per-user (no admin/sudo need
 
 | macOS LaunchAgent label | Linux systemd unit(s) | Runs | Purpose |
 |---|---|---|---|
-| `com.ajmichels.mnotes` | `mnotes.service` | `src/indexer/daemon.js` | Watches the vault (`fswatch`), keeps the SQLite FTS5 + vector index in sync, serves the IPC socket (reindex requests, and query embedding for `search --mode=semantic\|hybrid` from both the CLI and the MCP server). |
+| `com.ajmichels.mnotes` | `mnotes.service` | `src/indexer/daemon.js` | Watches **every configured vault** (`fswatch`, one watcher/queue/SQLite index per vault — see [S009](specs/S009-config-and-install.md)), serves the IPC socket (per-vault reindex requests, and query embedding for `search --mode=semantic\|hybrid` from both the CLI and the MCP server). Still one process/service regardless of vault count. |
 | `com.ajmichels.mnotes.logrotate` | `mnotes-logrotate.service` + `mnotes-logrotate.timer` | `src/log-rotator.js` | Rotates the three log files on a schedule (login/boot + four times daily). |
 
 Both keep the daemon running if it dies (`KeepAlive: true` on macOS, `Restart=always` + `RestartSec=5`
@@ -69,9 +69,9 @@ raw stdout/stderr, redirected there by `launchd`/`systemd` rather than written b
 
 | File | Contents |
 |---|---|
-| `indexer.log` | Daemon lifecycle (started, schema check, `fswatch` watcher started, graceful shutdown on SIGTERM/SIGINT), queue drain activity, embedding model load/idle-unload, hash mismatches, permanent queue-item failures. |
+| `indexer.log` | Daemon lifecycle (started, schema check, `fswatch` watcher started, graceful shutdown on SIGTERM/SIGINT), queue drain activity, embedding model load/idle-unload, hash mismatches, permanent queue-item failures. One process serves every configured vault, so most per-vault lines (watermark catch-up, existence/ignored-paths checks, reindex activity) carry a `vault=<name>` context field — model load/unload lines don't, since the embedding pipeline is a single shared, process-wide singleton (S005/S009). |
 | `mcp-server.log` | MCP server lifecycle (started, stdio transport connected/disconnected), protocol-level errors. Tool-call outcomes are **not** here. |
-| `audit.log` | Every note/attachment mutation — MCP tool calls (`note_write`/`note_edit`/`note_append`/`note_rename`/`attachment_write`) and CLI mutating commands (`write`/`edit`/`append`/`rename`/`attachment write`) — with outcome and, for MCP calls, the caller's stated `reason`. |
+| `audit.log` | Every note/attachment mutation — MCP tool calls (`note_write`/`note_edit`/`note_append`/`note_rename`/`attachment_write`) and CLI mutating commands (`write`/`edit`/`append`/`rename`/`attachment write`) — with outcome, a `vault=<name>` field naming which vault the call targeted (blank for `list_vaults`, which has no single vault to name), and, for MCP calls, the caller's stated `reason`. |
 | `daemon.stdout.log` / `daemon.stderr.log` | The indexing daemon process's own stdout/stderr — whatever Node prints outside of `logger.js` (an experimental-feature warning, an uncaught exception's stack trace). Normally empty; check `daemon.stderr.log` first if the daemon won't start at all, before it's even reached the point of writing to `indexer.log`. |
 | `logrotate.stdout.log` / `logrotate.stderr.log` | Same idea, for the log-rotation service's own process. |
 

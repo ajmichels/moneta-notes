@@ -9,12 +9,12 @@ import { SCHEMA_VERSION } from '../core/db.js';
 import { getAuditLogger, getLogger, defaultLogDir } from '../logger.js';
 import { embedQueryOverSocket } from '../indexer/embed.js';
 import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_VERSION, defaultSocketPath } from '../indexer/daemon.js';
-import { loadConfig } from '../config.js';
+import { loadConfig, listVaults, resolveVault } from '../config.js';
 import { registerPrompts } from './prompts.js';
 import {
     searchTool, grepTool, tagListTool, tagNotesTool, metadataKeysTool, metadataQueryTool,
     noteReadTool, noteWriteTool, noteEditTool, noteAppendTool, noteRenameTool, attachmentReadTool,
-    attachmentWriteTool,
+    attachmentWriteTool, listVaultsTool,
 } from './tools.js';
 
 function readStoredSchemaVersion(dbPath) {
@@ -83,6 +83,7 @@ const TOOL_DEFS = [
             query: z.string(),
             mode: z.enum([ 'fulltext', 'semantic', 'hybrid' ]).optional(),
             limit: z.number().int().min(1).max(100).optional(),
+            vault: z.string().optional(),
             reason: z.string(),
         },
         annotations: {
@@ -102,6 +103,7 @@ const TOOL_DEFS = [
             pattern: z.string(),
             regex: z.boolean().optional(),
             note_title: z.string().optional(),
+            vault: z.string().optional(),
             reason: z.string(),
         },
         annotations: {
@@ -114,7 +116,7 @@ const TOOL_DEFS = [
     {
         name: 'tag_list',
         description: 'List every tag currently in use, with an exact-match note count per tag.',
-        inputSchema: { reason: z.string() },
+        inputSchema: { vault: z.string().optional(), reason: z.string() },
         annotations: {
             readOnlyHint: true,
             destructiveHint: false,
@@ -126,7 +128,7 @@ const TOOL_DEFS = [
         name: 'tag_notes',
         description: 'List notes carrying a tag, including nested child tags (parent-includes-child).'
             + READONLY_READ_NOTE,
-        inputSchema: { tag: z.string(), reason: z.string() },
+        inputSchema: { tag: z.string(), vault: z.string().optional(), reason: z.string() },
         annotations: {
             readOnlyHint: true,
             destructiveHint: false,
@@ -141,7 +143,7 @@ const TOOL_DEFS = [
             + 'tag_list to discover the tag vocabulary instead. One row per distinct field: key, an '
             + 'inferred type (string/number/boolean/date, sampled from one non-null value — a hint, '
             + 'not an enforced schema), an example value, and the count of notes carrying that field.',
-        inputSchema: { reason: z.string() },
+        inputSchema: { vault: z.string().optional(), reason: z.string() },
         annotations: {
             readOnlyHint: true,
             destructiveHint: false,
@@ -179,6 +181,7 @@ const TOOL_DEFS = [
                 negate: z.boolean().optional(),
             })).min(1),
             match: z.enum([ 'all', 'any' ]).optional(),
+            vault: z.string().optional(),
             reason: z.string(),
         },
         annotations: {
@@ -200,6 +203,7 @@ const TOOL_DEFS = [
             note_title: z.string(),
             start_line: z.number().int().optional(),
             end_line: z.number().int().optional(),
+            vault: z.string().optional(),
             reason: z.string(),
         },
         annotations: {
@@ -222,6 +226,7 @@ const TOOL_DEFS = [
             metadata: z.record(z.string(), z.any()).nullable().optional(),
             content: z.string(),
             force: z.boolean().optional(),
+            vault: z.string().optional(),
             reason: z.string(),
         },
         annotations: {
@@ -243,6 +248,7 @@ const TOOL_DEFS = [
             old_txt: z.string(),
             new_txt: z.string(),
             metadata: z.record(z.string(), z.any()).nullable().optional(),
+            vault: z.string().optional(),
             reason: z.string(),
         },
         annotations: {
@@ -261,6 +267,7 @@ const TOOL_DEFS = [
             note_title: z.string(),
             hash: z.string(),
             content: z.string(),
+            vault: z.string().optional(),
             reason: z.string(),
         },
         annotations: {
@@ -282,6 +289,7 @@ const TOOL_DEFS = [
             old_title: z.string(),
             new_title: z.string(),
             hash: z.string(),
+            vault: z.string().optional(),
             reason: z.string(),
         },
         annotations: {
@@ -315,6 +323,7 @@ const TOOL_DEFS = [
             include_content: z.boolean().optional(),
             start_page: z.number().int().positive().optional(),
             end_page: z.number().int().positive().optional(),
+            vault: z.string().optional(),
             reason: z.string(),
         },
         _meta: { 'anthropic/maxResultSizeChars': 500_000 },
@@ -335,6 +344,7 @@ const TOOL_DEFS = [
         inputSchema: {
             attachment_path: z.string(),
             content_base64: z.string(),
+            vault: z.string().optional(),
             reason: z.string(),
         },
         annotations: {
@@ -343,6 +353,19 @@ const TOOL_DEFS = [
             idempotentHint: true,
         },
         handler: attachmentWriteTool,
+    },
+    {
+        name: 'list_vaults',
+        description: 'List every configured vault by name and description, and which one (if any) is '
+            + 'the default. Carry a vault\'s name into any other tool\'s vault argument. Never includes '
+            + 'the on-disk path.',
+        inputSchema: { reason: z.string() },
+        annotations: {
+            readOnlyHint: true,
+            destructiveHint: false,
+            idempotentHint: true,
+        },
+        handler: listVaultsTool,
     },
 ];
 
@@ -376,27 +399,21 @@ export function createServer(deps) {
     return server;
 }
 
-function resolveVaultRoot(config = loadConfig()) {
-    return config.vault_path;
-}
-
-function resolveDbPath(config = loadConfig()) {
-    return config.db_path;
-}
-
 export async function main() {
     const config = loadConfig();
-    const vaultRoot = resolveVaultRoot(config);
-    const dbPath = resolveDbPath(config);
     const mcpLogger = getLogger('mcp-server', defaultLogDir());
 
-    assertSchemaCurrent(dbPath);
+    // Every configured vault's own index must be current, not just the default's — a stale schema
+    // in a non-default vault would otherwise only surface the first time some tool call actually
+    // resolves to it, long after server startup (S009).
+    for (const { name } of listVaults(config)) {
+        assertSchemaCurrent(resolveVault(config, name).dbPath);
+    }
+
     const auditLogger = getAuditLogger(defaultLogDir());
     const socketPath = defaultSocketPath();
 
     const server = createServer({
-        dbPath,
-        vaultRoot,
         config,
         // The daemon is the only process that ever loads the embedding model (S005) — this asks it
         // over IPC rather than loading a second copy in this MCP server process.

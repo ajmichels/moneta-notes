@@ -12,6 +12,13 @@ subcommand at all) lists every subcommand with a one-line description; `mnotes v
 its own genuinely distinct flag set, so a single flat usage line (the convention every other command
 uses) wasn't enough.
 
+Every subcommand also accepts `--vault=<name>` — parsed once, before dispatch, rather than listed
+separately per subcommand below (same concept as every other command's `--vault`, see
+[Usage](usage.md#multi-vault---vault)): required when 2+ vaults are configured and `default_vault`
+isn't set. No fan-out — `vectors` is always a single-vault embedding-space analysis, and comparing
+embeddings across two different vaults' corpora wouldn't be meaningful (potentially different
+embedding models/dtypes, unrelated vector spaces).
+
 ### `mnotes vectors compare <a> <b>`
 
 ```sh

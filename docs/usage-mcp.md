@@ -8,7 +8,8 @@ Once registered (`claude mcp add mnotes ...` — done automatically by
 Claude in any session:
 
 `search`, `grep`, `tag_list`, `tag_notes`, `metadata_keys`, `metadata_query`, `note_read`,
-`note_write`, `note_edit`, `note_append`, `note_rename`, `attachment_read`, `attachment_write`
+`note_write`, `note_edit`, `note_append`, `note_rename`, `attachment_read`, `attachment_write`,
+`list_vaults`
 
 These map directly onto the CLI commands above (`note_read` ↔ `mnotes read`, etc.) and share the same
 `core/` logic — same hashing rules, same size-drop guard, same "no raw scores" output, and the same
@@ -55,7 +56,23 @@ instead of the whole file — useful once a PDF is too large for a whole-file re
 error's own guidance. `attachment_write` is always create-or-overwrite with no hash guard, since binary
 attachments have no diffable text content for that guard to protect.
 
-Two differences from the CLI:
+## Multi-vault (`vault` argument)
+
+Every tool above except `list_vaults` accepts an optional `vault<string>` argument — the same concept
+as the CLI's `--vault` (see [Usage](usage.md#multi-vault---vault)), naming one of the vaults configured
+under `[vaults.<name>]`. Omitted, it resolves via `default_vault` if set, or the sole configured vault
+if there's only one. `search`, `grep`, `tag_notes`, and `metadata_query` are the exception: omitted with
+2+ vaults configured, they fan out across every vault instead of erroring, tagging each row with a
+`vault` field (present only in that fanned-out shape) and grouping output by vault, same as the CLI.
+Every other tool has no such fallback — with 2+ vaults configured and no `default_vault`, it's an
+`isError: true` result naming the configured vaults.
+
+Call `list_vaults` (takes only `reason`) to discover what's configured — `name`/`description`/whether
+each is the default, never the on-disk path. Carry a vault's `name` into any other tool's `vault`
+argument directly, including a `vault` value read off a fanned-out `search`/`grep`/`tag_notes`/
+`metadata_query` row when following up with `note_read` or another tool on that same result.
+
+Two other differences from the CLI:
 
 - Every tool requires a **`reason<string>`** argument, logged for audit purposes (mirroring
   `description` on Claude Code's native file tools) — the CLI has no equivalent since a human typing

@@ -19,10 +19,12 @@ export function assertFswatchAvailable(env = process.env) {
 // `watchedPath` is any directory, not necessarily the vault root — S005's per-symlink-directory
 // watchers pass the symlink's own path here too, one process per currently-known symlinked
 // directory (a single recursive watch on the vault root never sees changes inside one — see S005).
-export function spawnFswatch(watchedPath, onPath) {
+// `vaultName` (S009) is which configured vault this watcher belongs to — null for a caller (e.g. a
+// test) that doesn't care, never omitted by the daemon's own per-vault startup loop.
+export function spawnFswatch(watchedPath, onPath, vaultName = null) {
     assertFswatchAvailable();
     const child = spawn('fswatch', [ '-r', watchedPath ]);
-    getContextLogger().info('fswatch watcher started', { watched_path: watchedPath });
+    getContextLogger().info('fswatch watcher started', { vault: vaultName, watched_path: watchedPath });
     const rl = createInterface({ input: child.stdout });
     rl.on('line', (line) => {
         const path = line.trim();
@@ -36,7 +38,7 @@ export function spawnFswatch(watchedPath, onPath) {
 // Exit-triggered respawn with exponential backoff (S005), reusing backoffSchedule rather than a
 // second schedule of its own — same as the queue drainer's retries. `isStillValid` lets a
 // per-symlink watcher bow out quietly once its target's gone, deferring to live-removal teardown.
-function createRespawnScheduler({ watchedPath, backoffSchedule, isStillValid, scheduleFn, spawnChild }) {
+function createRespawnScheduler({ watchedPath, backoffSchedule, isStillValid, scheduleFn, spawnChild, vaultName }) {
     let attemptCount = 0;
     let timer = null;
 
@@ -46,13 +48,13 @@ function createRespawnScheduler({ watchedPath, backoffSchedule, isStillValid, sc
         }
         if (attemptCount > backoffSchedule.length) {
             getContextLogger().error('fswatch watcher permanently failed', {
-                watched_path: watchedPath, attempts: attemptCount,
+                vault: vaultName, watched_path: watchedPath, attempts: attemptCount,
             });
             return;
         }
         const delay = backoffSchedule[attemptCount - 1];
         getContextLogger().warn('fswatch watcher exited unexpectedly', {
-            watched_path: watchedPath, attempt: attemptCount, next_attempt_at: Date.now() + delay,
+            vault: vaultName, watched_path: watchedPath, attempt: attemptCount, next_attempt_at: Date.now() + delay,
         });
         timer = scheduleFn(() => {
             try {
@@ -87,13 +89,14 @@ export function createResilientWatcher(watchedPath, onRawPath, options = {}) {
         spawnFn = spawnFswatch,
         scheduleFn = setTimeout,
         cancelFn = clearTimeout,
+        vaultName = null,
     } = options;
 
     let stopped = false;
     let child = null;
 
     function spawnChild() {
-        child = spawnFn(watchedPath, onRawPath);
+        child = spawnFn(watchedPath, onRawPath, vaultName);
         child.on('exit', () => {
             if (!stopped) {
                 respawner.notifyExit();
@@ -101,7 +104,9 @@ export function createResilientWatcher(watchedPath, onRawPath, options = {}) {
         });
     }
 
-    const respawner = createRespawnScheduler({ watchedPath, backoffSchedule, isStillValid, scheduleFn, spawnChild });
+    const respawner = createRespawnScheduler({
+        watchedPath, backoffSchedule, isStillValid, scheduleFn, spawnChild, vaultName,
+    });
     spawnChild();
 
     return {

@@ -33,6 +33,7 @@ describe('parseAuditLine', () => {
             noteTitle: 'Weekly Notes/2026-W32',
             attachmentPath: null,
             source: 'mcp',
+            vault: null,
             query: null,
             reason: 'testing redaction',
             outcome: 'success',
@@ -74,6 +75,19 @@ describe('parseAuditLine', () => {
         expect(entry.errorMessage).toBe('hash mismatch');
     });
 
+    it('parses the vault field when present (S009)', () => {
+        const line = '2026-08-13T18:24:00.113Z INFO  [audit] write note_title="A.md" '
+            + 'source=cli vault="dnd" outcome=success';
+
+        expect(parseAuditLine(line).vault).toBe('dnd');
+    });
+
+    it('returns null for vault when absent (e.g. list_vaults)', () => {
+        const line = '2026-08-13T18:24:00.113Z INFO  [audit] list_vaults source=mcp reason="r" outcome=success';
+
+        expect(parseAuditLine(line).vault).toBeNull();
+    });
+
     it('returns null for a blank line', () => {
         expect(parseAuditLine('')).toBeNull();
     });
@@ -107,10 +121,12 @@ describe('filterEntries', () => {
         {
             timestamp: '2026-08-13T00:00:00.000Z', tool: 'note_write', noteTitle: 'A.md',
             attachmentPath: null, source: 'mcp', outcome: 'success', reason: 'r', errorMessage: null,
+            vault: 'dnd',
         },
         {
             timestamp: '2026-08-14T00:00:00.000Z', tool: 'write', noteTitle: 'B.md',
             attachmentPath: null, source: 'cli', outcome: 'error', reason: null, errorMessage: 'boom',
+            vault: null,
         },
     ];
 
@@ -136,6 +152,11 @@ describe('filterEntries', () => {
 
     it('returns everything when no filters are given', () => {
         expect(filterEntries(entries, {})).toEqual(entries);
+    });
+
+    it('filters by vault, and never matches an entry with no vault field (S009)', () => {
+        expect(filterEntries(entries, { vault: 'dnd' })).toEqual([ entries[0] ]);
+        expect(filterEntries(entries, { vault: 'notes' })).toEqual([]);
     });
 });
 
@@ -229,6 +250,32 @@ describe('runLogsCommand (non-follow)', () => {
         const result = await runLogsCommand([], { logDir });
         expect(result.exitCode).toBe(0);
     });
+
+    it('--vault filters to that vault\'s entries; omitted shows every vault unfiltered (S009)', async () => {
+        const logDir = makeTempLogDir();
+        const auditLogger = getAuditLogger(logDir);
+        await logAudit(auditLogger, { tool: 'write', noteTitle: 'A.md', source: 'cli', outcome: 'success', vault: 'dnd' });
+        await logAudit(auditLogger, { tool: 'write', noteTitle: 'B.md', source: 'cli', outcome: 'success', vault: 'notes' });
+
+        const filtered = await runLogsCommand([ '--vault=dnd' ], { logDir });
+        expect(filtered.stdout).toContain('A.md');
+        expect(filtered.stdout).not.toContain('B.md');
+
+        const unfiltered = await runLogsCommand([], { logDir });
+        expect(unfiltered.stdout).toContain('A.md');
+        expect(unfiltered.stdout).toContain('B.md');
+    });
+
+    it('an unrecognized --vault is not an error — it just matches zero rows', async () => {
+        const logDir = makeTempLogDir();
+        const auditLogger = getAuditLogger(logDir);
+        await logAudit(auditLogger, { tool: 'write', noteTitle: 'A.md', source: 'cli', outcome: 'success', vault: 'dnd' });
+
+        const result = await runLogsCommand([ '--vault=bogus' ], { logDir });
+
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout).not.toContain('A.md');
+    });
 });
 
 describe('runLogsCommand --file', () => {
@@ -250,6 +297,12 @@ describe('runLogsCommand --file', () => {
     it('names every offending flag when several are combined with a non-audit --file', async () => {
         await expect(runLogsCommand([ '--file=indexer', '--source=mcp', '--outcome=error' ], {}))
             .rejects.toThrow(/--source, --outcome/);
+    });
+
+    it('rejects --vault combined with a non-audit --file, same as the other audit-only flags', async () => {
+        const logDir = makeTempLogDir();
+        await expect(runLogsCommand([ '--file=indexer', '--vault=dnd' ], { logDir }))
+            .rejects.toThrow(/--vault.*only apply to --file=audit/);
     });
 
     it('prints indexer.log as raw lines, unaligned, with no parsing', async () => {

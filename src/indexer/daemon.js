@@ -11,7 +11,7 @@ import { extractLinkTargets, syncNoteLinks } from '../core/links.js';
 import { buildMetadataJson } from '../core/metadata.js';
 import { openDb, setMeta, enqueuePath } from '../core/db.js';
 import { getLogger, defaultLogDir, runWithLogger, getContextLogger } from '../logger.js';
-import { loadConfig } from '../config.js';
+import { loadConfig, listVaults, resolveVault } from '../config.js';
 import { appSupportDir } from '../platform/index.js';
 import {
     chunkText as realChunkText, loadTokenizer, tokenizeWithOffsets as realTokenizeWithOffsets,
@@ -126,12 +126,13 @@ export function recordFailure(db, path, now = Date.now(), backoffSchedule = DEFA
     return { permanentlyFailed: false, attempts };
 }
 
-function recordAndLogFailure(db, path, err, now, backoffSchedule) {
+function recordAndLogFailure(db, path, err, now, backoffSchedule, vaultName = null) {
     const { permanentlyFailed, attempts } = recordFailure(db, path, now, backoffSchedule);
     const noteTitle = stripMdExtension(path);
 
     if (permanentlyFailed) {
         getContextLogger().error('reindex permanently failed', {
+            vault: vaultName,
             note_title: noteTitle,
             attempts,
             error_message: err.message,
@@ -139,6 +140,7 @@ function recordAndLogFailure(db, path, err, now, backoffSchedule) {
     } else {
         const row = db.prepare('SELECT next_attempt_at FROM index_queue WHERE path = ?').get(path);
         getContextLogger().warn('reindex attempt failed', {
+            vault: vaultName,
             note_title: noteTitle,
             attempt: attempts,
             next_attempt_at: row.next_attempt_at,
@@ -155,7 +157,7 @@ async function processQueuedPath(vaultRoot, db, path, deps, now) {
         db.prepare('DELETE FROM index_queue WHERE path = ?').run(path);
         return result.status === 'reindexed' ? 'reindexed' : 'skipped';
     } catch (err) {
-        const { permanentlyFailed } = recordAndLogFailure(db, path, err, now, deps.backoffSchedule);
+        const { permanentlyFailed } = recordAndLogFailure(db, path, err, now, deps.backoffSchedule, deps.vaultName);
         return permanentlyFailed ? 'failed' : 'retry';
     }
 }
@@ -242,7 +244,7 @@ export async function processPath(vaultRoot, db, path, deps) {
     if (existing && existing.mtime === currentMtime
         && !hasStaleChunks(db, existing.id, embeddingModel, embeddingVersion)
         && !isExtractionStale(existing)) {
-        getContextLogger().debug('skipping unchanged path', { note_title: title });
+        getContextLogger().debug('skipping unchanged path', { vault: deps.vaultName ?? null, note_title: title });
         return { status: 'unchanged' };
     }
 
@@ -257,7 +259,7 @@ export async function processPath(vaultRoot, db, path, deps) {
         && !isExtractionStale(existing)) {
         db.prepare('UPDATE notes SET mtime = ?, updated_at = ? WHERE id = ?')
             .run(currentMtime, Math.floor(now / 1000), existing.id);
-        getContextLogger().debug('skipping unchanged path', { note_title: title });
+        getContextLogger().debug('skipping unchanged path', { vault: deps.vaultName ?? null, note_title: title });
         return { status: 'unchanged' };
     }
 
@@ -272,11 +274,13 @@ export async function processPath(vaultRoot, db, path, deps) {
     syncNoteTags(db, noteId, extractTags(read.content, read.metadata));
     syncNoteLinks(db, noteId, extractLinkTargets(read.content));
 
-    getContextLogger().info('reindexed note', { note_title: title, chunk_count: embeddedChunks.length });
+    getContextLogger().info('reindexed note', {
+        vault: deps.vaultName ?? null, note_title: title, chunk_count: embeddedChunks.length,
+    });
     return { status: 'reindexed' };
 }
 
-export function watermarkCatchup(db, vaultRoot, now = Date.now(), ignoreMatcher = ignore()) {
+export function watermarkCatchup(db, vaultRoot, now = Date.now(), ignoreMatcher = ignore(), vaultName = null) {
     const row = db.prepare('SELECT MAX(updated_at) AS watermark FROM notes').get();
     const watermark = row.watermark ?? 0;
 
@@ -288,11 +292,11 @@ export function watermarkCatchup(db, vaultRoot, now = Date.now(), ignoreMatcher 
             enqueuedCount += 1;
         }
     }
-    getContextLogger().info('watermark catch-up complete', { watermark, enqueued_count: enqueuedCount });
+    getContextLogger().info('watermark catch-up complete', { vault: vaultName, watermark, enqueued_count: enqueuedCount });
     return enqueuedCount;
 }
 
-export function existenceCheck(db, vaultRoot) {
+export function existenceCheck(db, vaultRoot, vaultName = null) {
     let deletedCount = 0;
     for (const row of db.prepare('SELECT path FROM notes').all()) {
         if (!existsSync(join(vaultRoot, row.path))) {
@@ -300,7 +304,7 @@ export function existenceCheck(db, vaultRoot) {
             deletedCount += 1;
         }
     }
-    getContextLogger().info('existence check complete', { deleted_count: deletedCount });
+    getContextLogger().info('existence check complete', { vault: vaultName, deleted_count: deletedCount });
     return deletedCount;
 }
 
@@ -310,7 +314,7 @@ export function existenceCheck(db, vaultRoot) {
 // runReindex, so both "restart the daemon" and "run `mnotes reindex`" self-heal without the
 // caller needing to reason about what was indexed before the pattern existed (CLAUDE.md's
 // idempotent-reindex rule).
-export function ignoredPathsCheck(db, ignoreMatcher) {
+export function ignoredPathsCheck(db, ignoreMatcher, vaultName = null) {
     let deletedCount = 0;
     for (const row of db.prepare('SELECT path FROM notes').all()) {
         if (ignoreMatcher.ignores(row.path)) {
@@ -318,7 +322,7 @@ export function ignoredPathsCheck(db, ignoreMatcher) {
             deletedCount += 1;
         }
     }
-    getContextLogger().info('ignored-paths check complete', { deleted_count: deletedCount });
+    getContextLogger().info('ignored-paths check complete', { vault: vaultName, deleted_count: deletedCount });
     return deletedCount;
 }
 
@@ -330,7 +334,9 @@ async function attemptPathUntilSettled(vaultRoot, db, path, deps, now, onMessage
         onMessage({ path, outcome });
         return outcome;
     } catch (err) {
-        const { permanentlyFailed, attempts } = recordAndLogFailure(db, path, err, now, deps.backoffSchedule);
+        const { permanentlyFailed, attempts } = recordAndLogFailure(
+            db, path, err, now, deps.backoffSchedule, deps.vaultName,
+        );
         onMessage({ path, outcome: 'attempt_failed', attempts, error: err.message });
         if (permanentlyFailed) {
             onMessage({ path, outcome: 'failed' });
@@ -347,13 +353,14 @@ export async function runReindex(vaultRoot, db, deps, options = {}, onMessage = 
     const now = deps.now ?? Date.now();
 
     getContextLogger().info('reindex requested', {
+        vault: deps.vaultName ?? null,
         scope: noteTitle !== null ? 'note' : 'vault',
         note_title: noteTitle,
     });
 
     const ignoreMatcher = deps.ignoreMatcher ?? ignore();
     if (noteTitle === null) {
-        ignoredPathsCheck(db, ignoreMatcher);
+        ignoredPathsCheck(db, ignoreMatcher, deps.vaultName ?? null);
     }
 
     const paths = noteTitle !== null
@@ -370,7 +377,7 @@ export async function runReindex(vaultRoot, db, deps, options = {}, onMessage = 
         counts[outcome] += 1;
     }
 
-    getContextLogger().info('reindex complete', counts);
+    getContextLogger().info('reindex complete', { vault: deps.vaultName ?? null, ...counts });
 
     if (noteTitle === null) {
         setMeta(db, 'last_full_reindex_at', String(now));
@@ -436,15 +443,25 @@ export function releaseLock(lockPath) {
     }
 }
 
-function handleIpcRequest(line, socket, ctx) {
-    const { vaultRoot, db, deps, gate } = ctx;
+// vaultsByName: { [name]: { vaultRoot, db, deps, gate } } — one entry per vault the daemon
+// started with (startDaemon below), shared by every connection this IPC server accepts.
+function handleIpcRequest(line, socket, vaultsByName) {
     const request = JSON.parse(line);
 
     if (request.action === 'embed') {
-        // Not run under `gate` — embedding a query touches no shared queue/DB state, so there's no
-        // correctness reason to make an interactive search wait behind an in-flight reindex/drain
-        // pass (unlike `reindex` below, which mutates the same rows processPath does).
-        deps.embedQuery(request.text)
+        // An unknown vault name is still validated when given, for consistency/future-proofing
+        // (S009) — but embedding a query uses the one shared embedding pipeline (S005), never a
+        // particular vault's own state, so a caller that omits it entirely is also fine.
+        if (request.vault !== undefined && !(request.vault in vaultsByName)) {
+            socket.end(`${JSON.stringify({ error: `unknown vault "${request.vault}"` })}\n`);
+            return;
+        }
+        // Not run under any vault's `gate` — embedding a query touches no shared queue/DB state,
+        // so there's no correctness reason to make an interactive search wait behind an in-flight
+        // reindex/drain pass (unlike `reindex` below, which mutates the same rows processPath
+        // does).
+        const { embedQuery } = Object.values(vaultsByName)[0].deps;
+        embedQuery(request.text)
             .then((vector) => socket.end(`${JSON.stringify({ vector: Array.from(vector) })}\n`))
             .catch((err) => socket.end(`${JSON.stringify({ error: err.message })}\n`));
         return;
@@ -454,15 +471,24 @@ function handleIpcRequest(line, socket, ctx) {
         socket.end(`${JSON.stringify({ error: `unknown action "${request.action}"` })}\n`);
         return;
     }
-    // Runs under the same gate as the periodic drain loop (see createSerialGate) — an IPC-triggered
-    // reindex and a background drain tick must never call processPath on the same path at once.
-    gate.schedule(() => runReindex(
-        vaultRoot, db, deps, { noteTitle: request.noteTitle ?? null },
+
+    const vault = vaultsByName[request.vault];
+    if (vault === undefined) {
+        const configured = Object.keys(vaultsByName).sort().join(', ');
+        socket.end(`${JSON.stringify({ error: `unknown vault "${request.vault}" (configured: ${configured})` })}\n`);
+        return;
+    }
+    // Runs under that vault's own gate, shared with its periodic drain loop (see createSerialGate)
+    // — an IPC-triggered reindex and a background drain tick for the *same* vault must never call
+    // processPath on the same path at once. A different vault's gate is untouched, so a reindex
+    // against one vault never waits behind another vault's in-flight work.
+    vault.gate.schedule(() => runReindex(
+        vault.vaultRoot, vault.db, { ...vault.deps, vaultName: request.vault }, { noteTitle: request.noteTitle ?? null },
         (msg) => socket.write(`${JSON.stringify(msg)}\n`),
     )).then(() => socket.end());
 }
 
-function handleIpcConnection(socket, ctx) {
+function handleIpcConnection(socket, vaultsByName) {
     let buffer = '';
     socket.on('data', (chunk) => {
         buffer += chunk.toString('utf8');
@@ -471,18 +497,17 @@ function handleIpcConnection(socket, ctx) {
             const line = buffer.slice(0, newlineIndex);
             buffer = buffer.slice(newlineIndex + 1);
             newlineIndex = buffer.indexOf('\n');
-            handleIpcRequest(line, socket, ctx);
+            handleIpcRequest(line, socket, vaultsByName);
         }
     });
 }
 
-export function createIpcServer(socketPath, vaultRoot, db, deps, gate = createSerialGate()) {
+export function createIpcServer(socketPath, vaultsByName) {
     if (existsSync(socketPath)) {
         rmSync(socketPath);
     }
 
-    const ctx = { vaultRoot, db, deps, gate };
-    const server = createServer((socket) => handleIpcConnection(socket, ctx));
+    const server = createServer((socket) => handleIpcConnection(socket, vaultsByName));
     server.listen(socketPath);
     return server;
 }
@@ -536,14 +561,20 @@ function startDrainLoop(vaultRoot, db, deps, drainIntervalMs, gate) {
             return;
         }
         gate.schedule(() => drainQueueOnce(vaultRoot, db, deps))
-            .catch((err) => getContextLogger().error('queue drain failed', { error_message: err.message }));
+            .catch((err) => getContextLogger().error('queue drain failed', {
+                vault: deps.vaultName ?? null, error_message: err.message,
+            }));
     }, drainIntervalMs);
 }
 
+// Starts one independent watcher/queue-drain/db stack per configured vault (S009) — every vault
+// entry runs today's single-vault startup sequence in isolation, so a failure or a slow initial
+// index in one vault never blocks another's. The embedding pipeline (embed/embedQuery/chunkText)
+// stays a single process-wide singleton, resolved once outside the loop and shared by every
+// vault's `deps` — there is one daemon process regardless of vault count (S005).
 export async function startDaemon(options = {}) {
     const {
-        vaultRoot,
-        dbPath,
+        vaults,
         socketPath = defaultSocketPath(),
         lockPath = defaultLockPath(),
         embeddingModel = DEFAULT_EMBEDDING_MODEL,
@@ -562,45 +593,58 @@ export async function startDaemon(options = {}) {
 
     getContextLogger().info('daemon started');
 
-    // openDb's own schema-check/rebuild logging ("schema created" / "schema version mismatch,
-    // rebuilding", S001) fires from inside this call and lands in the same runWithLogger context
-    // main() established — no second log line added here (S005 "Logging").
-    const { db, reindexRequired } = openDb(dbPath);
-
     const chunkText = await resolveChunkText(options.chunkText);
-    const ignoreMatcher = loadIgnoreMatcher(vaultRoot);
-    const deps = { chunkText, embed, embedQuery, embeddingModel, embeddingVersion, backoffSchedule, ignoreMatcher };
 
-    watermarkCatchup(db, vaultRoot, undefined, ignoreMatcher);
-    if (!reindexRequired) {
-        // A schema rebuild (reindexRequired) resets the watermark to 0, so watermarkCatchup alone
-        // already re-enqueues the entire vault — existenceCheck/ignoredPathsCheck would find
-        // nothing to delete against a freshly-rebuilt, currently-empty notes table, so both are
-        // skipped in that case.
-        existenceCheck(db, vaultRoot);
-        ignoredPathsCheck(db, ignoreMatcher);
+    const vaultsByName = {};
+    for (const { name, vaultRoot, dbPath } of vaults) {
+        // openDb's own schema-check/rebuild logging ("schema created" / "schema version mismatch,
+        // rebuilding", S001) fires from inside this call and lands in the same runWithLogger
+        // context main() established — no second log line added here (S005 "Logging").
+        const { db, reindexRequired } = openDb(dbPath);
+
+        const ignoreMatcher = loadIgnoreMatcher(vaultRoot);
+        const deps = {
+            chunkText, embed, embedQuery, embeddingModel, embeddingVersion, backoffSchedule,
+            ignoreMatcher, vaultName: name,
+        };
+
+        watermarkCatchup(db, vaultRoot, undefined, ignoreMatcher, name);
+        if (!reindexRequired) {
+            // A schema rebuild (reindexRequired) resets the watermark to 0, so watermarkCatchup
+            // alone already re-enqueues the entire vault — existenceCheck/ignoredPathsCheck would
+            // find nothing to delete against a freshly-rebuilt, currently-empty notes table, so
+            // both are skipped in that case.
+            existenceCheck(db, vaultRoot, name);
+            ignoredPathsCheck(db, ignoreMatcher, name);
+        }
+
+        const gate = createSerialGate();
+        const watcher = createWatcher(vaultRoot, db, { debounceMs, ignoreMatcher, backoffSchedule, vaultName: name });
+        const drainTimer = startDrainLoop(vaultRoot, db, deps, drainIntervalMs, gate);
+        if (drainTimer === null) {
+            await drainQueueOnce(vaultRoot, db, deps);
+        }
+
+        vaultsByName[name] = { vaultRoot, db, deps, watcher, gate, drainTimer };
     }
 
-    const gate = createSerialGate();
-    const watcher = createWatcher(vaultRoot, db, { debounceMs, ignoreMatcher, backoffSchedule });
-    const drainTimer = startDrainLoop(vaultRoot, db, deps, drainIntervalMs, gate);
-    if (drainTimer === null) {
-        await drainQueueOnce(vaultRoot, db, deps);
-    }
-
-    const ipcServer = createIpcServer(socketPath, vaultRoot, db, deps, gate);
+    const ipcServer = createIpcServer(socketPath, vaultsByName);
 
     async function stop() {
-        if (drainTimer !== null) {
-            clearInterval(drainTimer);
+        for (const vault of Object.values(vaultsByName)) {
+            if (vault.drainTimer !== null) {
+                clearInterval(vault.drainTimer);
+            }
+            vault.watcher.stop();
         }
-        watcher.stop();
         await new Promise((resolve) => ipcServer.close(resolve));
-        db.close();
+        for (const vault of Object.values(vaultsByName)) {
+            vault.db.close();
+        }
         releaseLock(lockPath);
     }
 
-    return { db, stop };
+    return { vaults: vaultsByName, stop };
 }
 
 // Wires SIGTERM/SIGINT to the daemon's own stop() so a normal `launchctl stop`/`kill <pid>` runs
@@ -642,9 +686,15 @@ export async function main() {
         dtype: config.index.embedding_dtype,
         idleTimeoutMs: config.index.model_idle_unload_minutes * 60 * 1000,
     });
+    // Every configured vault gets its own watcher/queue/db (S009), not just the default one — the
+    // daemon is the one process that watches the whole fleet regardless of which vault a given
+    // CLI/MCP call later targets.
+    const vaults = listVaults(config).map(({ name }) => {
+        const resolved = resolveVault(config, name);
+        return { name: resolved.name, vaultRoot: resolved.path, dbPath: resolved.dbPath };
+    });
     const daemon = await startDaemon({
-        vaultRoot: config.vault_path,
-        dbPath: config.db_path,
+        vaults,
         debounceMs: config.index.debounce_ms,
         backoffSchedule: config.index.retry_backoff_seconds.map((seconds) => seconds * 1000),
     });

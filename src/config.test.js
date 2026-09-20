@@ -3,7 +3,8 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-    buildDefaultConfig, defaultVaultPath, defaultDbPath, defaultConfigPath, loadConfig, resolveConfig,
+    buildDefaultConfig, defaultVaultPath, defaultDbPathForVault, defaultConfigPath, loadConfig, resolveConfig,
+    slugifyVaultName, assertValidVaultName, resolveVault, listVaults, resolveVaultsForQuery,
 } from './config.js';
 import { getLogger, runWithLogger } from './logger.js';
 import { appSupportDir } from './platform/index.js';
@@ -23,23 +24,52 @@ afterEach(async () => {
     }
 });
 
-describe('defaultVaultPath / defaultDbPath', () => {
+describe('defaultVaultPath / defaultDbPathForVault', () => {
     it('computes vault_path under the current user\'s home directory', () => {
         expect(defaultVaultPath()).toBe(join(homedir(), 'Documents', 'Notes'));
     });
 
-    it('computes db_path under the platform module\'s app-support directory (S009)', () => {
-        expect(defaultDbPath()).toBe(join(appSupportDir(), 'index.db'));
+    it('computes a per-vault db_path under the platform module\'s app-support directory (S009)', () => {
+        expect(defaultDbPathForVault('notes')).toBe(join(appSupportDir(), 'index-notes.db'));
+        expect(defaultDbPathForVault('dnd')).toBe(join(appSupportDir(), 'index-dnd.db'));
+    });
+});
+
+describe('slugifyVaultName', () => {
+    it('lowercases a simple basename', () => {
+        expect(slugifyVaultName(join(homedir(), 'Documents', 'Notes'))).toBe('notes');
+    });
+
+    it('collapses non-alphanumeric runs to a single dash and trims leading/trailing dashes', () => {
+        expect(slugifyVaultName(join(homedir(), 'Documents', 'D&D'))).toBe('d-d');
+        expect(slugifyVaultName('/a/b/-- weird name!! --')).toBe('weird-name');
+    });
+});
+
+describe('assertValidVaultName', () => {
+    it('accepts names matching ^[a-z0-9][a-z0-9_-]*$', () => {
+        expect(() => assertValidVaultName('notes')).not.toThrow();
+        expect(() => assertValidVaultName('d-d')).not.toThrow();
+        expect(() => assertValidVaultName('vault_2')).not.toThrow();
+        expect(() => assertValidVaultName('2vault')).not.toThrow();
+    });
+
+    it('throws naming the bad key for an invalid name', () => {
+        expect(() => assertValidVaultName('My Vault')).toThrow(/My Vault/);
+        expect(() => assertValidVaultName('abc def')).toThrow(/abc def/);
+        expect(() => assertValidVaultName('-abc')).toThrow(/-abc/);
+        expect(() => assertValidVaultName('')).toThrow();
     });
 });
 
 describe('buildDefaultConfig', () => {
-    it('returns the full schema with computed paths and every documented default value', () => {
+    it('returns the full schema with a single default vault and no default_vault key', () => {
         const config = buildDefaultConfig();
 
         expect(config).toEqual({
-            vault_path: defaultVaultPath(),
-            db_path: defaultDbPath(),
+            vaults: {
+                notes: { path: defaultVaultPath() },
+            },
             embedding_model: 'Qwen3-Embedding-0.6B',
             search: {
                 limit_default: 20,
@@ -74,17 +104,20 @@ describe('buildDefaultConfig', () => {
                 rotation_keep: 5,
             },
         });
+        expect(config.default_vault).toBeUndefined();
     });
 
     it('returns a fresh object each call — mutating one result never affects the next', () => {
         const first = buildDefaultConfig();
         first.search.limit_default = 999;
         first.index.retry_backoff_seconds.push(9999);
+        first.vaults.notes.path = '/mutated';
 
         const second = buildDefaultConfig();
 
         expect(second.search.limit_default).toBe(20);
         expect(second.index.retry_backoff_seconds).toEqual([ 30, 120, 600 ]);
+        expect(second.vaults.notes.path).toBe(defaultVaultPath());
     });
 });
 
@@ -127,16 +160,229 @@ describe('loadConfig: no file on disk', () => {
     });
 });
 
-describe('loadConfig: sparse top-level override', () => {
-    it('merges one overridden top-level key over the defaults, leaving the rest untouched', () => {
+describe('loadConfig: legacy flat vault_path/db_path', () => {
+    it('synthesizes a single [vaults.<slug>] entry, and that vault becomes the resolved default', () => {
         const configPath = makeTempConfigPath();
         writeFileSync(configPath, 'vault_path = "/custom/vault/path"\n', 'utf8');
 
         const config = loadConfig(configPath);
 
-        expect(config.vault_path).toBe('/custom/vault/path');
-        expect(config.db_path).toBe(buildDefaultConfig().db_path);
+        expect(config.vault_path).toBeUndefined();
+        expect(config.vaults).toEqual({ path: { path: '/custom/vault/path' } });
+
+        const resolved = resolveVault(config);
+        expect(resolved).toEqual({
+            name: 'path',
+            path: '/custom/vault/path',
+            dbPath: defaultDbPathForVault('path'),
+            description: null,
+        });
+    });
+
+    it('carries an explicit legacy db_path through onto the synthesized vault entry', () => {
+        const configPath = makeTempConfigPath();
+        writeFileSync(
+            configPath,
+            'vault_path = "/custom/vault/path"\ndb_path = "/custom/db.sqlite"\n',
+            'utf8',
+        );
+
+        const config = loadConfig(configPath);
+        const resolved = resolveVault(config);
+
+        expect(resolved.dbPath).toBe('/custom/db.sqlite');
+    });
+
+    it('leaves every other section at its default', () => {
+        const configPath = makeTempConfigPath();
+        writeFileSync(configPath, 'vault_path = "/custom/vault/path"\n', 'utf8');
+
+        const config = loadConfig(configPath);
+
         expect(config.embedding_model).toBe('Qwen3-Embedding-0.6B');
+        expect(config.search.limit_default).toBe(20);
+    });
+
+    it('throws when vault_path and a [vaults.*] table are both present', () => {
+        const configPath = makeTempConfigPath();
+        writeFileSync(
+            configPath,
+            [ 'vault_path = "/custom/vault/path"', '', '[vaults.other]', 'path = "/other"' ].join('\n'),
+            'utf8',
+        );
+
+        expect(() => loadConfig(configPath)).toThrow(/mixes the legacy vault_path key/);
+    });
+});
+
+describe('loadConfig: [vaults.*] table', () => {
+    it('single named vault, no default_vault — resolves with no error', () => {
+        const configPath = makeTempConfigPath();
+        writeFileSync(
+            configPath,
+            [ '[vaults.dnd]', 'path = "/Users/aj/Documents/DnD"', 'description = "D&D notes"' ].join('\n'),
+            'utf8',
+        );
+
+        const config = loadConfig(configPath);
+        expect(config.vaults).toEqual({
+            dnd: { path: '/Users/aj/Documents/DnD', description: 'D&D notes' },
+        });
+
+        const resolved = resolveVault(config);
+        expect(resolved).toEqual({
+            name: 'dnd',
+            path: '/Users/aj/Documents/DnD',
+            dbPath: defaultDbPathForVault('dnd'),
+            description: 'D&D notes',
+        });
+    });
+
+    it('two vaults with default_vault set — resolves to the default; an explicit name overrides it', () => {
+        const configPath = makeTempConfigPath();
+        writeFileSync(
+            configPath,
+            [
+                'default_vault = "dnd"',
+                '[vaults.notes]', 'path = "/Users/aj/Documents/Notes"', '',
+                '[vaults.dnd]', 'path = "/Users/aj/Documents/DnD"',
+            ].join('\n'),
+            'utf8',
+        );
+
+        const config = loadConfig(configPath);
+
+        expect(resolveVault(config).name).toBe('dnd');
+        expect(resolveVault(config, 'notes').name).toBe('notes');
+    });
+
+    it('two vaults, no default_vault — loadConfig does not throw; resolveVault throws only when called', () => {
+        const configPath = makeTempConfigPath();
+        writeFileSync(
+            configPath,
+            [
+                '[vaults.notes]', 'path = "/Users/aj/Documents/Notes"', '',
+                '[vaults.dnd]', 'path = "/Users/aj/Documents/DnD"',
+            ].join('\n'),
+            'utf8',
+        );
+
+        const config = loadConfig(configPath);
+        expect(() => resolveVault(config)).toThrow(/multiple vaults configured/);
+        expect(() => resolveVault(config)).toThrow(/dnd/);
+        expect(() => resolveVault(config)).toThrow(/notes/);
+    });
+
+    it('explicit unknown vault name throws naming the configured vaults', () => {
+        const configPath = makeTempConfigPath();
+        writeFileSync(
+            configPath,
+            [ '[vaults.notes]', 'path = "/Users/aj/Documents/Notes"' ].join('\n'),
+            'utf8',
+        );
+
+        const config = loadConfig(configPath);
+        expect(() => resolveVault(config, 'bogus')).toThrow(/unknown vault "bogus"/);
+        expect(() => resolveVault(config, 'bogus')).toThrow(/notes/);
+    });
+
+    it('invalid vault name in [vaults.*] throws from loadConfig', () => {
+        const configPath = makeTempConfigPath();
+        writeFileSync(
+            configPath,
+            [ '[vaults."My Vault"]', 'path = "/x"' ].join('\n'),
+            'utf8',
+        );
+
+        expect(() => loadConfig(configPath)).toThrow(/My Vault/);
+    });
+
+    it('a stale/typo\'d default_vault not matching any configured vault throws at load time', () => {
+        const configPath = makeTempConfigPath();
+        writeFileSync(
+            configPath,
+            [ 'default_vault = "typo"', '[vaults.notes]', 'path = "/Users/aj/Documents/Notes"' ].join('\n'),
+            'utf8',
+        );
+
+        expect(() => loadConfig(configPath)).toThrow(/default_vault "typo"/);
+    });
+});
+
+describe('resolveVaultsForQuery', () => {
+    it('name given — returns that single resolved vault, same hard error on unknown name', () => {
+        const config = {
+            vaults: { notes: { path: '/n' }, dnd: { path: '/d' } },
+        };
+        expect(resolveVaultsForQuery(config, 'dnd').vaults).toEqual([ resolveVault(config, 'dnd') ]);
+        expect(() => resolveVaultsForQuery(config, 'bogus')).toThrow(/unknown vault "bogus"/);
+    });
+
+    it('name omitted, exactly one vault configured — identical to resolveVault(config, null)', () => {
+        const config = { vaults: { notes: { path: '/n' } } };
+        expect(resolveVaultsForQuery(config).vaults).toEqual([ resolveVault(config, null) ]);
+    });
+
+    it('name omitted, 2+ vaults, no default_vault — does not throw, returns both in name-sorted order', () => {
+        const config = { vaults: { zeta: { path: '/z' }, alpha: { path: '/a' } } };
+
+        const result = resolveVaultsForQuery(config);
+
+        expect(result.vaults.map((v) => v.name)).toEqual([ 'alpha', 'zeta' ]);
+    });
+
+    it('name omitted, 2+ vaults, default_vault set — still returns both, not just the default', () => {
+        const config = {
+            default_vault: 'dnd',
+            vaults: { notes: { path: '/n' }, dnd: { path: '/d' } },
+        };
+
+        const result = resolveVaultsForQuery(config);
+
+        expect(result.vaults.map((v) => v.name).sort()).toEqual([ 'dnd', 'notes' ]);
+    });
+});
+
+describe('listVaults', () => {
+    it('omits path, includes description and isDefault, sorted by name', () => {
+        const config = {
+            default_vault: 'dnd',
+            vaults: {
+                dnd: { path: '/d', description: 'D&D notes' },
+                notes: { path: '/n' },
+            },
+        };
+
+        expect(listVaults(config)).toEqual([
+            { name: 'dnd', description: 'D&D notes', isDefault: true },
+            { name: 'notes', description: null, isDefault: false },
+        ]);
+    });
+
+    it('marks the sole vault as default when no default_vault key is set', () => {
+        const config = { vaults: { notes: { path: '/n' } } };
+
+        expect(listVaults(config)).toEqual([
+            { name: 'notes', description: null, isDefault: true },
+        ]);
+    });
+
+    it('marks no vault as default when 2+ configured with no default_vault key', () => {
+        const config = { vaults: { notes: { path: '/n' }, dnd: { path: '/d' } } };
+
+        expect(listVaults(config).every((v) => v.isDefault === false)).toBe(true);
+    });
+});
+
+describe('loadConfig: sparse top-level override', () => {
+    it('merges one overridden top-level key over the defaults, leaving the rest untouched', () => {
+        const configPath = makeTempConfigPath();
+        writeFileSync(configPath, 'embedding_model = "Custom-Model"\n', 'utf8');
+
+        const config = loadConfig(configPath);
+
+        expect(config.embedding_model).toBe('Custom-Model');
+        expect(config.vaults).toEqual(buildDefaultConfig().vaults);
         expect(config.search.limit_default).toBe(20);
     });
 
@@ -144,14 +390,14 @@ describe('loadConfig: sparse top-level override', () => {
         const logDir = mkdtempSync(join(tmpdir(), 'mnotes-config-test-log-'));
         const logger = getLogger('mcp-server', logDir);
         const configPath = makeTempConfigPath();
-        writeFileSync(configPath, 'vault_path = "/custom/vault/path"\n', 'utf8');
+        writeFileSync(configPath, 'embedding_model = "Custom-Model"\n', 'utf8');
 
         runWithLogger(logger, () => loadConfig(configPath));
 
         await vi.waitFor(() => {
             const line = readFileSync(join(logDir, 'mcp-server.log'), 'utf8').trim();
             expect(line).toContain('DEBUG [mcp-server] loaded config overrides');
-            expect(line).toContain('overridden_keys=vault_path');
+            expect(line).toContain('overridden_keys=embedding_model');
         });
         await cleanupTempDir(logDir);
     });
@@ -236,7 +482,7 @@ describe('loadConfig: unrecognized keys', () => {
 
         const config = runWithLogger(logger, () => loadConfig(configPath));
 
-        expect(config.vault_path).toBe(buildDefaultConfig().vault_path);
+        expect(config.vaults).toEqual(buildDefaultConfig().vaults);
         expect(config.search.limit_default).toBe(20);
 
         await vi.waitFor(() => {
@@ -251,18 +497,24 @@ describe('loadConfig: unrecognized keys', () => {
         await cleanupTempDir(logDir);
     });
 
-    it('does not warn when every key in the file matches the schema', async () => {
+    it('does not warn when every key in the file matches the schema, including [vaults.*]/default_vault', () => {
         const logDir = mkdtempSync(join(tmpdir(), 'mnotes-config-test-log-'));
         const logger = getLogger('mcp-server', logDir);
         const configPath = makeTempConfigPath();
-        writeFileSync(configPath, '[search]\nlimit_default = 50\n', 'utf8');
+        writeFileSync(
+            configPath,
+            [
+                'default_vault = "dnd"', '[search]', 'limit_default = 50', '',
+                '[vaults.dnd]', 'path = "/x"',
+            ].join('\n'),
+            'utf8',
+        );
 
         runWithLogger(logger, () => loadConfig(configPath));
 
-        await vi.waitFor(() => {
+        return vi.waitFor(() => {
             const lines = readFileSync(join(logDir, 'mcp-server.log'), 'utf8').trim().split('\n');
             expect(lines.some(line => line.includes('unrecognized config key'))).toBe(false);
-        });
-        await cleanupTempDir(logDir);
+        }).finally(() => cleanupTempDir(logDir));
     });
 });

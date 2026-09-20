@@ -8,7 +8,30 @@ import {
     formatCompareResult, formatNearestTable, formatClusterTable, formatReduceCsv,
     formatTagFitTable, formatTagRedundancyTable, formatOutliersTable, formatCalibrateTable, formatJson,
 } from '../format.js';
-import { resolveConfig } from '../config.js';
+import { resolveConfig, resolveVault } from '../config.js';
+import { openDb } from '../core/db.js';
+
+// Same "explicit deps win" bypass every other vault-scoped command uses (cli/main.js) — a test
+// double passing deps.db directly skips config-driven resolution entirely.
+function extractVaultFlag(args) {
+    const eqIndex = args.findIndex((a) => a.startsWith('--vault='));
+    if (eqIndex !== -1) {
+        return { vaultName: args[eqIndex].slice('--vault='.length), rest: args.toSpliced(eqIndex, 1) };
+    }
+    const flagIndex = args.indexOf('--vault');
+    if (flagIndex !== -1) {
+        return { vaultName: args[flagIndex + 1], rest: args.toSpliced(flagIndex, 2) };
+    }
+    return { vaultName: null, rest: args };
+}
+
+function resolveVectorsDb(deps, vaultName) {
+    if (deps.db !== undefined) {
+        return deps.db;
+    }
+    const vault = resolveVault(resolveConfig(deps), vaultName);
+    return openDb(vault.dbPath).db;
+}
 
 // Detects an explicitly-passed `--name`/`--name=value` flag, as opposed to a parseArgs default —
 // needed for the flag-combination usage errors below (e.g. "--aggregate is not valid with
@@ -702,5 +725,10 @@ export async function runVectorsCommand(args, deps) {
         return { stdout: VECTORS_HELP[sub], stderr: '', exitCode: 0 };
     }
 
-    return handler(rest, deps);
+    // --vault is parsed here, before dispatch, rather than added to every subcommand's own
+    // parseArgs options (S009) — one resolution point for a flag every subcommand shares.
+    const { vaultName, rest: subArgs } = extractVaultFlag(rest);
+    const db = resolveVectorsDb(deps, vaultName);
+
+    return handler(subArgs, { ...deps, db });
 }

@@ -50,9 +50,14 @@ function readonlySentinel(value) {
     return value ? 'read-only' : null;
 }
 
-export function formatSearchTable(results, mode, { align = false } = {}) {
+// showVault (S009): present exactly when the caller resolved more than one vault for this call —
+// never inferred from row content, so a zero-row fan-out result still gets the column, and a
+// single-vault result (the common case) never does, matching every existing installation's output
+// byte-for-byte.
+export function formatSearchTable(results, mode, { align = false, showVault = false } = {}) {
     const rows = results.map((r) => ({ ...r, readonly: readonlySentinel(r.readonly) }));
-    return formatTable(SEARCH_COLUMNS[mode], rows, { align });
+    const columns = showVault ? [ 'vault', ...SEARCH_COLUMNS[mode] ] : SEARCH_COLUMNS[mode];
+    return formatTable(columns, rows, { align });
 }
 
 const EXPLAIN_COLUMNS = {
@@ -86,14 +91,16 @@ function formatLineMatches(lineMatches, totalMatchCount, includeText) {
     return more > 0 ? `${rendered} (+${more} more)` : rendered;
 }
 
-export function formatGrepTable(results, { includeText = false, align = false } = {}) {
+export function formatGrepTable(results, { includeText = false, align = false, showVault = false } = {}) {
     const rows = results.map((r) => ({
+        vault: r.vault,
         note_title: r.noteTitle,
         file_line_count: r.fileLineCount,
         line_matches: formatLineMatches(r.lineMatches, r.totalMatchCount, includeText),
         readonly: readonlySentinel(r.readonly),
     }));
-    return formatTable([ 'note_title', 'file_line_count', 'line_matches', 'readonly' ], rows, { align });
+    const columns = [ 'note_title', 'file_line_count', 'line_matches', 'readonly' ];
+    return formatTable(showVault ? [ 'vault', ...columns ] : columns, rows, { align });
 }
 
 export function formatTagListTable(results, { align = false } = {}) {
@@ -101,11 +108,13 @@ export function formatTagListTable(results, { align = false } = {}) {
     return formatTable([ 'tag', 'notes_with_tag' ], rows, { align });
 }
 
-export function formatTagNotesTable(results, { align = false } = {}) {
+export function formatTagNotesTable(results, { align = false, showVault = false } = {}) {
     const rows = results.map((r) => ({
+        vault: r.vault,
         note_title: r.noteTitle, file_line_count: r.fileLineCount, readonly: readonlySentinel(r.readonly),
     }));
-    return formatTable([ 'note_title', 'file_line_count', 'readonly' ], rows, { align });
+    const columns = [ 'note_title', 'file_line_count', 'readonly' ];
+    return formatTable(showVault ? [ 'vault', ...columns ] : columns, rows, { align });
 }
 
 // metadata_query's output is the same { noteTitle, fileLineCount } shape tagNotes returns (S014) —
@@ -136,16 +145,26 @@ export function formatLinksTable({ backlinks, links_out: linksOut }, { align = f
     return formatTable([ 'direction', 'note_title', 'readonly' ], rows, { align });
 }
 
-export function formatBrokenLinksTable(results, { align = false, readonlyMatcher = null } = {}) {
+// A row already carrying a computed `readonly` boolean (the CLI's fan-out path, S009 — each
+// resolved vault has its own .mnotesreadonly matcher, so the caller precomputes per-vault rather
+// than handing this function one matcher for every row) wins over the single shared readonlyMatcher
+// this function otherwise applies uniformly across every row (the pre-existing single-vault path).
+export function formatBrokenLinksTable(results, { align = false, readonlyMatcher = null, showVault = false } = {}) {
     const rows = results.map((r) => ({
+        vault: r.vault,
         note_title: r.sourceTitle,
         broken_target: r.targetTitle,
-        readonly: readonlyColumnFor(readonlyMatcher, r.sourceTitle),
+        readonly: r.readonly !== undefined
+            ? readonlySentinel(r.readonly)
+            : readonlyColumnFor(readonlyMatcher, r.sourceTitle),
     }));
-    return formatTable([ 'note_title', 'broken_target', 'readonly' ], rows, { align });
+    const columns = [ 'note_title', 'broken_target', 'readonly' ];
+    return formatTable(showVault ? [ 'vault', ...columns ] : columns, rows, { align });
 }
 
-const LOG_COLUMNS = [ 'timestamp', 'tool', 'source', 'identifier', 'query', 'outcome', 'reason', 'error_message' ];
+const LOG_COLUMNS = [
+    'timestamp', 'tool', 'source', 'vault', 'identifier', 'query', 'outcome', 'reason', 'error_message',
+];
 
 // note_title and attachment_path are mutually exclusive per S008 audit entry (S012) — one
 // "identifier" column instead of two columns that are each empty half the time.
@@ -154,6 +173,7 @@ function logRow(entry) {
         timestamp: entry.timestamp,
         tool: entry.tool,
         source: entry.source,
+        vault: entry.vault ?? null,
         identifier: entry.noteTitle ?? entry.attachmentPath,
         query: entry.query,
         outcome: entry.outcome,
@@ -179,6 +199,7 @@ export function formatLogEntryJsonLine(entry) {
         timestamp: entry.timestamp,
         tool: entry.tool,
         source: entry.source,
+        vault: entry.vault ?? null,
         note_title: entry.noteTitle,
         attachment_path: entry.attachmentPath,
         query: entry.query,
@@ -186,6 +207,15 @@ export function formatLogEntryJsonLine(entry) {
         reason: entry.reason,
         error_message: entry.errorMessage,
     });
+}
+
+// No `path` column — deliberately withheld (S007) so a caller (human or Claude) tells vaults apart
+// by name/description alone, never by the on-disk location.
+export function formatVaultsTable(vaults, { align = false } = {}) {
+    const rows = vaults.map((v) => ({
+        name: v.name, description: v.description, default: v.isDefault ? 'true' : '',
+    }));
+    return formatTable([ 'name', 'description', 'default' ], rows, { align });
 }
 
 export function formatStats(stats, { json = false, daemonRunning } = {}) {

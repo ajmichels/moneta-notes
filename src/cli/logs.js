@@ -69,6 +69,7 @@ export function parseAuditLine(line) {
         noteTitle: context.note_title ?? null,
         attachmentPath: context.attachment_path ?? null,
         source: context.source ?? null,
+        vault: context.vault ?? null,
         query: context.query ?? null,
         reason: context.reason ?? null,
         outcome: context.outcome ?? null,
@@ -93,12 +94,17 @@ export function readAuditEntries(logPath) {
     return readRawLines(logPath).map(parseAuditLine).filter((entry) => entry !== null);
 }
 
-export function filterEntries(entries, { source, tool, note, outcome, since } = {}) {
+// vault (S009) is a plain equality filter, never subject to resolveVault's default-vault-fallback
+// treatment: omitted, every vault's entries show unfiltered; an unrecognized name isn't an error,
+// it just matches zero rows; an entry with no vault field (e.g. list_vaults) never matches any
+// given value.
+export function filterEntries(entries, { source, tool, note, outcome, vault, since } = {}) {
     return entries.filter((entry) => {
         if (source && entry.source !== source) return false;
         if (tool && entry.tool !== tool) return false;
         if (note && entry.noteTitle !== note && entry.attachmentPath !== note) return false;
         if (outcome && entry.outcome !== outcome) return false;
+        if (vault && entry.vault !== vault) return false;
         if (since && new Date(entry.timestamp) < since) return false;
         return true;
     });
@@ -179,7 +185,7 @@ const LOG_FILES = [
 
 // Only audit.log has structured per-call fields (S008) — these flags presuppose that shape and are
 // rejected outright against every other file, all of which are unstructured text.
-const AUDIT_ONLY_FLAGS = [ 'source', 'tool', 'note', 'outcome', 'since', 'json' ];
+const AUDIT_ONLY_FLAGS = [ 'source', 'tool', 'note', 'outcome', 'vault', 'since', 'json' ];
 
 const OPTIONS = {
     file: { type: 'string' },
@@ -187,6 +193,7 @@ const OPTIONS = {
     tool: { type: 'string' },
     note: { type: 'string' },
     outcome: { type: 'string' },
+    vault: { type: 'string' },
     since: { type: 'string' },
     limit: { type: 'string' },
     follow: { type: 'boolean' },
@@ -226,6 +233,7 @@ function parseAuditFilters(values) {
         tool: values.tool ?? null,
         note: values.note ?? null,
         outcome: values.outcome ?? null,
+        vault: values.vault ?? null,
         since: values.since !== undefined ? parseSince(values.since) : null,
     };
 }

@@ -79,7 +79,7 @@ describe('createResilientWatcher', () => {
 
         createResilientWatcher('/some/path', () => {}, { spawnFn, scheduleFn: () => {}, cancelFn: () => {} });
 
-        expect(spawnFn).toHaveBeenCalledWith('/some/path', expect.any(Function));
+        expect(spawnFn).toHaveBeenCalledWith('/some/path', expect.any(Function), null);
         expect(spawnFn).toHaveBeenCalledTimes(1);
     });
 

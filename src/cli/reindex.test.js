@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb } from '../core/db.js';
-import { createIpcServer } from '../indexer/daemon.js';
+import { createIpcServer, createSerialGate } from '../indexer/daemon.js';
 import { streamReindex, runReindexCommand } from './reindex.js';
 import { cleanupTempDir } from '../../vitest.helpers.js';
 
@@ -40,9 +40,11 @@ describe('streamReindex / runReindexCommand', () => {
         writeFileSync(join(vaultRoot, 'A.md'), 'note body');
         const { db } = openDb(':memory:');
         const socketPath = join(makeTempDir(), 'daemon.sock');
-        const server = createIpcServer(socketPath, vaultRoot, db, baseDeps());
+        const server = createIpcServer(socketPath, {
+            notes: { vaultRoot, db, deps: baseDeps(), gate: createSerialGate() },
+        });
 
-        const result = await runReindexCommand([], { socketPath });
+        const result = await runReindexCommand([], { socketPath, vaultRoot, vaultName: 'notes' });
 
         server.close();
         expect(result.exitCode).toBe(0);
@@ -56,18 +58,37 @@ describe('streamReindex / runReindexCommand', () => {
         writeFileSync(join(vaultRoot, 'Ignored.md'), 'note');
         const { db } = openDb(':memory:');
         const socketPath = join(makeTempDir(), 'daemon.sock');
-        const server = createIpcServer(socketPath, vaultRoot, db, baseDeps());
+        const server = createIpcServer(socketPath, {
+            notes: { vaultRoot, db, deps: baseDeps(), gate: createSerialGate() },
+        });
 
-        const result = await runReindexCommand([ 'Only' ], { socketPath });
+        const result = await runReindexCommand([ 'Only' ], { socketPath, vaultRoot, vaultName: 'notes' });
 
         server.close();
         expect(result.stdout).toContain('Only.md | reindexed');
         expect(result.stdout).not.toContain('Ignored.md');
     });
 
+    it('resolves --vault via config when no vaultRoot bypass is given', async () => {
+        const vaultRoot = makeTempDir();
+        writeFileSync(join(vaultRoot, 'A.md'), 'note body');
+        const { db } = openDb(':memory:');
+        const socketPath = join(makeTempDir(), 'daemon.sock');
+        const server = createIpcServer(socketPath, {
+            dnd: { vaultRoot, db, deps: baseDeps(), gate: createSerialGate() },
+        });
+        const config = { vaults: { dnd: { path: vaultRoot } } };
+
+        const result = await runReindexCommand([ '--vault=dnd' ], { socketPath, config });
+
+        server.close();
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout).toContain('A.md | reindexed');
+    });
+
     it('hard-errors with an actionable message when the daemon is not running', async () => {
         const socketPath = join(makeTempDir(), 'nobody-listening.sock');
 
-        await expect(streamReindex(socketPath, null, () => {})).rejects.toThrow(/is it running/);
+        await expect(streamReindex(socketPath, 'notes', null, () => {})).rejects.toThrow(/is it running/);
     });
 });

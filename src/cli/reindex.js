@@ -1,13 +1,14 @@
 import { createConnection } from 'node:net';
 import { parseArgs } from 'node:util';
+import { resolveConfig, resolveVault } from '../config.js';
 
-export function streamReindex(socketPath, noteTitle, onMessage) {
+export function streamReindex(socketPath, vault, noteTitle, onMessage) {
     return new Promise((resolve, reject) => {
         const client = createConnection(socketPath);
         let buffer = '';
 
         client.on('connect', () => {
-            client.write(`${JSON.stringify({ action: 'reindex', noteTitle })}\n`);
+            client.write(`${JSON.stringify({ action: 'reindex', vault, noteTitle })}\n`);
         });
         client.on('data', (chunk) => {
             buffer += chunk.toString('utf8');
@@ -29,12 +30,17 @@ export function streamReindex(socketPath, noteTitle, onMessage) {
 }
 
 export async function runReindexCommand(args, deps) {
-    const { positionals } = parseArgs({ args, allowPositionals: true, options: {} });
+    const { values, positionals } = parseArgs({
+        args, allowPositionals: true, options: { vault: { type: 'string' } },
+    });
     const noteTitle = positionals[0] ?? null;
+    const vaultName = deps.vaultRoot !== undefined
+        ? (deps.vaultName ?? null)
+        : resolveVault(resolveConfig(deps), values.vault ?? null).name;
     const lines = [];
     let summary = null;
 
-    await streamReindex(deps.socketPath, noteTitle, (msg) => {
+    await streamReindex(deps.socketPath, vaultName, noteTitle, (msg) => {
         if (msg.summary) {
             summary = msg.summary;
             return;

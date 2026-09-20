@@ -4,15 +4,19 @@ import { tmpdir } from 'node:os';
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync as readAuditLog } from 'node:fs';
 import { Readable } from 'node:stream';
 import {
-    main, dispatch, resolveVaultRoot, resolveDbPath, registerCommand, runSearch, runGrep, runTags,
+    main, dispatch, registerCommand, runSearch, runGrep, runTags,
     runMetadata, parseFilterString, runLinks, runRead, runWrite, runEdit, runAppend, runRename,
-    runStats, runAttachment, runAttachmentRead, runAttachmentWrite,
+    runStats, runAttachment, runAttachmentRead, runAttachmentWrite, runVaults,
 } from './main.js';
 import { openDb } from '../core/db.js';
 import { syncNoteTags } from '../core/tags.js';
 import { getAuditLogger } from '../logger.js';
 import { buildDefaultConfig } from '../config.js';
 import { cleanupTempDir } from '../../vitest.helpers.js';
+
+function writeNoteFile(vaultRoot, relPath, content) {
+    writeFileSync(join(vaultRoot, relPath), content, 'utf8');
+}
 
 // resolveVaultRoot()/resolveDbPath() default to loadConfig() (no argument), which reads the real
 // ~/.config/mnotes/config.toml on whatever machine the suite runs on (S009's documented behavior
@@ -118,25 +122,6 @@ describe('main: stdout/stderr write order', () => {
     });
 });
 
-describe('resolveVaultRoot', () => {
-    it('returns vault_path from the given config', () => {
-        expect(resolveVaultRoot({ vault_path: '/tmp/vault' })).toBe('/tmp/vault');
-    });
-
-    it('defaults to loadConfig()\'s vault_path when no config is passed', () => {
-        expect(resolveVaultRoot()).toBe(buildDefaultConfig().vault_path);
-    });
-});
-
-describe('resolveDbPath', () => {
-    it('returns db_path from the given config', () => {
-        expect(resolveDbPath({ db_path: '/tmp/index.db' })).toBe('/tmp/index.db');
-    });
-
-    it('defaults to loadConfig()\'s db_path when no config is passed', () => {
-        expect(resolveDbPath()).toBe(buildDefaultConfig().db_path);
-    });
-});
 
 describe('runSearch', () => {
     it('formats fulltext results as pipe-delimited text by default', async () => {
@@ -1119,5 +1104,137 @@ describe('dispatch: "vectors" bypasses the generic --help short-circuit', () => 
         expect(result.stdout).toContain('Usage: mnotes vectors compare <a> <b>');
         expect(result.stdout).toContain('--aggregate=centroid|best-chunk|all-pairs');
         expect(result.stdout).not.toContain('mnotes vectors nearest');
+    });
+});
+
+describe('multi-vault: --vault resolution (S009)', () => {
+    function twoVaultConfig(rootA, rootB, extra = {}) {
+        return { vaults: { alpha: { path: rootA }, beta: { path: rootB } }, ...extra };
+    }
+
+    it('runRead resolves --vault via config for a single-vault-target command', async () => {
+        const rootA = makeTempVault();
+        const rootB = makeTempVault();
+        writeNoteFile(rootA, 'InAlpha.md', 'alpha body');
+        writeNoteFile(rootB, 'InBeta.md', 'beta body');
+        const config = twoVaultConfig(rootA, rootB);
+
+        const result = await runRead([ 'InBeta', '--vault=beta' ], { config });
+
+        expect(result.stdout).toContain('beta body');
+    });
+
+    it('an unknown --vault surfaces as a hard error naming the configured vaults', async () => {
+        const rootA = makeTempVault();
+        const rootB = makeTempVault();
+        const config = twoVaultConfig(rootA, rootB);
+
+        const result = await dispatch([ 'read', 'X', '--vault=bogus' ], { config });
+
+        expect(result.exitCode).toBe(1);
+        expect(result.stderr).toMatch(/unknown vault "bogus"/);
+        expect(result.stderr).toMatch(/alpha/);
+        expect(result.stderr).toMatch(/beta/);
+    });
+
+    it('a single-vault-target command with 2+ vaults and no default_vault errors naming both', async () => {
+        const rootA = makeTempVault();
+        const rootB = makeTempVault();
+        const config = twoVaultConfig(rootA, rootB);
+
+        const result = await dispatch([ 'read', 'X' ], { config });
+
+        expect(result.exitCode).toBe(1);
+        expect(result.stderr).toMatch(/multiple vaults configured/);
+    });
+
+    it('setting default_vault makes a single-vault-target command work again with no flag', async () => {
+        const rootA = makeTempVault();
+        const rootB = makeTempVault();
+        writeNoteFile(rootA, 'InAlpha.md', 'alpha body');
+        const config = twoVaultConfig(rootA, rootB, { default_vault: 'alpha' });
+
+        const result = await runRead([ 'InAlpha' ], { config });
+
+        expect(result.stdout).toContain('alpha body');
+    });
+
+    it('search fans out across both vaults when --vault is omitted, grouped by vault', async () => {
+        const rootA = makeTempVault();
+        const rootB = makeTempVault();
+        const dbA = openDb(join(rootA, 'index.db')).db;
+        const dbB = openDb(join(rootB, 'index.db')).db;
+        const idA = insertTestNote(dbA, 'A.md', 3);
+        dbA.prepare('INSERT INTO notes_fts (rowid, title, body) VALUES (?, ?, ?)').run(idA, 'A', 'shared word');
+        const idB = insertTestNote(dbB, 'B.md', 3);
+        dbB.prepare('INSERT INTO notes_fts (rowid, title, body) VALUES (?, ?, ?)').run(idB, 'B', 'shared word');
+        const config = {
+            ...buildDefaultConfig(),
+            vaults: { alpha: { path: rootA, db_path: join(rootA, 'index.db') },
+                beta: { path: rootB, db_path: join(rootB, 'index.db') } },
+        };
+
+        const result = await runSearch([ 'shared', '--mode=fulltext' ], {
+            config, embed: async () => new Float32Array(1024), embeddingModel: 'm', embeddingVersion: 'v1',
+        });
+
+        expect(result.stdout).toContain('vault');
+        expect(result.stdout).toMatch(/alpha/);
+        expect(result.stdout).toMatch(/beta/);
+        dbA.close();
+        dbB.close();
+    });
+
+    it('an explicit --vault on a fan-out command never adds the vault column, any vault count', async () => {
+        const rootA = makeTempVault();
+        const rootB = makeTempVault();
+        const dbA = openDb(join(rootA, 'index.db')).db;
+        const idA = insertTestNote(dbA, 'A.md', 3);
+        dbA.prepare('INSERT INTO notes_fts (rowid, title, body) VALUES (?, ?, ?)').run(idA, 'A', 'shared word');
+        const config = {
+            ...buildDefaultConfig(),
+            vaults: { alpha: { path: rootA, db_path: join(rootA, 'index.db') }, beta: { path: rootB } },
+        };
+
+        const result = await runSearch([ 'shared', '--mode=fulltext', '--vault=alpha' ], {
+            config, embed: async () => new Float32Array(1024), embeddingModel: 'm', embeddingVersion: 'v1',
+        });
+
+        expect(result.stdout).not.toContain('vault');
+        dbA.close();
+    });
+});
+
+describe('runVaults', () => {
+    it('lists every configured vault, description and default flag, with no path column', async () => {
+        const config = {
+            default_vault: 'dnd',
+            vaults: {
+                dnd: { path: '/x/DnD', description: 'D&D notes' },
+                notes: { path: '/x/Notes' },
+            },
+        };
+
+        const result = await runVaults([], { config });
+
+        expect(result.stdout).toContain('name');
+        expect(result.stdout).toContain('description');
+        expect(result.stdout).toContain('default');
+        expect(result.stdout).toContain('dnd');
+        expect(result.stdout).toContain('D&D notes');
+        expect(result.stdout).not.toContain('/x/DnD');
+    });
+
+    it('--json emits the same shape as listVaults', async () => {
+        const config = { vaults: { notes: { path: '/x/Notes' } } };
+
+        const result = await runVaults([ '--json' ], { config });
+
+        expect(JSON.parse(result.stdout)).toEqual([ { name: 'notes', description: null, isDefault: true } ]);
+    });
+
+    it('mnotes vaults --vault=x errors as an unrecognized flag (no such option registered)', async () => {
+        const result = await dispatch([ 'vaults', '--vault=x' ], {});
+        expect(result.exitCode).toBe(1);
     });
 });

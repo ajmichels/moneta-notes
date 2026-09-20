@@ -15,7 +15,7 @@ import { logAudit, getAuditLogger, defaultLogDir } from '../logger.js';
 import { openDb } from '../core/db.js';
 import { defaultSocketPath, DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_VERSION } from '../indexer/daemon.js';
 import { embedQueryOverSocket } from '../indexer/embed.js';
-import { loadConfig, resolveConfig } from '../config.js';
+import { loadConfig, resolveConfig, resolveVault, resolveVaultsForQuery, listVaults } from '../config.js';
 import { computeStats, checkDaemonRunning } from './stats.js';
 import { runReindexCommand } from './reindex.js';
 import { runDaemonCommand } from './daemon.js';
@@ -24,16 +24,53 @@ import { runLogsCommand } from './logs.js';
 import {
     formatSearchTable, formatExplain, formatGrepTable, formatTagListTable, formatTagNotesTable,
     formatMetadataKeysTable, formatLinksTable, formatBrokenLinksTable, formatStats, formatJson,
-    formatJsonPretty,
+    formatJsonPretty, formatVaultsTable,
 } from '../format.js';
 
-export function resolveVaultRoot(config = loadConfig()) {
-    return config.vault_path;
+// Every vault-scoped command accepts this bypass: a test double (or any other caller) that already
+// knows exactly which vault it wants passes vaultRoot/dbPath directly, skipping config-driven
+// resolution entirely — the same "explicit deps win" precedence resolveConfig() already documents
+// for the tunable-parameter sections. Real CLI usage never sets deps.vaultRoot (buildRealDeps below
+// stopped doing that), so it always resolves through config + whatever --vault the caller typed.
+function hasDirectVaultDeps(deps) {
+    return deps.vaultRoot !== undefined || deps.db !== undefined;
 }
 
-export function resolveDbPath(config = loadConfig()) {
-    return config.db_path;
+function resolveCliVault(deps, vaultFlag) {
+    if (hasDirectVaultDeps(deps)) {
+        return { name: null, path: deps.vaultRoot, dbPath: deps.dbPath ?? null, description: null };
+    }
+    return resolveVault(resolveConfig(deps), vaultFlag ?? null);
 }
+
+// Same bypass, for the five commands that fan out across every configured vault when --vault is
+// omitted (S006/S009) instead of resolving to a single default.
+function resolveCliVaultsForQuery(deps, vaultFlag) {
+    if (hasDirectVaultDeps(deps)) {
+        return [ { name: null, path: deps.vaultRoot, dbPath: deps.dbPath ?? null, description: null } ];
+    }
+    return resolveVaultsForQuery(resolveConfig(deps), vaultFlag ?? null).vaults;
+}
+
+function openCliDb(deps, dbPath) {
+    return deps.db ?? openDb(dbPath).db;
+}
+
+// A handful of commands (grep, read, links <title>, rename) treat a missing db as an acceptable
+// degraded mode rather than a hard requirement (S010) — title resolution just falls back to an
+// exact-match-only path. That "no db" case only ever arises from a test double exercising
+// filesystem-only behavior; real resolution (no deps.vaultRoot bypass) always opens one.
+function optionalCliDb(deps, dbPath) {
+    if (deps.db !== undefined) {
+        return deps.db;
+    }
+    if (deps.vaultRoot !== undefined) {
+        return null;
+    }
+    return openDb(dbPath).db;
+}
+
+const VAULT_FLAG_OPTION = { vault: { type: 'string' } };
 
 const COMMANDS = {};
 
@@ -60,52 +97,64 @@ Commands:
   stats     Show index/daemon stats
   logs      Filter/tail audit.log (default), or any other log file raw (--file=<name>)
   vectors   compare | nearest | cluster | reduce | tag-fit | tag-redundancy | outliers | calibrate
+  vaults    List every configured vault (S009)
 
 Run 'mnotes <command> --help' for command-specific flags.
 `;
 
 const COMMAND_USAGE = {
-    search: 'mnotes search <query> [--mode=hybrid|fulltext|semantic] [--limit=N] [--explain] [--json]',
-    grep: 'mnotes grep <pattern> [--regex] [--note=<title>] [--content] [--json]\n'
-        + '       (--note resolves like read\'s <title> does — exact match, or a unique basename match)',
-    tags: "mnotes tags list [--json]\n       mnotes tags notes <tag> [--json]",
-    metadata: 'mnotes metadata keys [--json]\n'
+    search: 'mnotes search <query> [--mode=hybrid|fulltext|semantic] [--limit=N] [--explain] [--json]\n'
+        + '       [--vault=<name>]\n'
+        + '       (--vault omitted with 2+ vaults configured fans out across all of them, grouped by\n'
+        + '        vault, --limit applied per vault — see S009)',
+    grep: 'mnotes grep <pattern> [--regex] [--note=<title>] [--content] [--json] [--vault=<name>]\n'
+        + '       (--note resolves like read\'s <title> does — exact match, or a unique basename match)\n'
+        + '       (--vault omitted with 2+ vaults configured fans out across all of them — see S009)',
+    tags: 'mnotes tags list [--json] [--vault=<name>]\n'
+        + '       mnotes tags notes <tag> [--json] [--vault=<name>]\n'
+        + '       (list requires --vault when 2+ vaults are configured; notes fans out when omitted)',
+    metadata: 'mnotes metadata keys [--json] [--vault=<name>]\n'
         + '       mnotes metadata query [--filter="key op value"]... [--exists=key]...\n'
-        + '                              [--missing=key]... [--match=any] [--json]\n'
+        + '                              [--missing=key]... [--match=any] [--json] [--vault=<name>]\n'
         + '       (--filter op is one of = != > >= < <=, or "key in v1,v2,...";\n'
         + "        --exists/--missing are sugar for {op: 'exists'}/{op: 'exists', negate: true};\n"
         + '        --match=any ORs conditions together instead of ANDing;\n'
         + '        key="tags" is filterable via query (eg. --filter="tags=project") but never\n'
-        + '        listed by `keys` — run `mnotes tags list` for the tag vocabulary instead)',
-    links: "mnotes links <title> [--json]\n       mnotes links broken [--json]",
-    read: 'mnotes read <title> [--start=N] [--end=N] [--raw] [--json]\n'
+        + '        listed by `keys` — run `mnotes tags list` for the tag vocabulary instead;\n'
+        + '        keys requires --vault when 2+ vaults are configured; query fans out when omitted)',
+    links: 'mnotes links <title> [--json] [--vault=<name>]\n       mnotes links broken [--json] [--vault=<name>]\n'
+        + '       (<title> form requires --vault when 2+ vaults configured; broken fans out when omitted)',
+    read: 'mnotes read <title> [--start=N] [--end=N] [--raw] [--json] [--vault=<name>]\n'
         + '       (<title> resolves: exact match, or a unique basename match, e.g. text from a [[wikilink]])',
-    write: "mnotes write <title> [--hash=H] [--metadata='{...}'] [--content=\"...\"]\n"
+    write: "mnotes write <title> [--hash=H] [--metadata='{...}'] [--content=\"...\"] [--vault=<name>]\n"
         + '       (content is read from stdin if --content is omitted)\n'
         + '       (<title> must be the exact absolute title — as returned by read/search — no resolution)',
-    edit: 'mnotes edit <title> --hash=H --old="..." --new="..." [--metadata=\'{...}\']\n'
+    edit: 'mnotes edit <title> --hash=H --old="..." --new="..." [--metadata=\'{...}\'] [--vault=<name>]\n'
         + '       (<title> must be the exact absolute title — as returned by read/search — no resolution)',
-    append: 'mnotes append <title> [--hash=H] [--content="..."]\n'
+    append: 'mnotes append <title> [--hash=H] [--content="..."] [--vault=<name>]\n'
         + '       (content is read from stdin if --content is omitted)\n'
         + '       (<title> must be the exact absolute title — as returned by read/search — no resolution)',
-    rename: 'mnotes rename <old-title> <new-title> [--hash=H]\n'
+    rename: 'mnotes rename <old-title> <new-title> [--hash=H] [--vault=<name>]\n'
         + '       (both titles must be exact absolute titles — as returned by read/search — no resolution)',
-    attachment: 'mnotes attachment read <path> [--raw] [--metadata|--json]\n'
-        + '       mnotes attachment write <path> [local-file]\n'
+    attachment: 'mnotes attachment read <path> [--raw] [--metadata|--json] [--vault=<name>]\n'
+        + '       mnotes attachment write <path> [local-file] [--vault=<name>]\n'
         + '       (content is read from stdin if local-file is omitted)\n'
         + '       (<path> is the exact vault-relative path — no resolution; default read action opens\n'
         + '       the file via the OS default app)',
-    reindex: 'mnotes reindex [title]',
+    reindex: 'mnotes reindex [title] [--vault=<name>]',
     daemon: 'mnotes daemon <start|stop|restart>',
-    stats: 'mnotes stats [--json]',
+    stats: 'mnotes stats [--json] [--vault=<name>]',
     logs: 'mnotes logs [--file=<name>] [--limit=N] [--follow]\n'
         + '       mnotes logs [--source=mcp|cli] [--tool=<name>] [--note=<title>] [--outcome=success|error]\n'
-        + '                   [--since=<1h|30m|ISO8601>] [--limit=N] [--follow] [--json]\n'
+        + '                   [--vault=<name>] [--since=<1h|30m|ISO8601>] [--limit=N] [--follow] [--json]\n'
         + '       (--file is one of: audit (default), indexer, mcp-server, daemon.stdout, daemon.stderr,\n'
-        + '        logrotate.stdout, logrotate.stderr; --source/--tool/--note/--outcome/--since/--json\n'
-        + '        only apply to --file=audit — every other file prints raw lines, no parsing;\n'
+        + '        logrotate.stdout, logrotate.stderr; --source/--tool/--note/--outcome/--vault/--since/\n'
+        + '        --json only apply to --file=audit — every other file prints raw lines, no parsing;\n'
         + '        --json is one compact object per line, not a single array;\n'
-        + '        --follow streams live and defaults --limit to 20 for its printed backlog)',
+        + '        --follow streams live and defaults --limit to 20 for its printed backlog;\n'
+        + '        --vault omitted shows every vault\'s entries — it is a plain equality filter, not\n'
+        + '        subject to default-vault resolution)',
+    vaults: 'mnotes vaults [--json]',
     // No entry for 'vectors': unlike every other command here, `vectors` has enough
     // sub-subcommands with distinct flag sets that a single flat usage line doesn't cut it —
     // dispatch() below special-cases 'vectors' to skip this table entirely and let
@@ -161,32 +210,48 @@ export async function runSearch(args, deps) {
             limit: { type: 'string' },
             json: { type: 'boolean', default: false },
             explain: { type: 'boolean', default: false },
+            ...VAULT_FLAG_OPTION,
         },
     });
     const query = positionals[0];
     const limit = values.limit !== undefined ? Number(values.limit) : undefined;
     const { search: searchConfig } = resolveConfig(deps);
-    const searchOptions = {
-        query, mode: values.mode, limit, vaultRoot: deps.vaultRoot,
+    const vaults = resolveCliVaultsForQuery(deps, values.vault);
+    const fannedOut = vaults.length > 1;
+
+    const optionsFor = (vaultRoot) => ({
+        query, mode: values.mode, limit, vaultRoot,
         embed: deps.embed, embeddingModel: deps.embeddingModel, embeddingVersion: deps.embeddingVersion,
         limitDefault: searchConfig.limit_default,
         limitMax: searchConfig.limit_max,
         overfetchMultiplier: searchConfig.overfetch_multiplier,
         overfetchCap: searchConfig.overfetch_cap,
         rrfK: searchConfig.rrf_k,
-    };
+    });
 
+    // --explain's fan-out output is each vault's own summary-line-then-table block printed in
+    // sequence (S006/S009) — never a merged summary, since RRF/BM25/cosine are corpus-relative.
     if (values.explain) {
-        const explained = await explainSearch(deps.db, searchOptions);
-        return {
-            stdout: values.json ? formatJson(explained) : formatExplain(explained),
-            stderr: '',
-            exitCode: 0,
-        };
+        const blocks = [];
+        for (const v of vaults) {
+            const db = openCliDb(deps, v.dbPath);
+            const explained = await explainSearch(db, optionsFor(v.path));
+            const rendered = values.json ? formatJson(explained) : formatExplain(explained);
+            blocks.push(fannedOut ? `vault: ${v.name}\n${rendered}` : rendered);
+        }
+        return { stdout: blocks.join('\n'), stderr: '', exitCode: 0 };
     }
 
-    const results = await search(deps.db, searchOptions);
-    const stdout = values.json ? formatJson(results) : formatSearchTable(results, values.mode, { align: true });
+    let allResults = [];
+    for (const v of vaults) {
+        const db = openCliDb(deps, v.dbPath);
+        const results = await search(db, optionsFor(v.path));
+        allResults = allResults.concat(fannedOut ? results.map((r) => ({ ...r, vault: v.name })) : results);
+    }
+
+    const stdout = values.json
+        ? formatJson(allResults)
+        : formatSearchTable(allResults, values.mode, { align: true, showVault: fannedOut });
     return { stdout, stderr: '', exitCode: 0 };
 }
 
@@ -201,19 +266,29 @@ export async function runGrep(args, deps) {
             note: { type: 'string' },
             json: { type: 'boolean', default: false },
             content: { type: 'boolean', default: false },
+            ...VAULT_FLAG_OPTION,
         },
     });
     const pattern = positionals[0];
     const { grep: grepConfig } = resolveConfig(deps);
-    const results = grep(deps.vaultRoot, pattern, {
-        regex: values.regex,
-        noteTitle: values.note ?? null,
-        lineMatchCap: grepConfig.line_match_cap,
-        db: deps.db ?? null,
-    });
+    const vaults = resolveCliVaultsForQuery(deps, values.vault);
+    const fannedOut = vaults.length > 1;
+
+    let allResults = [];
+    for (const v of vaults) {
+        const db = optionalCliDb(deps, v.dbPath);
+        const results = grep(v.path, pattern, {
+            regex: values.regex,
+            noteTitle: values.note ?? null,
+            lineMatchCap: grepConfig.line_match_cap,
+            db,
+        });
+        allResults = allResults.concat(fannedOut ? results.map((r) => ({ ...r, vault: v.name })) : results);
+    }
 
     if (values.json) {
-        const mapped = results.map((r) => ({
+        const mapped = allResults.map((r) => ({
+            ...(r.vault !== undefined ? { vault: r.vault } : {}),
             note_title: r.noteTitle,
             file_line_count: r.fileLineCount,
             total_match_count: r.totalMatchCount,
@@ -226,7 +301,7 @@ export async function runGrep(args, deps) {
     }
 
     return {
-        stdout: formatGrepTable(results, { includeText: values.content, align: true }),
+        stdout: formatGrepTable(allResults, { includeText: values.content, align: true, showVault: fannedOut }),
         stderr: '',
         exitCode: 0,
     };
@@ -235,8 +310,10 @@ export async function runGrep(args, deps) {
 registerCommand('grep', runGrep);
 
 async function runTagsList(args, deps) {
-    const { values } = parseArgs({ args, options: { json: { type: 'boolean', default: false } } });
-    const tags = tagList(deps.db);
+    const { values } = parseArgs({ args, options: { json: { type: 'boolean', default: false }, ...VAULT_FLAG_OPTION } });
+    const vault = resolveCliVault(deps, values.vault);
+    const db = openCliDb(deps, vault.dbPath);
+    const tags = tagList(db);
 
     if (values.json) {
         const mapped = tags.map((t) => ({ tag: t.tag, notes_with_tag: t.notesWithTag }));
@@ -248,20 +325,29 @@ async function runTagsList(args, deps) {
 
 async function runTagsNotes(args, deps) {
     const { values, positionals } = parseArgs({
-        args, allowPositionals: true, options: { json: { type: 'boolean', default: false } },
+        args, allowPositionals: true, options: { json: { type: 'boolean', default: false }, ...VAULT_FLAG_OPTION },
     });
     const tagName = positionals[0];
-    const notes = tagNotes(deps.db, tagName, { vaultRoot: deps.vaultRoot });
+    const vaults = resolveCliVaultsForQuery(deps, values.vault);
+    const fannedOut = vaults.length > 1;
+
+    let notes = [];
+    for (const v of vaults) {
+        const db = openCliDb(deps, v.dbPath);
+        const result = tagNotes(db, tagName, { vaultRoot: v.path });
+        notes = notes.concat(fannedOut ? result.map((n) => ({ ...n, vault: v.name })) : result);
+    }
 
     if (values.json) {
         const mapped = notes.map((n) => ({
+            ...(n.vault !== undefined ? { vault: n.vault } : {}),
             note_title: n.noteTitle, file_line_count: n.fileLineCount,
             ...(n.readonly ? { readonly: true } : {}),
         }));
         return { stdout: formatJson(mapped), stderr: '', exitCode: 0 };
     }
 
-    return { stdout: formatTagNotesTable(notes, { align: true }), stderr: '', exitCode: 0 };
+    return { stdout: formatTagNotesTable(notes, { align: true, showVault: fannedOut }), stderr: '', exitCode: 0 };
 }
 
 export async function runTags(args, deps) {
@@ -326,8 +412,10 @@ export function parseFilterString(raw) {
 }
 
 async function runMetadataKeys(args, deps) {
-    const { values } = parseArgs({ args, options: { json: { type: 'boolean', default: false } } });
-    const keys = metadataKeys(deps.db);
+    const { values } = parseArgs({ args, options: { json: { type: 'boolean', default: false }, ...VAULT_FLAG_OPTION } });
+    const vault = resolveCliVault(deps, values.vault);
+    const db = openCliDb(deps, vault.dbPath);
+    const keys = metadataKeys(db);
 
     if (values.json) {
         const mapped = keys.map((k) => (
@@ -348,6 +436,7 @@ async function runMetadataQuery(args, deps) {
             missing: { type: 'string', multiple: true, default: [] },
             match: { type: 'string', default: 'all' },
             json: { type: 'boolean', default: false },
+            ...VAULT_FLAG_OPTION,
         },
     });
 
@@ -356,17 +445,26 @@ async function runMetadataQuery(args, deps) {
         ...values.exists.map((key) => ({ key, op: 'exists' })),
         ...values.missing.map((key) => ({ key, op: 'exists', negate: true })),
     ];
-    const notes = metadataQuery(deps.db, { filters, match: values.match, vaultRoot: deps.vaultRoot });
+    const vaults = resolveCliVaultsForQuery(deps, values.vault);
+    const fannedOut = vaults.length > 1;
+
+    let notes = [];
+    for (const v of vaults) {
+        const db = openCliDb(deps, v.dbPath);
+        const result = metadataQuery(db, { filters, match: values.match, vaultRoot: v.path });
+        notes = notes.concat(fannedOut ? result.map((n) => ({ ...n, vault: v.name })) : result);
+    }
 
     if (values.json) {
         const mapped = notes.map((n) => ({
+            ...(n.vault !== undefined ? { vault: n.vault } : {}),
             note_title: n.noteTitle, file_line_count: n.fileLineCount,
             ...(n.readonly ? { readonly: true } : {}),
         }));
         return { stdout: formatJson(mapped), stderr: '', exitCode: 0 };
     }
 
-    return { stdout: formatTagNotesTable(notes, { align: true }), stderr: '', exitCode: 0 };
+    return { stdout: formatTagNotesTable(notes, { align: true, showVault: fannedOut }), stderr: '', exitCode: 0 };
 }
 
 export async function runMetadata(args, deps) {
@@ -389,10 +487,12 @@ registerCommand('metadata', runMetadata);
 
 async function runLinksTitle(args, deps) {
     const { values, positionals } = parseArgs({
-        args, allowPositionals: true, options: { json: { type: 'boolean', default: false } },
+        args, allowPositionals: true, options: { json: { type: 'boolean', default: false }, ...VAULT_FLAG_OPTION },
     });
     const title = positionals[0];
-    const { backlinks, links_out: linksOut } = noteRead(deps.vaultRoot, title, { db: deps.db ?? null });
+    const vault = resolveCliVault(deps, values.vault);
+    const db = optionalCliDb(deps, vault.dbPath);
+    const { backlinks, links_out: linksOut } = noteRead(vault.path, title, { db });
 
     if (values.json) {
         return { stdout: formatJson({ backlinks, links_out: linksOut }), stderr: '', exitCode: 0 };
@@ -400,40 +500,47 @@ async function runLinksTitle(args, deps) {
     return {
         stdout: formatLinksTable(
             { backlinks, links_out: linksOut },
-            { align: true, readonlyMatcher: readonlyMatcherFor(deps.vaultRoot) },
+            { align: true, readonlyMatcher: readonlyMatcherFor(vault.path) },
         ),
         stderr: '',
         exitCode: 0,
     };
 }
 
-// deps.vaultRoot is always set on a real CLI invocation (buildRealDeps), but links broken has
-// historically needed only db — stay tolerant of a missing vaultRoot (e.g. a caller/test that only
-// cares about the db-backed broken-link listing) rather than crashing on it, same additive-only
-// posture as every other optional readonly hookup in S015.
+// A resolved vault path is always set on a real CLI invocation, but links broken has historically
+// needed only db — stay tolerant of a missing vaultRoot (e.g. a caller/test that only cares about
+// the db-backed broken-link listing) rather than crashing on it, same additive-only posture as
+// every other optional readonly hookup in S015.
 function readonlyMatcherFor(vaultRoot) {
     return vaultRoot ? loadReadonlyMatcher(vaultRoot) : null;
 }
 
 async function runLinksBroken(args, deps) {
-    const { values } = parseArgs({ args, options: { json: { type: 'boolean', default: false } } });
-    const broken = getBrokenLinks(deps.db);
-    const readonlyMatcher = readonlyMatcherFor(deps.vaultRoot);
+    const { values } = parseArgs({ args, options: { json: { type: 'boolean', default: false }, ...VAULT_FLAG_OPTION } });
+    const vaults = resolveCliVaultsForQuery(deps, values.vault);
+    const fannedOut = vaults.length > 1;
+
+    let broken = [];
+    for (const v of vaults) {
+        const db = openCliDb(deps, v.dbPath);
+        const readonlyMatcher = readonlyMatcherFor(v.path);
+        const result = getBrokenLinks(db).map((b) => ({
+            ...b,
+            readonly: readonlyMatcher ? checkReadonly(readonlyMatcher, `${b.sourceTitle}.md`).readonly : false,
+        }));
+        broken = broken.concat(fannedOut ? result.map((b) => ({ ...b, vault: v.name })) : result);
+    }
 
     if (values.json) {
         const mapped = broken.map((b) => ({
+            ...(b.vault !== undefined ? { vault: b.vault } : {}),
             note_title: b.sourceTitle,
             broken_target: b.targetTitle,
-            ...(readonlyMatcher && checkReadonly(readonlyMatcher, `${b.sourceTitle}.md`).readonly
-                ? { readonly: true } : {}),
+            ...(b.readonly ? { readonly: true } : {}),
         }));
         return { stdout: formatJson(mapped), stderr: '', exitCode: 0 };
     }
-    return {
-        stdout: formatBrokenLinksTable(broken, { align: true, readonlyMatcher }),
-        stderr: '',
-        exitCode: 0,
-    };
+    return { stdout: formatBrokenLinksTable(broken, { align: true, showVault: fannedOut }), stderr: '', exitCode: 0 };
 }
 
 export async function runLinks(args, deps) {
@@ -479,17 +586,20 @@ export async function runRead(args, deps) {
             end: { type: 'string' },
             raw: { type: 'boolean', default: false },
             json: { type: 'boolean', default: false },
+            ...VAULT_FLAG_OPTION,
         },
     });
     const title = positionals[0];
+    const vault = resolveCliVault(deps, values.vault);
+    const db = optionalCliDb(deps, vault.dbPath);
 
     if (values.raw) {
-        return { stdout: readRawNoteBytes(deps.vaultRoot, title, deps.db ?? null), stderr: '', exitCode: 0 };
+        return { stdout: readRawNoteBytes(vault.path, title, db), stderr: '', exitCode: 0 };
     }
 
     const startLine = values.start !== undefined ? Number(values.start) : undefined;
     const endLine = values.end !== undefined ? Number(values.end) : undefined;
-    const result = noteRead(deps.vaultRoot, title, { startLine, endLine, db: deps.db ?? null });
+    const result = noteRead(vault.path, title, { startLine, endLine, db });
 
     if (values.json) {
         return { stdout: formatJson(result), stderr: '', exitCode: 0 };
@@ -535,23 +645,28 @@ export async function runWrite(args, deps) {
             hash: { type: 'string' },
             metadata: { type: 'string' },
             content: { type: 'string' },
+            ...VAULT_FLAG_OPTION,
         },
     });
     const title = positionals[0];
     const metadata = parseMetadataFlag(values.metadata);
     const content = values.content ?? await readStdinContent(deps.stdin ?? process.stdin);
+    const vault = resolveCliVault(deps, values.vault);
 
     try {
         const { notes: notesConfig } = resolveConfig(deps);
-        const result = noteWrite(deps.vaultRoot, title, {
+        const result = noteWrite(vault.path, title, {
             hash: values.hash ?? null, metadata, content,
             sizeDropThreshold: notesConfig.size_drop_threshold,
         });
-        logAudit(deps.auditLogger, { tool: 'write', noteTitle: title, source: 'cli', outcome: 'success' });
+        logAudit(deps.auditLogger, {
+            tool: 'write', noteTitle: title, source: 'cli', outcome: 'success', vault: vault.name,
+        });
         return { stdout: formatJson(result), stderr: '', exitCode: 0 };
     } catch (err) {
         logAudit(deps.auditLogger, {
             tool: 'write', noteTitle: title, source: 'cli', outcome: 'error', errorMessage: err.message,
+            vault: vault.name,
         });
         throw err;
     }
@@ -568,22 +683,27 @@ export async function runEdit(args, deps) {
             old: { type: 'string' },
             new: { type: 'string' },
             metadata: { type: 'string' },
+            ...VAULT_FLAG_OPTION,
         },
     });
     const title = positionals[0];
     const metadata = parseMetadataFlag(values.metadata);
+    const vault = resolveCliVault(deps, values.vault);
 
     try {
         const { notes: notesConfig } = resolveConfig(deps);
-        const result = noteEdit(deps.vaultRoot, title, {
+        const result = noteEdit(vault.path, title, {
             hash: values.hash, oldTxt: values.old, newTxt: values.new, metadata,
             sizeDropThreshold: notesConfig.size_drop_threshold,
         });
-        logAudit(deps.auditLogger, { tool: 'edit', noteTitle: title, source: 'cli', outcome: 'success' });
+        logAudit(deps.auditLogger, {
+            tool: 'edit', noteTitle: title, source: 'cli', outcome: 'success', vault: vault.name,
+        });
         return { stdout: formatJson(result), stderr: '', exitCode: 0 };
     } catch (err) {
         logAudit(deps.auditLogger, {
             tool: 'edit', noteTitle: title, source: 'cli', outcome: 'error', errorMessage: err.message,
+            vault: vault.name,
         });
         throw err;
     }
@@ -595,18 +715,22 @@ export async function runAppend(args, deps) {
     const { values, positionals } = parseArgs({
         args,
         allowPositionals: true,
-        options: { hash: { type: 'string' }, content: { type: 'string' } },
+        options: { hash: { type: 'string' }, content: { type: 'string' }, ...VAULT_FLAG_OPTION },
     });
     const title = positionals[0];
     const content = values.content ?? await readStdinContent(deps.stdin ?? process.stdin);
+    const vault = resolveCliVault(deps, values.vault);
 
     try {
-        const result = noteAppend(deps.vaultRoot, title, values.hash ?? null, content);
-        logAudit(deps.auditLogger, { tool: 'append', noteTitle: title, source: 'cli', outcome: 'success' });
+        const result = noteAppend(vault.path, title, values.hash ?? null, content);
+        logAudit(deps.auditLogger, {
+            tool: 'append', noteTitle: title, source: 'cli', outcome: 'success', vault: vault.name,
+        });
         return { stdout: formatJson(result), stderr: '', exitCode: 0 };
     } catch (err) {
         logAudit(deps.auditLogger, {
             tool: 'append', noteTitle: title, source: 'cli', outcome: 'error', errorMessage: err.message,
+            vault: vault.name,
         });
         throw err;
     }
@@ -618,21 +742,26 @@ export async function runRename(args, deps) {
     const { values, positionals } = parseArgs({
         args,
         allowPositionals: true,
-        options: { hash: { type: 'string' } },
+        options: { hash: { type: 'string' }, ...VAULT_FLAG_OPTION },
     });
     const [ oldTitle, newTitle ] = positionals;
+    const vault = resolveCliVault(deps, values.vault);
+    const db = optionalCliDb(deps, vault.dbPath);
 
     try {
-        // Passes deps.db (unlike this task's original literal spec draft) so the search index is
-        // updated in place immediately — noteRename's write-through db param exists specifically
-        // to avoid a rename briefly disappearing from search while waiting on the daemon's fswatch
-        // loop to notice the file move.
-        const result = noteRename(deps.vaultRoot, oldTitle, newTitle, values.hash ?? null, deps.db ?? null);
-        logAudit(deps.auditLogger, { tool: 'rename', noteTitle: newTitle, source: 'cli', outcome: 'success' });
+        // Passes a freshly-opened db (unlike this task's original literal spec draft) so the search
+        // index is updated in place immediately — noteRename's write-through db param exists
+        // specifically to avoid a rename briefly disappearing from search while waiting on the
+        // daemon's fswatch loop to notice the file move.
+        const result = noteRename(vault.path, oldTitle, newTitle, values.hash ?? null, db);
+        logAudit(deps.auditLogger, {
+            tool: 'rename', noteTitle: newTitle, source: 'cli', outcome: 'success', vault: vault.name,
+        });
         return { stdout: formatJson(result), stderr: '', exitCode: 0 };
     } catch (err) {
         logAudit(deps.auditLogger, {
             tool: 'rename', noteTitle: newTitle, source: 'cli', outcome: 'error', errorMessage: err.message,
+            vault: vault.name,
         });
         throw err;
     }
@@ -652,45 +781,48 @@ export async function runAttachmentRead(args, deps) {
             raw: { type: 'boolean', default: false },
             metadata: { type: 'boolean', default: false },
             json: { type: 'boolean', default: false },
+            ...VAULT_FLAG_OPTION,
         },
     });
     const path = positionals[0];
     const { attachments: attachmentsConfig } = resolveConfig(deps);
+    const vault = resolveCliVault(deps, values.vault);
 
     if (values.metadata || values.json) {
-        const result = await readAttachment(deps.vaultRoot, path, { includeContent: false });
+        const result = await readAttachment(vault.path, path, { includeContent: false });
         return { stdout: formatJson(result), stderr: '', exitCode: 0 };
     }
 
     if (values.raw) {
-        const result = await readAttachment(deps.vaultRoot, path, {
+        const result = await readAttachment(vault.path, path, {
             includeContent: true, maxReadBytes: attachmentsConfig.max_read_bytes,
         });
         return { stdout: result.content, stderr: '', exitCode: 0 };
     }
 
-    const filePath = resolveAttachmentPath(deps.vaultRoot, path);
+    const filePath = resolveAttachmentPath(vault.path, path);
     (deps.openAttachment ?? defaultOpenAttachment)(filePath);
     return { stdout: `opened ${path}\n`, stderr: '', exitCode: 0 };
 }
 
 export async function runAttachmentWrite(args, deps) {
-    const { positionals } = parseArgs({ args, allowPositionals: true, options: {} });
+    const { values, positionals } = parseArgs({ args, allowPositionals: true, options: { ...VAULT_FLAG_OPTION } });
     const [ path, localFile ] = positionals;
+    const vault = resolveCliVault(deps, values.vault);
 
     try {
         const buffer = localFile !== undefined
             ? readFileSync(localFile)
             : await readStdinBytes(deps.stdin ?? process.stdin);
-        const result = writeAttachment(deps.vaultRoot, path, buffer);
+        const result = writeAttachment(vault.path, path, buffer);
         logAudit(deps.auditLogger, {
-            tool: 'attachment_write', attachmentPath: path, source: 'cli', outcome: 'success',
+            tool: 'attachment_write', attachmentPath: path, source: 'cli', outcome: 'success', vault: vault.name,
         });
         return { stdout: formatJson(result), stderr: '', exitCode: 0 };
     } catch (err) {
         logAudit(deps.auditLogger, {
             tool: 'attachment_write', attachmentPath: path, source: 'cli', outcome: 'error',
-            errorMessage: err.message,
+            errorMessage: err.message, vault: vault.name,
         });
         throw err;
     }
@@ -713,10 +845,22 @@ export async function runAttachment(args, deps) {
 registerCommand('attachment', runAttachment);
 
 export async function runStats(args, deps) {
-    const { values } = parseArgs({ args, options: { json: { type: 'boolean', default: false } } });
-    const stats = computeStats(deps.db, deps.dbPath, deps.embeddingModel, deps.embeddingVersion);
+    const { values } = parseArgs({ args, options: { json: { type: 'boolean', default: false }, ...VAULT_FLAG_OPTION } });
+    const vault = resolveCliVault(deps, values.vault);
+    const dbPath = deps.dbPath ?? vault.dbPath;
+    const db = openCliDb(deps, dbPath);
+    const stats = computeStats(db, dbPath, deps.embeddingModel, deps.embeddingVersion);
     const daemonRunning = await checkDaemonRunning(deps.socketPath);
     return { stdout: formatStats(stats, { json: values.json, daemonRunning }), stderr: '', exitCode: 0 };
+}
+
+export async function runVaults(args, deps) {
+    const { values } = parseArgs({ args, options: { json: { type: 'boolean', default: false } } });
+    const vaults = listVaults(resolveConfig(deps));
+    if (values.json) {
+        return { stdout: formatJson(vaults), stderr: '', exitCode: 0 };
+    }
+    return { stdout: formatVaultsTable(vaults, { align: true }), stderr: '', exitCode: 0 };
 }
 
 registerCommand('reindex', runReindexCommand);
@@ -724,17 +868,12 @@ registerCommand('daemon', runDaemonCommand);
 registerCommand('stats', runStats);
 registerCommand('logs', runLogsCommand);
 registerCommand('vectors', runVectorsCommand);
+registerCommand('vaults', runVaults);
 
 function buildRealDeps() {
     const config = loadConfig();
-    const vaultRoot = resolveVaultRoot(config);
-    const dbPath = resolveDbPath(config);
-    const { db } = openDb(dbPath);
     const socketPath = defaultSocketPath();
     return {
-        vaultRoot,
-        dbPath,
-        db,
         config,
         // The daemon is the only process that ever loads the embedding model (S005) — this asks it
         // over IPC rather than loading a second copy in this CLI process.

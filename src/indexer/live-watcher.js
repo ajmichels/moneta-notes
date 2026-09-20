@@ -71,11 +71,16 @@ export function createDebouncer(onSettle, options = {}) {
 // function below, built once per createFsWatcher call.
 function registerSymlinkDir(ctx, aliasPath, realpath) {
     ctx.registry.set(aliasPath, realpath);
-    getContextLogger().info('symlinked directory registered', { alias_path: aliasPath, realpath });
+    getContextLogger().info('symlinked directory registered', {
+        vault: ctx.vaultName, alias_path: aliasPath, realpath,
+    });
     ctx.symlinkWatchers.set(aliasPath, createResilientWatcher(
         join(ctx.vaultRoot, aliasPath),
         (rawAbsPath) => acceptRawPath(ctx, rawAbsPath, (p) => rewriteEventPath(p, ctx.registry)),
-        { backoffSchedule: ctx.backoffSchedule, isStillValid: () => statOrNull(realpath)?.isDirectory() ?? false },
+        {
+            backoffSchedule: ctx.backoffSchedule, isStillValid: () => statOrNull(realpath)?.isDirectory() ?? false,
+            vaultName: ctx.vaultName,
+        },
     ));
 }
 
@@ -89,7 +94,9 @@ function teardownAlias(ctx, aliasPath) {
         }
     }
     const deletedCount = deleteNotesByPathPrefix(ctx.db, aliasPath);
-    getContextLogger().info('symlinked directory removed', { alias_path: aliasPath, notes_deleted_count: deletedCount });
+    getContextLogger().info('symlinked directory removed', {
+        vault: ctx.vaultName, alias_path: aliasPath, notes_deleted_count: deletedCount,
+    });
 }
 
 function acceptRawPath(ctx, rawAbsPath, toRelative) {
@@ -98,7 +105,9 @@ function acceptRawPath(ctx, rawAbsPath, toRelative) {
     }
     const relativePath = toRelative(rawAbsPath);
     if (relativePath === null) {
-        getContextLogger().error('fswatch event path did not resolve to a known path', { path: rawAbsPath });
+        getContextLogger().error('fswatch event path did not resolve to a known path', {
+            vault: ctx.vaultName, path: rawAbsPath,
+        });
         return;
     }
     if (!isDotPath(relativePath) && !ctx.ignoreMatcher.ignores(relativePath)) {
@@ -161,10 +170,10 @@ function handleSettledPath(ctx, relativePath) {
 }
 
 export function createFsWatcher(vaultRoot, db, {
-    debounceMs, ignoreMatcher = ignore(), backoffSchedule = DEFAULT_BACKOFF_SCHEDULE_MS,
+    debounceMs, ignoreMatcher = ignore(), backoffSchedule = DEFAULT_BACKOFF_SCHEDULE_MS, vaultName = null,
 } = {}) {
     const ctx = {
-        vaultRoot, db, ignoreMatcher, backoffSchedule, stopped: false, debouncer: null,
+        vaultRoot, db, ignoreMatcher, backoffSchedule, vaultName, stopped: false, debouncer: null,
         registry: new Map(), symlinkWatchers: new Map(),
     };
 
@@ -191,7 +200,7 @@ export function createFsWatcher(vaultRoot, db, {
     const mainWatcher = createResilientWatcher(
         vaultRoot,
         (rawAbsPath) => acceptRawPath(ctx, rawAbsPath, (p) => toVaultRelativePath(canonicalVaultRoot, p)),
-        { backoffSchedule },
+        { backoffSchedule, vaultName },
     );
 
     return {

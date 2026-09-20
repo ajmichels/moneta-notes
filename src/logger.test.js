@@ -134,6 +134,22 @@ describe('logAudit', () => {
         expect(line).not.toContain('error_message');
     });
 
+    it('renders a given vault field, and omits it entirely when absent (S009)', async () => {
+        const logDir = makeTempLogDir();
+        const auditLogger = getAuditLogger(logDir);
+
+        await logAudit(auditLogger, {
+            tool: 'write', noteTitle: 'Test.md', source: 'cli', outcome: 'success', vault: 'dnd',
+        });
+        await logAudit(auditLogger, {
+            tool: 'list_vaults', source: 'mcp', reason: 'listing', outcome: 'success',
+        });
+
+        const [ withVault, withoutVault ] = readFileSync(join(logDir, 'audit.log'), 'utf8').trim().split('\n');
+        expect(withVault).toContain('vault="dnd"');
+        expect(withoutVault).not.toContain('vault=');
+    });
+
     it('writes at info level even when outcome is "error", including the error message', async () => {
         const logDir = makeTempLogDir();
         const auditLogger = getAuditLogger(logDir);

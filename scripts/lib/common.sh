@@ -21,3 +21,18 @@ resolve_path() {
 escape_toml_string() {
     printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
+
+# Delegates to src/config.js's own slugifyVaultName/VAULT_NAME_PATTERN (S009) rather than
+# reimplementing the rule in bash — one definition of "how a vault name is derived/validated",
+# shared by the installer and loadConfig()'s own legacy-flat-config normalization.
+slugify_vault_name() {
+    "$NODE_BIN" -e "
+import('$REPO_ROOT/src/config.js').then((m) => { process.stdout.write(m.slugifyVaultName(process.argv[1])); });
+" "$1"
+}
+
+is_valid_vault_name() {
+    "$NODE_BIN" -e "
+import('$REPO_ROOT/src/config.js').then((m) => { process.exit(m.VAULT_NAME_PATTERN.test(process.argv[1]) ? 0 : 1); });
+" "$1"
+}

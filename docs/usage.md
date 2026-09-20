@@ -59,6 +59,42 @@ rewrite (see below) is still allowed to fix a `[[wikilink]]` inside a read-only 
 renamed note — leaving that link dangling would be worse than the cascade touching it. See
 [S015](specs/S015-readonly-paths.md) for the full design.
 
+## Multi-vault (`--vault`)
+
+Every vault-scoped command below accepts `--vault=<name>`, naming one of the vaults configured under
+`[vaults.<name>]` in `config.toml` (see [Configuration](configuration.md#vaults--vaultsname-and-default_vault)).
+Omitted, it resolves via `default_vault` if set, or the sole configured vault if there's only one — the
+common case, needing no flag at all. Run `mnotes vaults` to list what's configured.
+
+**Cross-vault fan-out.** `search`, `grep`, `tags notes`, `metadata query`, and `links broken` are the
+exception: with `--vault` omitted and 2+ vaults configured, they fan out across **every** configured
+vault instead of erroring, tagging each row with a `vault` column (present only in this fanned-out
+shape — an explicit `--vault`, or a single-vault setup, never adds it) and grouping output by vault
+(each vault's own ranked block, `--limit` applied per vault — there's no cross-vault score/rank merge,
+since BM25/cosine/RRF are all corpus-relative). Every other vault-scoped command (`read`, the mutating
+commands, `stats`, `tags list`, `metadata keys`) has no such fallback — with 2+ vaults configured and no
+`default_vault`, it's a hard error naming the configured vaults, since there's genuinely nothing to
+default a single-note/single-corpus operation to.
+
+```sh
+mnotes read "Weekly Notes/2026-W32" --vault=dnd
+mnotes search "goblin ambush"                    # fans out across every vault if 2+ are configured
+mnotes search "goblin ambush" --vault=dnd        # scoped to one vault, same output shape as a
+                                                  # single-vault install
+mnotes vaults                                    # list configured vaults (name, description, default)
+```
+
+### `mnotes vaults`
+
+```sh
+mnotes vaults
+mnotes vaults --json
+```
+
+Lists every configured vault: `name | description | default`. Never includes the on-disk path — a
+caller tells vaults apart by name/description, not by where they live. No `--vault` flag (there's
+nothing to scope to).
+
 ## Commands
 
 ### `mnotes search <query>`
@@ -69,7 +105,9 @@ mnotes search "vector search" --mode=semantic --limit=5
 mnotes search "index_queue retry" --explain
 ```
 
-Flags: `--mode=hybrid|fulltext|semantic` (default `hybrid`), `--limit=N`, `--explain`, `--json`.
+Flags: `--mode=hybrid|fulltext|semantic` (default `hybrid`), `--limit=N`, `--explain`, `--json`,
+`--vault=<name>` (omitted with 2+ vaults configured, fans out across all of them — see
+[Multi-vault](#multi-vault---vault) above).
 
 `semantic`/`hybrid` mode embeds the query by asking the indexing daemon over its IPC socket (S005) —
 neither the CLI nor the MCP server ever loads the embedding model itself, so this is a **hard error**
@@ -91,7 +129,8 @@ mnotes grep "deadline" --note="Weekly Notes/2026-W32" --content
 
 Flags: `--regex`, `--note=<title>` (restrict to one note — resolves the same way `read`'s `<title>`
 does, see below), `--content` (show matched line text inline — CLI-only; the MCP tool always omits it
-for context-budget reasons), `--json`.
+for context-budget reasons), `--json`, `--vault=<name>` (omitted with 2+ vaults configured, fans out —
+see [Multi-vault](#multi-vault---vault) above).
 
 A whole-vault `grep` (no `--note`) skips any path matched by a `.mnotesignore` file at the vault root —
 a plain-text, gitignore-syntax file (comments, negation, `Templates/`-style directory patterns all
@@ -106,7 +145,8 @@ mnotes tags list
 mnotes tags notes "project/moneta-notes"
 ```
 
-Flag: `--json`.
+Flags: `--json`, `--vault=<name>` — `list` requires it when 2+ vaults are configured (no fan-out);
+`notes` fans out across every vault when omitted, same as `search`/`grep` above.
 
 ### `mnotes metadata keys` / `mnotes metadata query`
 
@@ -153,7 +193,8 @@ resolves through the exact same exact-or-nested-child, case-insensitive match `t
 `tags=project` also matches a note tagged `project/api-migration`.
 
 Flags: `--filter=...` (repeatable), `--exists=key`/`--missing=key` (repeatable), `--match=all|any`
-(default `all`), `--json`.
+(default `all`), `--json`, `--vault=<name>` — `keys` requires it when 2+ vaults are configured (no
+fan-out); `query` fans out across every vault when omitted, same as `search`/`grep` above.
 
 ### `mnotes links <title>` / `mnotes links broken`
 
@@ -171,7 +212,9 @@ than one note" — treated the same, since neither has an obvious single note to
 index-backed (current as of each note's last reindex), and `broken` is a reserved subcommand keyword
 (a note literally titled "broken" isn't reachable via this command).
 
-Flag: `--json`.
+Flags: `--json`, `--vault=<name>` — `<title>` requires it when 2+ vaults are configured (no fan-out,
+it's about one specific note); `broken` fans out across every vault when omitted, same as
+`search`/`grep` above.
 
 ### `mnotes read <title>`
 
@@ -187,6 +230,9 @@ mnotes read "Weekly Notes/2026-W32" --json | jq -r .content_hash
 | default | Note body only, frontmatter stripped | Parsed `metadata` object, as pretty-printed JSON |
 | `--raw` | Exact file bytes as stored (frontmatter included), unmodified | Nothing |
 | `--json` | Full structured JSON (`title`, `content_hash`, `metadata`, `content`, line info, `backlinks`, `links_out`) | Nothing |
+
+Also accepts `--vault=<name>` — required when 2+ vaults are configured and `default_vault` isn't set
+(see [Multi-vault](#multi-vault---vault) above).
 
 In default mode, the metadata on stderr is written before the body on stdout, so it appears first when
 both streams land in the same terminal.
@@ -258,7 +304,8 @@ cat draft.md | mnotes write "Weekly Notes/2026-W33" --hash="$hash"
 
 `edit`'s `--old`/`--new` are always flags (not stdin-eligible — a single stdin stream can't carry two
 separate values). All four accept `--metadata='{...}'` to set structured frontmatter (never raw YAML
-string manipulation).
+string manipulation), and all four accept `--vault=<name>` — required when 2+ vaults are configured
+and `default_vault` isn't set.
 
 These commands are logged to `audit.log` (`source: cli`, no `reason` — see
 [Process Management](process-management.md#logs)) but don't wait for reindexing to complete; the
@@ -293,16 +340,22 @@ rationale: there's no diffable text content for a hash guard to protect). It als
 matches a pattern in `.mnotesreadonly` (see [Read-only paths](#read-only-paths) above); `--metadata`/
 `--json` on the read side includes a `readonly` field when the attachment is protected.
 
+Both accept `--vault=<name>` — required when 2+ vaults are configured and `default_vault` isn't set.
+
 ### `mnotes reindex [title]`
 
 ```sh
 mnotes reindex                              # full reindex
 mnotes reindex "Weekly Notes/2026-W32"      # single note, streams attempt/retry progress
+mnotes reindex --vault=dnd                  # scope to one configured vault
 ```
 
 Talks to the *running* daemon over its Unix socket — hard error ("could not connect to the daemon") if
 the daemon isn't up. Idempotent: running it twice with no intervening vault changes leaves the index in
 the same state both times. See [Process Management](process-management.md) if this fails.
+
+Accepts `--vault=<name>` — required when 2+ vaults are configured and `default_vault` isn't set (no
+fan-out; a reindex always targets one vault's own queue).
 
 A full `mnotes reindex` (no title) also re-reads `.mnotesignore` and purges any already-indexed note
 that now matches it — the same cleanup a daemon restart does at startup. Add or edit `.mnotesignore`,
@@ -327,7 +380,9 @@ mnotes stats --json
 Note/tag/link counts (including `broken_link_count` — see `mnotes links broken` above for the full
 listing), total/average note length, embedding model + version, count of notes pending re-embedding,
 index file size, last full reindex time, daemon status, and current queue depth. Pure DB
-reads plus a best-effort socket probe — never itself requires the daemon to be running.
+reads plus a best-effort socket probe — never itself requires the daemon to be running. Single-vault
+report, so it accepts `--vault=<name>` (no fan-out) — required when 2+ vaults are configured and
+`default_vault` isn't set.
 
 ### `mnotes logs`
 
@@ -348,9 +403,15 @@ mnotes logs --file=daemon.stderr              # the daemon process's own stderr,
 
 Filters/tails the audit trail (`audit.log`, [S008](specs/S008-logging.md)) by default — every MCP tool
 call and every CLI mutating command (`write`/`edit`/`append`/`rename`/`attachment write`), with `tool`,
-`source` (`mcp`/`cli`), the note title or attachment path, `query` (the `search` tool's query string,
+`source` (`mcp`/`cli`), `vault` (the vault that call targeted — blank for `list_vaults`, which has no
+single vault to name), the note title or attachment path, `query` (the `search` tool's query string,
 MCP calls only), `reason` (MCP calls only), and `outcome`. This is CLI-only, like `links`/`vectors` —
 there's no MCP equivalent.
+
+**`--vault=<name>` here is a plain equality filter, not the default-vault-fallback resolution every
+other command's `--vault` does** — omitted, it shows every vault's entries unfiltered; an unrecognized
+name isn't an error, it just matches zero rows; an entry with no `vault` field (e.g. `list_vaults`)
+never matches a given `--vault` value.
 
 `--file` selects which log file, one of seven: `audit` (default), `indexer`, `mcp-server` (S008's other
 two logger.js-written files — lifecycle/prose text, not structured per-call records), or
@@ -369,8 +430,8 @@ ignoring them.
 
 Flags: `--file=<name>` (default `audit`), `--source=mcp|cli`, `--tool=<name>`,
 `--note=<title>` (exact match against whichever identifier the entry carries — no resolution),
-`--outcome=success|error`, `--since=<30m|1h|2d|ISO-8601>`, `--limit=N` (last N matching entries),
-`--follow`, `--json`.
+`--outcome=success|error`, `--vault=<name>` (plain equality filter — see above),
+`--since=<30m|1h|2d|ISO-8601>`, `--limit=N` (last N matching entries), `--follow`, `--json`.
 
 With no `--limit`, plain `mnotes logs` prints everything matching, oldest-first — no implicit cap.
 `--follow` tails like `tail -f` (not `tail -F`: it won't pick a file back up after the log-rotator

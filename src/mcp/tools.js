@@ -6,11 +6,36 @@ import { noteRead, noteWrite, noteEdit, noteAppend, noteRename } from '../core/n
 import { readAttachment, writeAttachment } from '../core/attachments.js';
 import { openDb } from '../core/db.js';
 import { logAudit, runWithLogger } from '../logger.js';
-import { resolveConfig } from '../config.js';
+import { resolveConfig, resolveVault, resolveVaultsForQuery, listVaults } from '../config.js';
 import {
     formatSearchTable, formatGrepTable, formatTagListTable, formatTagNotesTable,
-    formatMetadataKeysTable, formatJson,
+    formatMetadataKeysTable, formatJson, formatVaultsTable,
 } from '../format.js';
+
+// A test double that already knows exactly which vault it wants (deps.vaultRoot and/or
+// deps.dbPath set directly, the pre-existing convention across this file's tests) bypasses
+// config-driven resolution entirely — real server usage never sets either (server.js stopped
+// resolving a single vaultRoot/dbPath up front), so it always resolves through deps.config plus
+// whatever `vault` argument the tool call carried.
+function hasDirectVaultDeps(deps) {
+    return deps.vaultRoot !== undefined || deps.dbPath !== undefined;
+}
+
+function resolveToolVault(deps, input) {
+    if (hasDirectVaultDeps(deps)) {
+        return { name: null, path: deps.vaultRoot, dbPath: deps.dbPath, description: null };
+    }
+    return resolveVault(deps.config, input.vault ?? null);
+}
+
+// Same bypass, for the four tools that fan out across every configured vault when `vault` is
+// omitted (S007/S009) instead of resolving to a single default.
+function resolveToolVaults(deps, input) {
+    if (hasDirectVaultDeps(deps)) {
+        return [ { name: null, path: deps.vaultRoot, dbPath: deps.dbPath, description: null } ];
+    }
+    return resolveVaultsForQuery(deps.config, input.vault ?? null).vaults;
+}
 
 // Opens a fresh connection per call rather than reusing one held for the life of the process — a
 // long-lived MCP server process was observed to stop seeing writes committed by the indexer daemon
@@ -25,10 +50,18 @@ async function withDb(dbPath, fn) {
     }
 }
 
-export async function callTool(auditLogger, mcpLogger, toolName, input, fn) {
+// `vault` may be a plain name (known up front) or a zero-arg function read *after* fn settles,
+// success or error alike — the latter lets a handler resolve its vault from inside fn (so an
+// unknown-vault error goes through the same try/catch as everything else, landing as isError: true
+// with a real logAudit call, rather than throwing out of this function uncaught) while still
+// reporting the resolved name once fn has actually set it. Unresolved (fn threw before setting it)
+// reads back whatever the getter currently returns — null, if the caller's closure never assigned
+// it before throwing.
+export async function callTool(auditLogger, mcpLogger, toolName, input, fn, { vault = null } = {}) {
     const noteTitle = input.note_title ?? input.old_title ?? null;
     const attachmentPath = input.attachment_path ?? null;
     const query = input.query ?? null;
+    const resolveVaultForLog = typeof vault === 'function' ? vault : () => vault;
     let result;
 
     try {
@@ -43,6 +76,7 @@ export async function callTool(auditLogger, mcpLogger, toolName, input, fn) {
             query,
             outcome: 'error',
             errorMessage: err.message,
+            vault: resolveVaultForLog(),
         });
         return { content: [ { type: 'text', text: err.message } ], isError: true };
     }
@@ -56,135 +90,203 @@ export async function callTool(auditLogger, mcpLogger, toolName, input, fn) {
         query,
         outcome: 'success',
         errorMessage: null,
+        vault: resolveVaultForLog(),
     });
     return { content: Array.isArray(result) ? result : [ { type: 'text', text: result } ] };
 }
 
+// Backs search/grep/tag_notes/metadata_query (S007/S009): `vaults` is already-resolved (one entry
+// for the common single-vault case, 2+ under real fan-out), `fn(vault)` returns that vault's raw
+// row array, `formatFn(allRows)` renders the final combined text once every vault has succeeded.
+// A single resolved vault behaves identically to callTool above (one logAudit call, no `vault` key
+// added to rows) — this is deliberately the one code path for both shapes, not two. A genuine
+// per-vault core/ error aborts immediately with no partial results assembled (CLAUDE.md's
+// fail-loud rule) and exactly one logAudit entry naming the vault that failed — never one per
+// vault attempted.
+// `resolveVaultsFn` is called inside the same try as everything else (unlike a pre-resolved array)
+// so an unknown explicit `vault` argument produces the normal isError: true + one error-outcome
+// logAudit, rather than throwing straight out of this function uncaught.
+export async function callToolFannedOut(auditLogger, mcpLogger, toolName, input, resolveVaultsFn, fn, formatFn) {
+    const query = input.query ?? null;
+    let vaults;
+    try {
+        vaults = resolveVaultsFn();
+    } catch (err) {
+        logAudit(auditLogger, {
+            tool: toolName, source: 'mcp', reason: input.reason, query,
+            outcome: 'error', errorMessage: err.message, vault: null,
+        });
+        return { content: [ { type: 'text', text: err.message } ], isError: true };
+    }
+    const fannedOut = vaults.length > 1;
+    let allRows = [];
+
+    for (const v of vaults) {
+        let rows;
+        try {
+            rows = await runWithLogger(mcpLogger, () => fn(v));
+        } catch (err) {
+            logAudit(auditLogger, {
+                tool: toolName, source: 'mcp', reason: input.reason, query,
+                outcome: 'error', errorMessage: err.message, vault: v.name,
+            });
+            return { content: [ { type: 'text', text: err.message } ], isError: true };
+        }
+        logAudit(auditLogger, {
+            tool: toolName, source: 'mcp', reason: input.reason, query,
+            outcome: 'success', errorMessage: null, vault: v.name,
+        });
+        allRows = allRows.concat(fannedOut ? rows.map((r) => ({ ...r, vault: v.name })) : rows);
+    }
+
+    return { content: [ { type: 'text', text: formatFn(allRows, fannedOut) } ] };
+}
+
 export async function searchTool(deps, input) {
-    const { vaultRoot, dbPath, embed, embeddingModel, embeddingVersion } = deps;
+    const { embed, embeddingModel, embeddingVersion } = deps;
     const { search: searchConfig } = resolveConfig(deps);
     const { query, mode = 'hybrid', limit = searchConfig.limit_default } = input;
 
-    return callTool(deps.auditLogger, deps.mcpLogger, 'search', input, async () => {
-        const results = await withDb(dbPath, (db) => (
-            search(db, {
-                query, mode, limit, embed, embeddingModel, embeddingVersion, vaultRoot,
-                limitDefault: searchConfig.limit_default,
-                limitMax: searchConfig.limit_max,
-                overfetchMultiplier: searchConfig.overfetch_multiplier,
-                overfetchCap: searchConfig.overfetch_cap,
-                rrfK: searchConfig.rrf_k,
-            })
-        ));
-        return formatSearchTable(results, mode);
-    });
+    return callToolFannedOut(deps.auditLogger, deps.mcpLogger, 'search', input,
+        () => resolveToolVaults(deps, input),
+        (v) => withDb(v.dbPath, (db) => search(db, {
+            query, mode, limit, embed, embeddingModel, embeddingVersion, vaultRoot: v.path,
+            limitDefault: searchConfig.limit_default,
+            limitMax: searchConfig.limit_max,
+            overfetchMultiplier: searchConfig.overfetch_multiplier,
+            overfetchCap: searchConfig.overfetch_cap,
+            rrfK: searchConfig.rrf_k,
+        })),
+        (rows, fannedOut) => formatSearchTable(rows, mode, { showVault: fannedOut }));
 }
 
 export async function grepTool(deps, input) {
-    const { vaultRoot, dbPath } = deps;
     const { grep: grepConfig } = resolveConfig(deps);
     const { pattern, regex = false, note_title: noteTitle = null } = input;
 
-    return callTool(deps.auditLogger, deps.mcpLogger, 'grep', input, async () => {
-        const runGrep = (db) => grep(vaultRoot, pattern, {
-            regex, noteTitle, lineMatchCap: grepConfig.line_match_cap, db,
-        });
-        const results = dbPath ? await withDb(dbPath, runGrep) : runGrep(null);
-        return formatGrepTable(results);
-    });
+    return callToolFannedOut(deps.auditLogger, deps.mcpLogger, 'grep', input,
+        () => resolveToolVaults(deps, input),
+        (v) => {
+            const runGrep = (db) => grep(v.path, pattern, {
+                regex, noteTitle, lineMatchCap: grepConfig.line_match_cap, db,
+            });
+            return v.dbPath ? withDb(v.dbPath, runGrep) : runGrep(null);
+        },
+        (rows, fannedOut) => formatGrepTable(rows, { showVault: fannedOut }));
 }
 
 export async function tagListTool(deps, input) {
-    const { dbPath } = deps;
+    let vault;
     return callTool(deps.auditLogger, deps.mcpLogger, 'tag_list', input,
-        async () => formatTagListTable(await withDb(dbPath, (db) => tagList(db))));
+        async () => {
+            vault = resolveToolVault(deps, input);
+            return formatTagListTable(await withDb(vault.dbPath, (db) => tagList(db)));
+        },
+        { vault: () => vault?.name ?? null });
 }
 
 export async function tagNotesTool(deps, input) {
-    const { vaultRoot, dbPath } = deps;
     const { tag } = input;
-    return callTool(deps.auditLogger, deps.mcpLogger, 'tag_notes', input,
-        async () => formatTagNotesTable(await withDb(dbPath, (db) => tagNotes(db, tag, { vaultRoot }))));
+
+    return callToolFannedOut(deps.auditLogger, deps.mcpLogger, 'tag_notes', input,
+        () => resolveToolVaults(deps, input),
+        (v) => withDb(v.dbPath, (db) => tagNotes(db, tag, { vaultRoot: v.path })),
+        (rows, fannedOut) => formatTagNotesTable(rows, { showVault: fannedOut }));
 }
 
 export async function metadataKeysTool(deps, input) {
-    const { dbPath } = deps;
+    let vault;
     return callTool(deps.auditLogger, deps.mcpLogger, 'metadata_keys', input,
-        async () => formatMetadataKeysTable(await withDb(dbPath, (db) => metadataKeys(db))));
+        async () => {
+            vault = resolveToolVault(deps, input);
+            return formatMetadataKeysTable(await withDb(vault.dbPath, (db) => metadataKeys(db)));
+        },
+        { vault: () => vault?.name ?? null });
 }
 
 export async function metadataQueryTool(deps, input) {
-    const { vaultRoot, dbPath } = deps;
     const { filters, match = 'all' } = input;
-    return callTool(deps.auditLogger, deps.mcpLogger, 'metadata_query', input, async () => (
-        formatTagNotesTable(await withDb(dbPath, (db) => metadataQuery(db, { filters, match, vaultRoot })))
-    ));
+
+    return callToolFannedOut(deps.auditLogger, deps.mcpLogger, 'metadata_query', input,
+        () => resolveToolVaults(deps, input),
+        (v) => withDb(v.dbPath, (db) => metadataQuery(db, { filters, match, vaultRoot: v.path })),
+        (rows, fannedOut) => formatTagNotesTable(rows, { showVault: fannedOut }));
 }
 
 export async function noteReadTool(deps, input) {
-    const { vaultRoot, dbPath } = deps;
     const { note_title: noteTitle, start_line: startLine, end_line: endLine } = input;
+    let vault;
 
     return callTool(deps.auditLogger, deps.mcpLogger, 'note_read', input, async () => {
-        const result = dbPath
-            ? await withDb(dbPath, (db) => noteRead(vaultRoot, noteTitle, { startLine, endLine, db }))
-            : noteRead(vaultRoot, noteTitle, { startLine, endLine });
+        vault = resolveToolVault(deps, input);
+        const result = vault.dbPath
+            ? await withDb(vault.dbPath, (db) => noteRead(vault.path, noteTitle, { startLine, endLine, db }))
+            : noteRead(vault.path, noteTitle, { startLine, endLine });
         return formatJson(result);
-    });
+    }, { vault: () => vault?.name ?? null });
 }
 
 export async function noteWriteTool(deps, input) {
-    const { vaultRoot } = deps;
     const { notes: notesConfig } = resolveConfig(deps);
     const { note_title: noteTitle, hash, metadata = null, content, force = false } = input;
+    let vault;
 
     return callTool(deps.auditLogger, deps.mcpLogger, 'note_write', input, async () => {
-        const result = noteWrite(vaultRoot, noteTitle, {
+        vault = resolveToolVault(deps, input);
+        const result = noteWrite(vault.path, noteTitle, {
             hash, metadata, content, force, sizeDropThreshold: notesConfig.size_drop_threshold,
         });
         return formatJson(result);
-    });
+    }, { vault: () => vault?.name ?? null });
 }
 
 export async function noteEditTool(deps, input) {
-    const { vaultRoot } = deps;
     const { notes: notesConfig } = resolveConfig(deps);
     const {
         note_title: noteTitle, hash, old_txt: oldTxt, new_txt: newTxt, metadata = null,
     } = input;
+    let vault;
 
     return callTool(deps.auditLogger, deps.mcpLogger, 'note_edit', input, async () => {
-        const result = noteEdit(vaultRoot, noteTitle, {
+        vault = resolveToolVault(deps, input);
+        const result = noteEdit(vault.path, noteTitle, {
             hash, oldTxt, newTxt, metadata, sizeDropThreshold: notesConfig.size_drop_threshold,
         });
         return formatJson(result);
-    });
+    }, { vault: () => vault?.name ?? null });
 }
 
 export async function noteAppendTool(deps, input) {
-    const { vaultRoot } = deps;
     const { note_title: noteTitle, hash, content } = input;
+    let vault;
 
     return callTool(deps.auditLogger, deps.mcpLogger, 'note_append', input, async () => {
-        const result = noteAppend(vaultRoot, noteTitle, hash, content);
+        vault = resolveToolVault(deps, input);
+        const result = noteAppend(vault.path, noteTitle, hash, content);
         return formatJson(result);
-    });
+    }, { vault: () => vault?.name ?? null });
 }
 
 export async function noteRenameTool(deps, input) {
-    const { vaultRoot, dbPath } = deps;
     const { old_title: oldTitle, new_title: newTitle, hash } = input;
+    let vault;
 
     return callTool(deps.auditLogger, deps.mcpLogger, 'note_rename', input, async () => {
+        vault = resolveToolVault(deps, input);
         // Passes a freshly-opened db (mirrors cli/main.js's runRename) so the search index is
         // updated in place immediately — noteRename's write-through db param exists specifically
         // to avoid a rename briefly disappearing from search while waiting on the daemon's
         // fswatch loop.
-        const result = dbPath
-            ? await withDb(dbPath, (db) => noteRename(vaultRoot, oldTitle, newTitle, hash, db))
-            : noteRename(vaultRoot, oldTitle, newTitle, hash, null);
+        const result = vault.dbPath
+            ? await withDb(vault.dbPath, (db) => noteRename(vault.path, oldTitle, newTitle, hash, db))
+            : noteRename(vault.path, oldTitle, newTitle, hash, null);
         return formatJson(result);
-    });
+    }, { vault: () => vault?.name ?? null });
+}
+
+export async function listVaultsTool(deps, input) {
+    return callTool(deps.auditLogger, deps.mcpLogger, 'list_vaults', input,
+        async () => formatVaultsTable(listVaults(resolveConfig(deps))));
 }
 
 // The Claude API's vision input only accepts these four raster formats — anything else (SVG, HEIC,
@@ -193,15 +295,16 @@ export async function noteRenameTool(deps, input) {
 const RENDERABLE_IMAGE_MIME_TYPES = new Set([ 'image/png', 'image/jpeg', 'image/gif', 'image/webp' ]);
 
 export async function attachmentReadTool(deps, input) {
-    const { vaultRoot } = deps;
     const { attachments: attachmentsConfig } = resolveConfig(deps);
     const {
         attachment_path: attachmentPath, include_content: includeContent = true,
         start_page: startPage, end_page: endPage,
     } = input;
+    let vault;
 
     return callTool(deps.auditLogger, deps.mcpLogger, 'attachment_read', input, async () => {
-        const result = await readAttachment(vaultRoot, attachmentPath, {
+        vault = resolveToolVault(deps, input);
+        const result = await readAttachment(vault.path, attachmentPath, {
             includeContent, maxReadBytes: attachmentsConfig.max_read_bytes, startPage, endPage,
         });
         const { content, ...meta } = result;
@@ -214,15 +317,16 @@ export async function attachmentReadTool(deps, input) {
             ? { type: 'image', data, mimeType: meta.mime_type }
             : { type: 'resource', resource: { uri: `attachment://${meta.path}`, mimeType: meta.mime_type, blob: data } };
         return [ metaBlock, binaryBlock ];
-    });
+    }, { vault: () => vault?.name ?? null });
 }
 
 export async function attachmentWriteTool(deps, input) {
-    const { vaultRoot } = deps;
     const { attachment_path: attachmentPath, content_base64: contentBase64 } = input;
+    let vault;
 
     return callTool(deps.auditLogger, deps.mcpLogger, 'attachment_write', input, async () => {
-        const result = writeAttachment(vaultRoot, attachmentPath, Buffer.from(contentBase64, 'base64'));
+        vault = resolveToolVault(deps, input);
+        const result = writeAttachment(vault.path, attachmentPath, Buffer.from(contentBase64, 'base64'));
         return formatJson(result);
-    });
+    }, { vault: () => vault?.name ?? null });
 }

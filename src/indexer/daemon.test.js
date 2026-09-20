@@ -874,38 +874,86 @@ describe('defaultSocketPath', () => {
     });
 });
 
+function sendAndCollect(socketPath, request) {
+    return new Promise((resolve, reject) => {
+        const received = [];
+        const client = createConnection(socketPath, () => {
+            client.write(`${JSON.stringify(request)}\n`);
+        });
+        let buffer = '';
+        client.on('data', (chunk) => {
+            buffer += chunk.toString('utf8');
+            let newlineIndex = buffer.indexOf('\n');
+            while (newlineIndex !== -1) {
+                received.push(JSON.parse(buffer.slice(0, newlineIndex)));
+                buffer = buffer.slice(newlineIndex + 1);
+                newlineIndex = buffer.indexOf('\n');
+            }
+        });
+        client.on('end', () => resolve(received));
+        client.on('error', reject);
+    });
+}
+
 describe('createIpcServer', () => {
-    it('streams per-path outcomes and a final summary for a reindex request', async () => {
+    it('streams per-path outcomes and a final summary for a reindex request naming a vault', async () => {
         const vaultRoot = makeTempVault();
         writeNote(vaultRoot, 'Socketed.md', 'note body', 1000);
         const db = makeTestDb();
         const socketDir = makeTempVault();
         const socketPath = join(socketDir, 'daemon.sock');
+        const gate = createSerialGate();
 
-        const server = createIpcServer(socketPath, vaultRoot, db, { ...baseDeps(), now: 0 }, createSerialGate());
-
-        const messages = await new Promise((resolve, reject) => {
-            const received = [];
-            const client = createConnection(socketPath, () => {
-                client.write(`${JSON.stringify({ action: 'reindex' })}\n`);
-            });
-            let buffer = '';
-            client.on('data', (chunk) => {
-                buffer += chunk.toString('utf8');
-                let newlineIndex = buffer.indexOf('\n');
-                while (newlineIndex !== -1) {
-                    received.push(JSON.parse(buffer.slice(0, newlineIndex)));
-                    buffer = buffer.slice(newlineIndex + 1);
-                    newlineIndex = buffer.indexOf('\n');
-                }
-            });
-            client.on('end', () => resolve(received));
-            client.on('error', reject);
+        const server = createIpcServer(socketPath, {
+            notes: { vaultRoot, db, deps: { ...baseDeps(), now: 0 }, gate },
         });
+
+        const messages = await sendAndCollect(socketPath, { action: 'reindex', vault: 'notes' });
 
         server.close();
         expect(messages.some((m) => m.path === 'Socketed.md')).toBe(true);
         expect(messages.find((m) => m.summary).summary).toEqual({ reindexed: 1, skipped: 0, failed: 0 });
+    });
+
+    it('answers { error } naming the configured vaults for an unknown vault on reindex', async () => {
+        const vaultRoot = makeTempVault();
+        const db = makeTestDb();
+        const socketDir = makeTempVault();
+        const socketPath = join(socketDir, 'daemon.sock');
+
+        const server = createIpcServer(socketPath, {
+            notes: { vaultRoot, db, deps: baseDeps(), gate: createSerialGate() },
+        });
+
+        const [ message ] = await sendAndCollect(socketPath, { action: 'reindex', vault: 'bogus' });
+
+        server.close();
+        expect(message.error).toMatch(/unknown vault "bogus"/);
+        expect(message.error).toMatch(/notes/);
+    });
+
+    it('routes a reindex request to the named vault only, leaving another vault\'s queue untouched', async () => {
+        const rootA = makeTempVault();
+        writeNote(rootA, 'A.md', 'note a', 1000);
+        const rootB = makeTempVault();
+        writeNote(rootB, 'B.md', 'note b', 1000);
+        const dbA = makeTestDb();
+        const dbB = makeTestDb();
+        enqueuePath(dbA, 'A.md', 0);
+        enqueuePath(dbB, 'B.md', 0);
+        const socketDir = makeTempVault();
+        const socketPath = join(socketDir, 'daemon.sock');
+
+        const server = createIpcServer(socketPath, {
+            alpha: { vaultRoot: rootA, db: dbA, deps: { ...baseDeps(), now: 0 }, gate: createSerialGate() },
+            beta: { vaultRoot: rootB, db: dbB, deps: { ...baseDeps(), now: 0 }, gate: createSerialGate() },
+        });
+
+        await sendAndCollect(socketPath, { action: 'reindex', vault: 'alpha' });
+
+        server.close();
+        expect(dbA.prepare('SELECT COUNT(*) c FROM index_queue').get().c).toBe(0);
+        expect(dbB.prepare('SELECT COUNT(*) c FROM index_queue').get().c).toBe(1);
     });
 
     it('answers an embed request with a { vector } message, then closes the connection', async () => {
@@ -918,17 +966,9 @@ describe('createIpcServer', () => {
             embedQuery: async (text) => Float32Array.from([ text.length, 0.5 ]),
         };
 
-        const server = createIpcServer(socketPath, vaultRoot, db, deps, createSerialGate());
+        const server = createIpcServer(socketPath, { notes: { vaultRoot, db, deps, gate: createSerialGate() } });
 
-        const message = await new Promise((resolve, reject) => {
-            let buffer = '';
-            const client = createConnection(socketPath, () => {
-                client.write(`${JSON.stringify({ action: 'embed', text: 'hello' })}\n`);
-            });
-            client.on('data', (chunk) => { buffer += chunk.toString('utf8'); });
-            client.on('end', () => resolve(JSON.parse(buffer)));
-            client.on('error', reject);
-        });
+        const [ message ] = await sendAndCollect(socketPath, { action: 'embed', text: 'hello' });
 
         server.close();
         expect(message).toEqual({ vector: [ 5, 0.5 ] });
@@ -944,17 +984,9 @@ describe('createIpcServer', () => {
             embedQuery: async () => { throw new Error('pipeline unavailable'); },
         };
 
-        const server = createIpcServer(socketPath, vaultRoot, db, deps, createSerialGate());
+        const server = createIpcServer(socketPath, { notes: { vaultRoot, db, deps, gate: createSerialGate() } });
 
-        const message = await new Promise((resolve, reject) => {
-            let buffer = '';
-            const client = createConnection(socketPath, () => {
-                client.write(`${JSON.stringify({ action: 'embed', text: 'hello' })}\n`);
-            });
-            client.on('data', (chunk) => { buffer += chunk.toString('utf8'); });
-            client.on('end', () => resolve(JSON.parse(buffer)));
-            client.on('error', reject);
-        });
+        const [ message ] = await sendAndCollect(socketPath, { action: 'embed', text: 'hello' });
 
         server.close();
         expect(message).toEqual({ error: 'pipeline unavailable' });
@@ -970,8 +1002,7 @@ describe('startDaemon', () => {
         const lockPath = join(socketDir, 'daemon.pid');
 
         const daemon = await startDaemon({
-            vaultRoot,
-            dbPath: ':memory:',
+            vaults: [ { name: 'notes', vaultRoot, dbPath: ':memory:' } ],
             socketPath,
             lockPath,
             createWatcher: () => ({ stop() {} }), // fswatch itself is covered by Task 16's real-binary test
@@ -982,12 +1013,12 @@ describe('startDaemon', () => {
             drainIntervalMs: null, // this test drives one drain pass manually instead of on a timer
         });
 
-        expect(daemon.db.prepare('SELECT path FROM notes').get().path).toBe('Preexisting.md');
+        expect(daemon.vaults.notes.db.prepare('SELECT path FROM notes').get().path).toBe('Preexisting.md');
 
         const messages = await new Promise((resolve, reject) => {
             const received = [];
             const client = createConnection(socketPath, () => {
-                client.write(`${JSON.stringify({ action: 'reindex' })}\n`);
+                client.write(`${JSON.stringify({ action: 'reindex', vault: 'notes' })}\n`);
             });
             let buffer = '';
             client.on('data', (chunk) => {
@@ -1019,8 +1050,7 @@ describe('startDaemon', () => {
         const lockPath = join(socketDir, 'daemon.pid');
 
         const daemon = await startDaemon({
-            vaultRoot,
-            dbPath: ':memory:',
+            vaults: [ { name: 'notes', vaultRoot, dbPath: ':memory:' } ],
             socketPath,
             lockPath,
             createWatcher: () => ({ stop() {} }),
@@ -1031,7 +1061,7 @@ describe('startDaemon', () => {
             drainIntervalMs: null,
         });
 
-        const paths = daemon.db.prepare('SELECT path FROM notes').all().map((r) => r.path);
+        const paths = daemon.vaults.notes.db.prepare('SELECT path FROM notes').all().map((r) => r.path);
         expect(paths).toEqual([ 'Visible.md' ]);
 
         await daemon.stop();
@@ -1047,8 +1077,7 @@ describe('startDaemon', () => {
         const lockPath = join(socketDir, 'daemon.pid');
 
         const first = await startDaemon({
-            vaultRoot,
-            dbPath,
+            vaults: [ { name: 'notes', vaultRoot, dbPath } ],
             socketPath,
             lockPath,
             createWatcher: () => ({ stop() {} }),
@@ -1058,14 +1087,13 @@ describe('startDaemon', () => {
             embeddingVersion: 'v1',
             drainIntervalMs: null,
         });
-        expect(first.db.prepare('SELECT path FROM notes').get().path).toBe('Templates/Daily Note.md');
+        expect(first.vaults.notes.db.prepare('SELECT path FROM notes').get().path).toBe('Templates/Daily Note.md');
         await first.stop();
 
         writeFileSync(join(vaultRoot, '.mnotesignore'), 'Templates/\n');
 
         const second = await startDaemon({
-            vaultRoot,
-            dbPath,
+            vaults: [ { name: 'notes', vaultRoot, dbPath } ],
             socketPath,
             lockPath,
             createWatcher: () => ({ stop() {} }),
@@ -1076,7 +1104,7 @@ describe('startDaemon', () => {
             drainIntervalMs: null,
         });
 
-        expect(second.db.prepare('SELECT COUNT(*) AS count FROM notes').get().count).toBe(0);
+        expect(second.vaults.notes.db.prepare('SELECT COUNT(*) AS count FROM notes').get().count).toBe(0);
 
         await second.stop();
     });
@@ -1090,8 +1118,7 @@ describe('startDaemon', () => {
         const logger = getLogger('indexer', logDir);
 
         const daemon = await runWithLogger(logger, () => startDaemon({
-            vaultRoot,
-            dbPath: ':memory:',
+            vaults: [ { name: 'notes', vaultRoot, dbPath: ':memory:' } ],
             socketPath,
             lockPath,
             createWatcher: () => ({ stop() {} }),
@@ -1128,8 +1155,7 @@ describe('startDaemon', () => {
         };
 
         const daemon = await startDaemon({
-            vaultRoot,
-            dbPath: ':memory:',
+            vaults: [ { name: 'notes', vaultRoot, dbPath: ':memory:' } ],
             socketPath,
             lockPath,
             createWatcher: () => ({ stop() {} }),
@@ -1147,7 +1173,7 @@ describe('startDaemon', () => {
 
         releaseEmbed();
         await vi.waitFor(() => {
-            expect(daemon.db.prepare('SELECT COUNT(*) c FROM index_queue').get().c).toBe(0);
+            expect(daemon.vaults.notes.db.prepare('SELECT COUNT(*) c FROM index_queue').get().c).toBe(0);
         });
         expect(embedCalls).toBe(1);
 
@@ -1171,8 +1197,7 @@ describe('startDaemon', () => {
         };
 
         const daemon = await startDaemon({
-            vaultRoot,
-            dbPath: ':memory:',
+            vaults: [ { name: 'notes', vaultRoot, dbPath: ':memory:' } ],
             socketPath,
             lockPath,
             createWatcher: () => ({ stop() {} }),
@@ -1192,7 +1217,7 @@ describe('startDaemon', () => {
         const received = [];
         const requestDone = new Promise((resolve, reject) => {
             const client = createConnection(socketPath, () => {
-                client.write(`${JSON.stringify({ action: 'reindex', noteTitle: 'Slow' })}\n`);
+                client.write(`${JSON.stringify({ action: 'reindex', vault: 'notes', noteTitle: 'Slow' })}\n`);
             });
             let buffer = '';
             client.on('data', (chunk) => {
@@ -1242,8 +1267,7 @@ describe('startDaemon', () => {
         };
 
         const daemon = await startDaemon({
-            vaultRoot,
-            dbPath: ':memory:',
+            vaults: [ { name: 'notes', vaultRoot, dbPath: ':memory:' } ],
             socketPath,
             lockPath,
             createWatcher: () => ({ stop() {} }),
@@ -1283,8 +1307,7 @@ describe('startDaemon', () => {
 
         let receivedDebounceMs;
         const daemon = await startDaemon({
-            vaultRoot,
-            dbPath: ':memory:',
+            vaults: [ { name: 'notes', vaultRoot, dbPath: ':memory:' } ],
             socketPath,
             lockPath,
             createWatcher: (root, db, { debounceMs } = {}) => {
@@ -1313,8 +1336,7 @@ describe('startDaemon', () => {
         const failingEmbed = async () => { throw new Error('embed failed'); };
 
         const daemon = await startDaemon({
-            vaultRoot,
-            dbPath: ':memory:',
+            vaults: [ { name: 'notes', vaultRoot, dbPath: ':memory:' } ],
             socketPath,
             lockPath,
             createWatcher: () => ({ stop() {} }),
@@ -1327,7 +1349,7 @@ describe('startDaemon', () => {
         });
 
         await vi.waitFor(() => {
-            const row = daemon.db.prepare('SELECT enqueued_at, next_attempt_at FROM index_queue WHERE path = ?')
+            const row = daemon.vaults.notes.db.prepare('SELECT enqueued_at, next_attempt_at FROM index_queue WHERE path = ?')
                 .get('AlwaysFails.md');
             // enqueued_at/next_attempt_at are two separate real Date.now() calls, so the delta is
             // backoffSchedule[0] plus actual processing time, not exactly backoffSchedule[0] — a
@@ -1347,8 +1369,7 @@ describe('startDaemon', () => {
         const lockPath = join(socketDir, 'daemon.pid');
 
         const first = await startDaemon({
-            vaultRoot,
-            dbPath: ':memory:',
+            vaults: [ { name: 'notes', vaultRoot, dbPath: ':memory:' } ],
             socketPath: join(socketDir, 'daemon.sock'),
             lockPath,
             createWatcher: () => ({ stop() {} }),
@@ -1360,8 +1381,7 @@ describe('startDaemon', () => {
         });
 
         await expect(startDaemon({
-            vaultRoot,
-            dbPath: ':memory:',
+            vaults: [ { name: 'notes', vaultRoot, dbPath: ':memory:' } ],
             socketPath: join(socketDir, 'second.sock'),
             lockPath,
             createWatcher: () => ({ stop() {} }),
@@ -1375,8 +1395,7 @@ describe('startDaemon', () => {
         await first.stop();
 
         const second = await startDaemon({
-            vaultRoot,
-            dbPath: ':memory:',
+            vaults: [ { name: 'notes', vaultRoot, dbPath: ':memory:' } ],
             socketPath: join(socketDir, 'second.sock'),
             lockPath,
             createWatcher: () => ({ stop() {} }),
@@ -1387,6 +1406,113 @@ describe('startDaemon', () => {
             drainIntervalMs: null,
         });
         await second.stop();
+    });
+
+    it('starts every configured vault independently: its own db, watcher, and queue', async () => {
+        const rootA = makeTempVault();
+        writeNote(rootA, 'A.md', 'note a', 1000);
+        const rootB = makeTempVault();
+        writeNote(rootB, 'B.md', 'note b', 1000);
+        const socketDir = makeTempVault();
+        const socketPath = join(socketDir, 'daemon.sock');
+        const lockPath = join(socketDir, 'daemon.pid');
+        const watcherCallsByRoot = {};
+
+        const daemon = await startDaemon({
+            vaults: [
+                { name: 'alpha', vaultRoot: rootA, dbPath: ':memory:' },
+                { name: 'beta', vaultRoot: rootB, dbPath: ':memory:' },
+            ],
+            socketPath,
+            lockPath,
+            createWatcher: (root) => {
+                watcherCallsByRoot[root] = (watcherCallsByRoot[root] ?? 0) + 1;
+                return { stop() {} };
+            },
+            chunkText: fakeChunkText,
+            embed: fakeEmbed,
+            embeddingModel: 'test-model',
+            embeddingVersion: 'v1',
+            drainIntervalMs: null,
+        });
+
+        expect(watcherCallsByRoot).toEqual({ [rootA]: 1, [rootB]: 1 });
+        expect(daemon.vaults.alpha.db.prepare('SELECT path FROM notes').get().path).toBe('A.md');
+        expect(daemon.vaults.beta.db.prepare('SELECT path FROM notes').get().path).toBe('B.md');
+        expect(daemon.vaults.alpha.db).not.toBe(daemon.vaults.beta.db);
+
+        await daemon.stop();
+    });
+
+    it('logs distinct vault= context per vault during startup (watermark catch-up)', async () => {
+        const rootA = makeTempVault();
+        const rootB = makeTempVault();
+        const socketDir = makeTempVault();
+        const socketPath = join(socketDir, 'daemon.sock');
+        const lockPath = join(socketDir, 'daemon.pid');
+        const logDir = mkdtempSync(join(tmpdir(), 'mnotes-daemon-test-log-'));
+        const logger = getLogger('indexer', logDir);
+
+        const daemon = await runWithLogger(logger, () => startDaemon({
+            vaults: [
+                { name: 'alpha', vaultRoot: rootA, dbPath: ':memory:' },
+                { name: 'beta', vaultRoot: rootB, dbPath: ':memory:' },
+            ],
+            socketPath,
+            lockPath,
+            createWatcher: () => ({ stop() {} }),
+            chunkText: fakeChunkText,
+            embed: fakeEmbed,
+            embeddingModel: 'test-model',
+            embeddingVersion: 'v1',
+            drainIntervalMs: null,
+        }));
+
+        await vi.waitFor(() => {
+            const text = readFileSync(join(logDir, 'indexer.log'), 'utf8');
+            expect(text).toContain('vault="alpha"');
+            expect(text).toContain('vault="beta"');
+        });
+
+        await daemon.stop();
+        await cleanupTempDir(logDir);
+    });
+
+    it('routes an IPC reindex to the named vault only, and an unknown vault name errors without '
+        + 'crashing the daemon', async () => {
+        const rootA = makeTempVault();
+        writeNote(rootA, 'A.md', 'note a', 1000);
+        const rootB = makeTempVault();
+        writeNote(rootB, 'B.md', 'note b', 1000);
+        const socketDir = makeTempVault();
+        const socketPath = join(socketDir, 'daemon.sock');
+        const lockPath = join(socketDir, 'daemon.pid');
+
+        const daemon = await startDaemon({
+            vaults: [
+                { name: 'alpha', vaultRoot: rootA, dbPath: ':memory:' },
+                { name: 'beta', vaultRoot: rootB, dbPath: ':memory:' },
+            ],
+            socketPath,
+            lockPath,
+            createWatcher: () => ({ stop() {} }),
+            chunkText: fakeChunkText,
+            embed: fakeEmbed,
+            embeddingModel: 'test-model',
+            embeddingVersion: 'v1',
+            drainIntervalMs: null,
+        });
+
+        const [ badMessage ] = await sendAndCollect(socketPath, { action: 'reindex', vault: 'bogus' });
+        expect(badMessage.error).toMatch(/unknown vault "bogus"/);
+
+        // The daemon survives the bad request above and still serves a well-formed one afterward.
+        writeNote(rootA, 'New.md', 'brand new', 2000);
+        const messages = await sendAndCollect(socketPath, { action: 'reindex', vault: 'alpha' });
+        expect(messages.some((m) => m.path === 'New.md')).toBe(true);
+        expect(daemon.vaults.beta.db.prepare('SELECT COUNT(*) c FROM notes').get().c).toBe(1); // untouched
+
+        await daemon.stop();
     });
 });
 

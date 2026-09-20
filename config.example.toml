@@ -1,8 +1,21 @@
-vault_path = "/Users/jsmith/Documents/Notes"
-# db_path's default is computed per-OS — macOS: ~/Library/Application Support/mnotes/index.db
-# Linux: ~/.local/share/mnotes/index.db (respects $XDG_DATA_HOME). Shown here as the macOS example.
-db_path = "/Users/jsmith/Library/Application Support/mnotes/index.db"
-embedding_model = "Qwen3-Embedding-0.6B"
+# default_vault names which configured vault a call resolves to when --vault/vault is omitted.
+# Not needed at all with exactly one vault configured (the common case) — see S009.
+default_vault = "notes"
+
+[vaults.notes]
+path = "/Users/jsmith/Documents/Notes"
+description = "Personal notes and knowledge base"
+# db_path's default is computed per-OS — macOS: ~/Library/Application Support/mnotes/index-notes.db
+# Linux: ~/.local/share/mnotes/index-notes.db (respects $XDG_DATA_HOME). Only set this to override it.
+# db_path = "/Users/jsmith/Library/Application Support/mnotes/index-notes.db"
+
+# A second (or third, ...) vault is always a manual addition — scripts/install.sh only ever prompts
+# for one. Restart the daemon (`mnotes daemon restart`) after adding one.
+[vaults.dnd]
+path = "/Users/jsmith/Documents/DnD"
+description = "D&D campaign notes"
+
+embedding_model = "Qwen3-Embedding-0.6B" # shared across every configured vault, not per-vault
 
 [search]
 limit_default = 20          # S002

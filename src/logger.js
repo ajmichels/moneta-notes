@@ -83,7 +83,7 @@ export function getAuditLogger(logDir) {
 export function logAudit(auditLogger, entry) {
     const {
         tool, noteTitle = null, attachmentPath = null, source, reason = null, query = null,
-        outcome, errorMessage = null,
+        outcome, errorMessage = null, vault = null,
     } = entry;
 
     if (source !== 'mcp' && source !== 'cli') {
@@ -113,6 +113,7 @@ export function logAudit(auditLogger, entry) {
     return auditLogger.info(tool, {
         [identifierField]: identifierValue,
         source: new BareValue(source),
+        vault,
         query,
         reason,
         outcome: new BareValue(outcome),

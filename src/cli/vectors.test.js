@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb } from '../core/db.js';
 import { vectorToBuffer } from '../core/vectors.js';
+import { buildDefaultConfig } from '../config.js';
 import { runVectorsCommand } from './vectors.js';
 import { cleanupTempDir } from '../../vitest.helpers.js';
 
@@ -809,5 +810,36 @@ describe('mnotes vectors: help output', () => {
         const result = await runVectorsCommand([ 'bogus', '--help' ], {});
         expect(result.exitCode).toBe(1);
         expect(result.stderr).toMatch(/unknown vectors subcommand/);
+    });
+});
+
+describe('mnotes vectors: --vault (S009)', () => {
+    it('nearest resolves --vault via config to the right dbPath, stripped before subcommand parsing', async () => {
+        const dir = mkdtempSync(join(tmpdir(), 'mnotes-cli-vectors-test-'));
+        tempDirs.push(dir);
+        const dbPath = join(dir, 'index.db');
+        const { db } = openDb(dbPath);
+        const noteA = insertNote(db, 'A.md');
+        const noteB = insertNote(db, 'Query.md');
+        insertChunk(db, noteA, { seed: 0.1 });
+        insertChunk(db, noteB, { seed: 0.1 });
+        const config = { ...buildDefaultConfig(), vaults: { dnd: { path: dir, db_path: dbPath } } };
+
+        const result = await runVectorsCommand(
+            [ 'nearest', 'Query', '--vault=dnd', '--json' ],
+            { config, embeddingModel: 'test-model', embeddingVersion: 'v1' },
+        );
+
+        expect(result.exitCode).toBe(0);
+        expect(JSON.parse(result.stdout)[0].note_title).toBe('A');
+    });
+
+    it('an unknown --vault errors the same way other commands do', async () => {
+        const config = { vaults: { notes: { path: '/x' } } };
+
+        await expect(runVectorsCommand(
+            [ 'nearest', 'Query', '--vault=bogus' ],
+            { config, embeddingModel: 'test-model', embeddingVersion: 'v1' },
+        )).rejects.toThrow(/unknown vault "bogus"/);
     });
 });

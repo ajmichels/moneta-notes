@@ -8,8 +8,8 @@ Every tunable `mnotes` has, what it does, and its default. The authoritative spe
 - **Location**: `~/.config/mnotes/config.toml`.
 - **Sparse override file, not a full dump.** Every value on this page is baked into `src/config.js` as
   a built-in default. `config.toml` only needs to contain the keys you actually want to change —
-  anything absent falls through to its built-in default. A file containing just `vault_path` is
-  entirely valid.
+  anything absent falls through to its built-in default. A file containing just a single overridden
+  vault path is entirely valid.
 - **Often doesn't exist at all.** If you accepted every prompt's suggested default during
   `scripts/install.sh`, no `config.toml` is written — there's nothing to override. See
   [Installation](installation.md).
@@ -24,13 +24,62 @@ Every tunable `mnotes` has, what it does, and its default. The authoritative spe
   file, annotated with which spec introduced each key. It's documentation only — copy the keys you
   want into your own `~/.config/mnotes/config.toml`, don't point `mnotes` at the example file itself.
 
+## Vaults — `[vaults.<name>]` and `default_vault`
+
+`mnotes` supports more than one vault off a single daemon/CLI/MCP install. Each configured vault is
+a `[vaults.<name>]` table:
+
+```toml
+default_vault = "notes"
+
+[vaults.notes]
+path = "/Users/jsmith/Documents/Notes"
+description = "Personal notes and knowledge base"
+
+[vaults.dnd]
+path = "/Users/jsmith/Documents/DnD"
+description = "D&D campaign notes"
+```
+
+| Field | Required | Default | What it does |
+|---|---|---|---|
+| `path` | yes | — | Root directory of the Obsidian vault this entry points at. |
+| `db_path` | no | `<app-support-dir>/index-<name>.db` | Path to this vault's own SQLite index file (FTS5 + sqlite-vec) — every vault gets its own, never shared. |
+| `description` | no | none | Free text shown by `mnotes vaults` / the MCP `list_vaults` tool, so a caller (human or Claude) can tell vaults apart by purpose without knowing their on-disk paths. |
+
+**The table key (`notes`, `dnd`, ...) is the vault's name** — the identifier passed as `--vault <name>`
+on the CLI or the `vault` argument on MCP tools. It must match `^[a-z0-9][a-z0-9_-]*$`; `mnotes` throws
+a specific error naming the offending key if it doesn't, whether install-prompted or hand-written.
+
+**`default_vault`** names which vault a call resolves to when `--vault`/`vault` is omitted:
+
+1. Exactly one vault configured → that one, `default_vault` isn't needed at all (the common case
+   `scripts/install.sh` sets up).
+2. Two or more vaults configured → `default_vault` if set; otherwise every single-vault-target command
+   (`mnotes read`, the mutating tools, `stats`, `tag_list`/`tags list`, `metadata_keys`/`metadata keys`)
+   requires an explicit `--vault`/`vault` on every call — there's genuinely nothing to default to.
+3. `search`, `grep`, `tags notes`, `metadata query`/`metadata_query`, and `links broken` are the
+   exception: with `--vault`/`vault` omitted and 2+ vaults configured, they **fan out across every
+   vault** instead of erroring — see [usage.md](usage.md#cross-vault-fan-out) /
+   [usage-mcp.md](usage-mcp.md).
+
+**Adding a second vault is a manual `config.toml` edit** — `scripts/install.sh` only ever prompts for
+one (the primary) vault; append another `[vaults.<name>]` table by hand afterward, and restart the
+daemon (`mnotes daemon restart`) to pick it up.
+
+**Backward compatibility — the old flat shape still works.** A `config.toml` from before multi-vault
+support (`vault_path`/`db_path` at the top level, no `[vaults]` table) is normalized in memory on every
+load: it's treated as a single vault named by slugifying `vault_path`'s final path segment (lowercase,
+non-alphanumeric runs collapsed to `-`, e.g. `~/Documents/Notes` → `notes`) — no edits required, and the
+synthesized name only ever surfaces in a `mnotes vaults` listing, never in a `--vault` flag you'd need
+to type. A file mixing the old flat keys with a `[vaults.*]` table is invalid — `mnotes` throws rather
+than guessing which one wins.
+
 ## Top-level
 
 | Key | Default | What it does |
 |---|---|---|
-| `vault_path` | `~/Documents/Notes` | Root directory of the Obsidian vault `mnotes` reads/writes/indexes. Prompted for during install. |
-| `db_path` | `~/Library/Application Support/mnotes/index.db` (macOS) / `~/.local/share/mnotes/index.db` (Linux) | Path to the SQLite index file (FTS5 + sqlite-vec). Prompted for during install. |
-| `embedding_model` | `"Qwen3-Embedding-0.6B"` | Which embedding model the indexing daemon loads for semantic search. Changing this requires a full reindex (`mnotes reindex`) — existing vectors were computed against the old model and won't compare meaningfully against the new one. |
+| `embedding_model` | `"Qwen3-Embedding-0.6B"` | Which embedding model the indexing daemon loads for semantic search — shared by every configured vault. Changing this requires a full reindex (`mnotes reindex`) — existing vectors were computed against the old model and won't compare meaningfully against the new one. |
 
 ## `[search]`
 
@@ -113,5 +162,7 @@ limit_default = 10
 model_idle_unload_minutes = 30
 ```
 
-Every other key — `db_path`, `embedding_model`, `[notes]`, `[grep]`, `[attachments]`, `[logging]`, and
-the rest of `[search]`/`[index]` — falls through to its built-in default, unaffected by this file.
+Every other key — `embedding_model`, `[notes]`, `[grep]`, `[attachments]`, `[logging]`, and the rest of
+`[search]`/`[index]` — falls through to its built-in default, unaffected by this file. (This example
+uses the legacy flat `vault_path` key on purpose, to show it's still entirely valid input — see
+"Vaults" above.)
