@@ -356,30 +356,34 @@ directory (S008/S009):
 
 For every value other than `audit`, `mnotes logs` is a `--follow`/`--limit`-over-raw-lines convenience,
 not a parser — it prints each line exactly as stored, with no field extraction and no table formatting.
-**Every audit-specific flag (`--source`, `--tool`, `--note`, `--outcome`, `--since`, `--json`) is a hard
-error when combined with a non-`audit` `--file`** (naming every offending flag in one message, not just
-the first) — these flags presuppose the structured shape only `audit.log` has, and silently ignoring
-them would let a `--file=indexer --outcome=error` typo look like it did something when it didn't.
+**Every audit-specific flag (`--source`, `--tool`, `--note`, `--outcome`, `--vault`, `--since`,
+`--json`) is a hard error when combined with a non-`audit` `--file`** (naming every offending flag in
+one message, not just the first) — these flags presuppose the structured shape only `audit.log` has,
+and silently ignoring them would let a `--file=indexer --outcome=error` typo look like it did something
+when it didn't.
 
 `src/cli/logs.js` parses each `audit.log` line back into a structured record (`timestamp`, `tool`,
-`source`, `noteTitle`/`attachmentPath`, `reason`, `outcome`, `errorMessage`) by inverting
+`source`, `vault`, `noteTitle`/`attachmentPath`, `reason`, `outcome`, `errorMessage`) by inverting
 `logger.js`'s own line-formatting grammar — not a second, independently-evolving format, so a change to
 `formatLine`/`formatValue` (S008) that isn't mirrored here will show up as a parse failure (a skipped
 line) rather than silently drifting. `--file=indexer`/`mcp-server` skip this parser entirely — they
 never need it, since there's no structured record to extract.
 
-**Filters** (`--source`, `--tool`, `--note`, `--outcome`, `--since`, `--limit`) AND together, and only
-apply to `--file=audit` (see above); there's no `--match=any` here unlike `metadata query`, since
-combining audit fields with OR semantics isn't a usage pattern this command needs to support. `--note`
-matches either `note_title` or `attachment_path` on an entry, whichever that entry actually carries
-(S012's identifier-slot design) — exact match, no resolution, the same as `mnotes attachment`'s
-`<path>`. `--since` accepts a relative shorthand (`30m`, `1h`, `2d` — seconds/minutes/hours/days) or a
-full ISO-8601 timestamp. `--limit` (last N) and `--follow` apply to any of the seven files, since both
-are meaningful over plain lines just as much as over parsed entries.
+**Filters** (`--source`, `--tool`, `--note`, `--outcome`, `--vault`, `--since`, `--limit`) AND together,
+and only apply to `--file=audit` (see above); there's no `--match=any` here unlike `metadata query`,
+since combining audit fields with OR semantics isn't a usage pattern this command needs to support.
+`--note` matches either `note_title` or `attachment_path` on an entry, whichever that entry actually
+carries (S012's identifier-slot design) — exact match, no resolution, the same as `mnotes attachment`'s
+`<path>`. `--vault` matches an entry's `vault` field exactly by name (S009) — an entry with no `vault`
+field (only `list_vaults`'s MCP tool calls, per S007, ever lack one) never matches a `--vault` filter,
+regardless of value. `--since` accepts a relative shorthand (`30m`, `1h`, `2d` —
+seconds/minutes/hours/days) or a full ISO-8601 timestamp. `--limit` (last N) and `--follow` apply to any
+of the seven files, since both are meaningful over plain lines just as much as over parsed entries.
 
 **Output for `--file=audit`**: default is the same aligned pipe-table convention as
 `search`/`grep`/`tags`/`links`, one column per audit field (`note_title`/`attachment_path` collapsed
-into a single `identifier` column, since an entry only ever carries one of the two). **`--json` is
+into a single `identifier` column, since an entry only ever carries one of the two, plus a `vault`
+column, blank for the rare entry with none). **`--json` is
 NDJSON here — one compact JSON object per line — not the single-array shape every other command's
 `--json` uses.** This is deliberate, not an inconsistency: `--json` has to mean the same thing whether
 or not `--follow` is also given, and `--follow`'s output is inherently an open-ended stream of

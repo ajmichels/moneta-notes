@@ -117,7 +117,10 @@ Build bottom-up: config resolution (1) has to exist before the daemon (2) or CLI
       Add `vaults` to `TOP_LEVEL_HELP` and `COMMAND_USAGE`.
 - [ ] `mnotes logs --vault=<name>`: add to `cli/logs.js`'s audit-only flag set and filter predicate
       (alongside `--source`/`--tool`/`--note`/`--outcome`), rejected on non-`audit` `--file` same as the
-      others.
+      others (S006). Also: the audit-line parser's field list gains `vault`; `formatLogsTable`/
+      `formatLogRow` (default table + `--follow` streaming) gain a `vault` column; NDJSON `--json` mode
+      includes `vault` per entry, `null` when absent (list_vaults tool calls only). An entry with no
+      `vault` field never matches a `--vault` filter, regardless of value.
 - [ ] `format.js`: add `formatVaultsTable(vaults, { align })` — columns `name | description | default`
       (blank cells for unset description / non-default), following the existing `formatTagListTable`
       shape.
