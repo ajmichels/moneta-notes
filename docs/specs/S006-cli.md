@@ -24,25 +24,42 @@ S007, just not `--vault`'s flag syntax specifically).
 
 ## `--vault <name>` and vault resolution
 
-Every vault-scoped command below — everything except `daemon` (controls the single daemon process
-itself, not a specific vault), `vaults` (lists every vault, nothing to scope), and `logs` (see its own
-note below) — accepts an optional `--vault <name>` flag that selects **which vault the command operates
-against**. Omitted, it resolves per S009's order: `default_vault` if set, else the sole configured
-vault, else a hard error naming every configured vault if there's more than one and no default is set.
-An explicit `--vault` naming an unconfigured vault is also a hard error — `resolveVault(config, name)`
-(`src/config.js`, S009) is the single implementation every command handler calls, so this behaves
-identically everywhere rather than being reimplemented per command. A single-vault setup (the common
-case, including every config predating this feature) never needs `--vault` at all.
+Vault-scoped commands split into three groups by what an omitted `--vault` means — the flag's syntax is
+identical everywhere it appears (`--vault <name>`), only its resolution differs by group:
+
+1. **Single-vault-target commands** — `read`, `write`, `edit`, `append`, `rename`,
+   `attachment read`/`write`, `links <title>`, `reindex`, `stats`, `tags list`, `metadata keys`.
+   Omitted, resolves via `resolveVault(config, null)` (S009): `default_vault` if set, else the sole
+   configured vault, else a hard error naming every configured vault if there's more than one and no
+   default is set. An explicit `--vault` naming an unconfigured vault is always a hard error.
+2. **Fan-out commands** — `search`, `grep`, `tags notes`, `links broken` (`metadata query` too, per
+   S014). Omitted, resolves via `resolveVaultsForQuery(config, null)` (S009): fans out across **every**
+   configured vault — not just the default — merging results with a `vault` column added to every row.
+   See S009's "Cross-vault fan-out for read/list tools" for the full mechanics, including why `search`
+   never attempts to merge scores/ranks across vaults. Passing an explicit `--vault` on any of these
+   instead behaves exactly like group 1 — one target vault, no `vault` column, hard error on an unknown
+   name.
+3. **Not vault-scoped at all** — `daemon` (controls the single daemon process, not a specific vault) and
+   `vaults` (lists every configured vault, nothing to select). `logs`'s own `--vault` is neither group 1
+   nor 2 — see below.
+
+`resolveVault`/`resolveVaultsForQuery` (`src/config.js`, S009) are the single implementations every
+command handler calls for groups 1/2 respectively, so resolution behaves identically across every
+command in a group rather than being reimplemented per command. A single-vault setup (the common case,
+including every config predating this feature) never needs `--vault` at all, on any command in any
+group — every one of the above degenerates to exactly today's single-vault behavior when only one vault
+is configured.
 
 **`mnotes logs --vault` is a different kind of flag, not a target selector.** `audit.log` is one file
 shared across every configured vault (S008), not a per-vault resource the way a note or an index is —
 so `logs`'s `--vault` is a plain optional *filter* over that shared file, exactly like `--source`/
-`--tool`/`--note`/`--outcome`, never routed through `resolveVault`'s default-vault fallback. **Omitted,
-it shows entries for every vault, not just the default one** — the opposite of what every other
-command's omitted `--vault` does. An unrecognized vault name is *not* a hard error here either (unlike
-everywhere else `--vault` appears) — it's a filter that legitimately matches zero entries, the same as
-`--tool=nonexistent-tool` does, since a caller might reasonably be checking the audit trail for a vault
-that was since renamed or removed from `config.toml`.
+`--tool`/`--note`/`--outcome`, never routed through `resolveVault`/`resolveVaultsForQuery` at all.
+**Omitted, it shows entries for every vault, not just the default one** — the same practical outcome
+group 2's fan-out has, but for a different reason (a plain unfiltered read, not a resolved multi-vault
+call). An unrecognized vault name is *not* a hard error here either (unlike groups 1 and 2) — it's a
+filter that legitimately matches zero entries, the same as `--tool=nonexistent-tool` does, since a
+caller might reasonably be checking the audit trail for a vault that was since renamed or removed from
+`config.toml`.
 
 ## Argument parsing
 
@@ -169,12 +186,12 @@ exact absolute title — see "Absolute titles for mutating commands" below).
 
 | Command | Flags | Notes |
 |---|---|---|
-| `mnotes search <query>` | `--mode=hybrid\|fulltext\|semantic`, `--limit=N`, `--explain`, `--vault=<name>`, `--json` | See `--explain` below. |
-| `mnotes grep <pattern>` | `--regex`, `--note=<title>`, `--content`, `--vault=<name>`, `--json` | `--content` shows each match's line text; omitted by default (line numbers only), matching the MCP tool's output shape unless explicitly opted into. `--note` resolves the same way `read`'s `<title>` does (S010). |
+| `mnotes search <query>` | `--mode=hybrid\|fulltext\|semantic`, `--limit=N`, `--explain`, `--vault=<name>`, `--json` | See `--explain` below. `--vault` omitted with 2+ vaults configured fans out — see "`--vault <name>` and vault resolution" above and S009. |
+| `mnotes grep <pattern>` | `--regex`, `--note=<title>`, `--content`, `--vault=<name>`, `--json` | `--content` shows each match's line text; omitted by default (line numbers only), matching the MCP tool's output shape unless explicitly opted into. `--note` resolves the same way `read`'s `<title>` does (S010). `--vault` fans out the same as `search`. |
 | `mnotes tags list` | `--vault=<name>`, `--json` | |
-| `mnotes tags notes <tag>` | `--vault=<name>`, `--json` | |
+| `mnotes tags notes <tag>` | `--vault=<name>`, `--json` | `--vault` fans out the same as `search` — see above. |
 | `mnotes links <title>` | `--vault=<name>`, `--json` | Backlinks and forward links for one note — see `mnotes links` below. |
-| `mnotes links broken` | `--vault=<name>`, `--json` | Every dangling `[[wikilink]]` in the vault — see `mnotes links` below. |
+| `mnotes links broken` | `--vault=<name>`, `--json` | Every dangling `[[wikilink]]` in the vault — see `mnotes links` below. `--vault` fans out the same as `search` (`links <title>` does not — it's a single-vault-target command, see above). |
 | `mnotes read <title>` | `--start=N`, `--end=N`, `--raw`, `--vault=<name>`, `--json` | See output modes above; default is neither raw nor JSON. |
 | `mnotes write <title>` | `--hash=H`, `--metadata='{...}'`, `--content="..."`, `--vault=<name>` | Content from stdin if `--content` omitted. |
 | `mnotes edit <title>` | `--hash=H`, `--old="..."`, `--new="..."`, `--metadata='{...}'`, `--vault=<name>` | |
@@ -190,10 +207,13 @@ exact absolute title — see "Absolute titles for mutating commands" below).
 | `mnotes vaults` | `--json` | Lists every configured vault: `name`, `description` (empty if unset), and whether it's the default — see below. CLI-only, no exact-title/path resolution to speak of. |
 
 Every command other than `reindex`/`stats`/`vaults` is a thin wrapper: resolve `--vault` (via
-`resolveVault(config, name)`, S009 — done once per invocation, not re-resolved per `core/` call) to get
-that vault's `vaultRoot`/`dbPath`, parse the rest of the command's flags, call the corresponding
-`core/` function directly in-process (`core/search.js`, `core/grep.js`, `core/tags.js`,
-`core/notes.js`, `core/links.js`), format the result. Mutations (`write`/`edit`/`append`/`rename`)
+`resolveVault(config, name)` for group 1's single-vault-target commands, or `resolveVaultsForQuery(
+config, name)` for group 2's fan-out commands — both S009, done once per invocation, not re-resolved
+per `core/` call) to get one or more vaults' `vaultRoot`/`dbPath`, parse the rest of the command's
+flags, call the corresponding `core/` function directly in-process once per resolved vault
+(`core/search.js`, `core/grep.js`, `core/tags.js`, `core/notes.js`, `core/links.js`), format the
+result — tagging each row with its vault first when more than one vault was resolved. Mutations
+(`write`/`edit`/`append`/`rename`)
 touch the vault file directly and rely on the daemon's `fswatch` loop (S005) to pick up the resulting
 change asynchronously — the CLI doesn't wait for reindexing to complete on a plain write, only
 `reindex` does (since that's its whole point). `vaults` is the one command with no vault to resolve —
@@ -228,7 +248,10 @@ CLI-only — there's no MCP equivalent (S011 deliberately keeps the link graph o
   in the same shape `note_read` uses.
 - **`mnotes links broken`** — every dangling `[[wikilink]]` in the vault (a `target_title` with no
   matching note), via `core/links.js`'s `getBrokenLinks` (S011). Table columns `note_title` (the note
-  containing the link) and `broken_target` (the unresolved title it points at).
+  containing the link) and `broken_target` (the unresolved title it points at), plus a `vault` column
+  when fanned out (S009) — `cli/main.js`'s handler calls `getBrokenLinks` once per resolved vault and
+  tags each row before concatenating, same composition pattern the `readonly` column below already
+  uses.
 
 **`readonly` column (S015), both forms**: `core/links.js`'s `getBacklinks`/`getBrokenLinks` return
 plain title strings/objects with no such field, by design (S003's "no extra fields beyond what's
@@ -275,6 +298,11 @@ followed by the same aligned, column-headered table every other list-style comma
 format" above) — column set varies by mode (`bm25` for fulltext; `cosine`/`chunk` for semantic;
 `fulltext_rank`/`semantic_rank`/`rrf` for hybrid), but the header-row-then-separator-then-data shape is
 consistent with `search`/`grep`/`tags`/`links`.
+
+**Fanned out (S009)**: `--explain` prints each vault's own summary-line-then-table block in sequence,
+one block per vault (labeled with the vault name ahead of its block), rather than attempting to merge
+pipeline summaries that don't describe the same query execution — there's no single `fts5_expression`/
+`overfetch` figure that would mean anything across more than one vault's own search.
 
 ### `mnotes daemon <start|stop|restart>`
 

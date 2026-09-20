@@ -214,10 +214,22 @@ Wiring section below):
 2. Otherwise, `default_vault` if the key is present in `config.toml`.
 3. Otherwise, if exactly one vault is configured, that one — this is what makes a single-vault setup
    (the common case) require no `default_vault` key at all.
-4. Otherwise (two or more vaults configured, no `default_vault` key) — `loadConfig()` throws at load
-   time (`"config.toml declares multiple vaults but no default_vault key"`), rather than guessing via
-   table order. TOML table order becoming load-bearing for something this consequential is exactly the
-   kind of ambiguity CLAUDE.md's fail-loudly rule exists to reject.
+4. Otherwise (two or more vaults configured, no `default_vault` key) — `resolveVault` throws
+   (`"multiple vaults configured (<list>) but no default_vault key — pass name explicitly or set
+   default_vault"`), rather than guessing via table order. TOML table order becoming load-bearing for
+   something this consequential is exactly the kind of ambiguity CLAUDE.md's fail-loudly rule exists to
+   reject.
+
+**This is a call-time error, thrown by `resolveVault` itself — not a `loadConfig()`-time validation.**
+A `config.toml` declaring 2+ vaults with no `default_vault` key is entirely valid on its own; whether
+it's a problem depends on what's actually called afterward. This matters once "Cross-vault fan-out for
+read/list tools" (below) exists: a deliberate no-`default_vault` multi-vault setup is a legitimate
+configuration under that design (every fan-out tool — `search`, `grep`, etc. — works with zero
+`--vault` needed, covering every vault by default; every single-vault-target tool — `note_read`, the
+mutating tools, `stats`, `tag_list`, `metadata_keys` — simply requires an explicit `--vault`/`vault` on
+every call, since there's genuinely nothing to default to). Rejecting that shape at `loadConfig()` time,
+before anything has actually tried to resolve an ambiguous call, would block a valid setup for reasons
+that only apply to some of what it's used for.
 
 **Backward compatibility — the old flat shape is permanently valid input, not a deprecated one.** A
 `config.toml` predating this feature has top-level `vault_path`/`db_path` keys and no `[vaults]` table
@@ -444,7 +456,9 @@ use its result. `src/indexer/daemon.js`'s `main()`, `src/cli/main.js`'s command 
   main.js` and `mcp/tools.js` both call it rather than each re-implementing the fallback order.
   `src/config.js` also exports `listVaults(config)` (`{ name, description, isDefault }[]`, no `path` —
   see S007's `list_vaults` tool for why the path itself is deliberately withheld from that output) for
-  the `mnotes vaults`/`list_vaults` surfaces (S006/S007).
+  the `mnotes vaults`/`list_vaults` surfaces (S006/S007), and `resolveVaultsForQuery(config, name)` for
+  the five tools that fan out across every vault instead of resolving to one when `name` is omitted —
+  see "Cross-vault fan-out for read/list tools" below.
 - **The daemon watches every configured vault, not one.** `daemon.js`'s `main()` calls `loadConfig()`
   once, calls `listVaults(config)` to get every configured vault (not just the default), resolves each
   one fully via `resolveVault(config, name)`, and starts one independent watch-and-drain pipeline per
@@ -472,6 +486,76 @@ use its result. `src/indexer/daemon.js`'s `main()`, `src/cli/main.js`'s command 
 - Env-var overrides are gone entirely, not layered on top of `config.toml` — `MNOTES_VAULT_ROOT`/
   `MNOTES_DB_PATH` are no longer read anywhere. This was a clean replacement, not backwards-compatible
   shimming, per the "stand-in... until S009 lands" framing already in the code being replaced.
+
+## Cross-vault fan-out for read/list tools
+
+Five tools/commands — `search`, `grep`, `tag_notes`, `metadata_query`, and the CLI-only `links broken`
+— treat an omitted vault differently from every other vault-scoped operation: instead of resolving
+through `default_vault`, an omitted vault **fans out across every configured vault** and merges the
+results, tagging every row with the vault it came from. Everything else stays single-vault-target
+(resolved via plain `resolveVault`, per above): `note_read`, every mutating tool, `stats`, `tag_list`,
+`metadata_keys`, and `mnotes vectors`. The distinction is whether merging is lossless — `search`/`grep`/
+`tag_notes`/`metadata_query`/`links broken` just concatenate independent rows, nothing is lost by
+combining them; `tag_list`/`metadata_keys` report counts/examples over what's actually a *separate*
+vocabulary per vault (S001), so merging them would blend two unrelated vocabularies into a misleading
+combined figure — a future, explicitly-designed per-vault-breakdown report, not a default to reach for
+here. `note_read`/the mutating tools operate on exactly one note; picking one arbitrarily across vaults
+(or erroring on a same-titled collision) is a worse failure mode than simply requiring an explicit
+vault, per CLAUDE.md's hash-guard/fail-loud philosophy already governing every other ambiguity in those
+tools. `stats` reports single-vault inventory numbers with no meaningful merged figure without becoming
+a different report than what's already specified. `mnotes vectors` already rejects cross-vault
+comparison outright (S013) — embeddings from two different vaults' corpora (potentially different
+models entirely) have no meaningful relationship to compare.
+
+`links <title>` (the single-note backlinks/forward-links lookup, distinct from `links broken`) is a
+single-vault-target command too, resolved the same way `note_read` is — it's about one specific note,
+not a corpus-wide list, so fanning it out has the same "which vault's note did you mean" problem
+`note_read` has.
+
+`src/config.js` exports `resolveVaultsForQuery(config, name = null)` → `{ vaults: VaultDescriptor[] }`:
+
+- `name` given → `{ vaults: [resolveVault(config, name)] }` — same hard error on an unknown name
+  `resolveVault` already has; explicit `--vault`/`vault` always means exactly one target vault, on a
+  fan-out tool the same as everywhere else.
+- `name` omitted, exactly one vault configured → `{ vaults: [resolveVault(config, null)] }` — identical
+  to today's single-vault behavior, byte-for-byte. A single-vault setup (the common case) never
+  triggers any of this machinery, regardless of which of the five tools is called.
+- `name` omitted, 2+ vaults configured → `{ vaults: listVaults(config).map(v => resolveVault(config,
+  v.name)) }` — every configured vault, in `listVaults`'s existing name-sorted order, **unconditionally**
+  — `default_vault` plays no role in this branch at all. This is the one place `resolveVault`'s own
+  "ambiguous, no default" error (see "Multi-vault: naming, defaults, and backward compatibility" above)
+  is deliberately bypassed: fan-out doesn't need a single answer, so a 2+-vault config with no
+  `default_vault` set is a perfectly valid, sometimes deliberate shape under this design (every fan-out
+  tool works with zero `--vault` needed; every single-vault-target tool simply requires one explicitly,
+  every time).
+
+**Output shape**: the `vault` field/column is present **exactly when `resolveVaultsForQuery` returned
+more than one vault** — i.e., the caller omitted `vault`/`--vault` *and* more than one vault is
+configured. An explicit `vault`/`--vault` never adds it (any vault count); a single-vault setup calling
+with it omitted never adds it either — every existing single-vault installation's output shape is
+completely unchanged by this feature. This mirrors the present-only-when-true convention `readonly`
+(S015) and `chunk_line_start`/`chunk_line_end` (S002) already use, rather than introducing a new kind of
+conditional field shape.
+
+**Fan-out mechanics**: `cli/main.js`/`mcp/tools.js` (never `core/`, which stays vault-agnostic per
+CLAUDE.md) loop over `resolveVaultsForQuery(...).vaults`, opening each vault's own `db` and calling the
+exact same `core/` function used today with the exact same options, tagging every returned row with
+`vault: name` before concatenating each vault's own result array, in vault order. A target-scoping
+input that doesn't resolve in a particular vault during fan-out (e.g. `grep --note=<title>` naming a
+title only some vaults have) simply contributes zero rows from that vault, rather than aborting the
+whole call — only an explicit single-vault `--vault` call still hard-errors on an unresolvable target,
+matching that command's existing single-vault behavior exactly.
+
+There is **no cross-vault merge of scores or ranks** — `search`'s fan-out output is **grouped by vault,
+ranked within each** (each vault's own top-`limit` block, back-to-back, in `listVaults` order) rather
+than a single globally re-sorted list. RRF/BM25/cosine are all corpus-relative; a fused cross-vault
+ordering would imply a comparability those scores don't actually have, and this applies identically
+across `fulltext`/`semantic`/`hybrid` mode — none of the three ever attempts a cross-vault comparison
+under this design, so there's no mode-specific special case to make. `--limit` (S002) is a **per-vault**
+limit under fan-out, exactly as if that vault had been searched alone — total row count scales with
+vault count, it is never split across vaults. `--explain`'s fan-out output (S006, CLI-only) is each
+vault's own pipeline-summary-line-then-table printed in sequence, one block per vault, rather than an
+attempted merge of pipeline summaries that don't describe the same query execution.
 
 ## Wiring `[search]`/`[notes]`/`[grep]`/`[attachments]`/`[index]`/`[logging]` into `core/`, the daemon, and log-rotator
 

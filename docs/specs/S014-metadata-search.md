@@ -221,9 +221,10 @@ error — tags is a flat vocabulary, not a nested structure).
 
 ### `metadata_keys`
 
-**Input**: `?vault<string>` (S009, resolved via `resolveVault(config, name)` same as every other
-vault-scoped tool — see S007), `reason<string>`. **Output**: `key<string>`,
-`type<'string'|'number'|'boolean'|'date'>`, `example<any>`, `notes_with_key<int>`.
+**Input**: `?vault<string>` (S009, resolved via `resolveVault(config, name)` — **single-vault-target,
+does not fan out**, same as `tag_list`: metadata field vocabularies are separate per vault, so merging
+two vaults' key/example/count lists would misrepresent both — see S007), `reason<string>`. **Output**:
+`key<string>`, `type<'string'|'number'|'boolean'|'date'>`, `example<any>`, `notes_with_key<int>`.
 
 Discovery: walks every note's `metadata_json` via `json_tree`, normalizes each `fullkey` (strips the
 `$.` prefix, strips array-index segments like `[0]`, strips SQLite's quoting around irregular key
@@ -245,8 +246,10 @@ fallback).
 
 **Input**: `filters<array>` (each `{ key<string>, op<'eq'|'gt'|'gte'|'lt'|'lte'|'in'|'exists'>,
 value?<string|number|boolean|array>, negate?<bool> }`, non-empty), `match?<'all'|'any'>='all'`,
-`?vaultRoot<string>` (S015), `?vault<string>` (S009), `reason<string>`. **Output**:
-`note_title<string>`, `file_line_count<int>` — same shape as `tag_notes`.
+`?vaultRoot<string>` (S015), `?vault<string>` (S009, resolved via `resolveVaultsForQuery(config,
+name)` — **fan-out**, same as `tag_notes`: an omitted `vault` runs the query against every configured
+vault and concatenates, tagging each row `?vault` — see S007/S009), `reason<string>`. **Output**:
+`note_title<string>`, `file_line_count<int>`, `?vault` — same shape as `tag_notes`.
 
 **`readonly<bool>` (S015)**: same treatment as `tag_notes` (S004) — `metadataQuery(db, options)` gains
 an optional `vaultRoot`; when given, each row gains `readonly: true` present only when the note matches
@@ -256,10 +259,12 @@ real boolean at this layer; `format.js` renders it as the `read-only`/empty-cell
 
 ## CLI (`mnotes metadata keys` / `mnotes metadata query`)
 
-`mnotes metadata keys [--vault=<name>] [--json]` mirrors `mnotes tags list`.
+`mnotes metadata keys [--vault=<name>] [--json]` mirrors `mnotes tags list` — single-vault-target,
+does not fan out (S009), same reasoning as `tag_list`.
 
 `mnotes metadata query [--filter=...]... [--exists=key]... [--missing=key]... [--match=any]
-[--vault=<name>] [--json]`:
+[--vault=<name>] [--json]` — `--vault` fans out the same as `mnotes tags notes`/`search`/`grep` (S009)
+when omitted with 2+ vaults configured, adding a `vault` column:
 each `--filter` is a small friendly string (`"status=active"`, `"priority>3"`, `"due<2026-01-01"`,
 `"depends_on.project=foo/bar"`, `"status in draft,review"`, `"status!=active"`), parsed into the exact
 same `{key, op, value, negate}` shape the MCP tool takes directly — `=`/`!=`/`>`/`>=`/`<`/`<=` map to

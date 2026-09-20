@@ -32,30 +32,47 @@ Build bottom-up: config resolution (1) has to exist before the daemon (2) or CLI
     `overrides.vault_path`/`overrides.db_path` so `findUnrecognizedKeys` doesn't flag them (they're
     intentionally not part of the schema `deepMerge` expects, once normalized).
   - Validate every key in `overrides.vaults` (if present) against `assertValidVaultName`.
-  - After merging: if `merged.default_vault` is unset and `Object.keys(merged.vaults).length > 1` →
-    throw (`"config.toml declares multiple vaults but no default_vault key"`).
   - If `merged.default_vault` is set, assert it names a key actually in `merged.vaults` (fail loud on
-    a stale/typo'd `default_vault`).
+    a stale/typo'd `default_vault`) — this stays a load-time check, since it's a pure internal-
+    consistency check independent of any call. **Do not** add a load-time check for "2+ vaults, no
+    `default_vault`" — that shape is valid on its own; see `resolveVault` below for where that error
+    actually belongs.
 - [ ] Add `resolveVault(config, name = null)` → `{ name, path, dbPath, description }`:
   - `name` given → assert it's a key in `config.vaults`, else throw naming every configured vault.
   - `name` omitted → `config.default_vault` if set, else the sole key of `config.vaults` if there's
     exactly one, else throw (`"multiple vaults configured (<list>) — pass --vault/vault explicitly or
-    set default_vault"`).
+    set default_vault"`) — **this is the one and only place that error is thrown**, at call time, not
+    at `loadConfig()` time.
   - Resolve `path` to absolute (already absolute by the time it's in `config.vaults`, per install/
     normalization — assert, don't re-resolve).
   - `dbPath` = `config.vaults[name].db_path ?? defaultDbPathForVault(name)`.
 - [ ] Add `listVaults(config)` → `[{ name, description: string|null, isDefault: bool }]`, sorted by
       name — used by both `mnotes vaults` (S006) and the `list_vaults` MCP tool (S007). **No `path`
       field** — deliberately, per S007.
+- [ ] Add `resolveVaultsForQuery(config, name = null)` → `{ vaults: VaultDescriptor[] }` — backs the
+      fan-out behavior for `search`/`grep`/`tag_notes`/`metadata_query`/`links broken` (S006/S007/S009's
+      "Cross-vault fan-out" section):
+  - `name` given → `{ vaults: [resolveVault(config, name)] }` (same hard error on an unknown name).
+  - `name` omitted, exactly one vault configured → `{ vaults: [resolveVault(config, null)] }` —
+    identical to today's single-vault path; `default_vault` plays no special role here since there's
+    only one possible answer either way.
+  - `name` omitted, 2+ vaults configured → `{ vaults: listVaults(config).map(v => resolveVault(config,
+    v.name)) }` — **every** configured vault, in `listVaults`'s name-sorted order, regardless of
+    whether `default_vault` is set. This is the one case where `resolveVault(config, null)`'s own
+    "ambiguous, no default" error is deliberately bypassed — fan-out doesn't need a single answer.
 - [ ] `config.test.js`: cover every branch above —
   - legacy flat config (no `vaults`) → `resolveVault(config)` returns the slugified single vault with
-    the *exact* pre-existing `db_path` if one was set, or the derived default otherwise.
-  - single `[vaults.x]`, no `default_vault` → resolves to `x` with no error.
-  - two vaults, `default_vault` set to one of them → resolves correctly; explicit `name` argument
-    overrides it.
-  - two vaults, no `default_vault` → `loadConfig` throws at load time, not at first `resolveVault`
-    call.
-  - explicit unknown vault name → `resolveVault` throws naming the configured vaults.
+    the *exact* pre-existing `db_path` if one was set, or the derived default otherwise;
+    `resolveVaultsForQuery(config)` returns that same one-element array.
+  - single `[vaults.x]`, no `default_vault` → `resolveVault` resolves to `x` with no error.
+  - two vaults, `default_vault` set to one of them → `resolveVault` resolves correctly; explicit
+    `name` argument overrides it; `resolveVaultsForQuery(config)` (name omitted) still returns **both**
+    vaults, not just the default one.
+  - two vaults, no `default_vault` → `loadConfig` does **not** throw; `resolveVault(config, null)`
+    throws only when actually called; `resolveVaultsForQuery(config, null)` does not throw and returns
+    both vaults.
+  - explicit unknown vault name → both `resolveVault` and `resolveVaultsForQuery` throw naming the
+    configured vaults.
   - invalid vault name (`"My Vault"`, `"1abc"`, `"abc def"`) → throws from both the config-load path
     and a direct `assertValidVaultName` call.
   - mixed legacy + `[vaults.*]` → throws.
@@ -107,11 +124,29 @@ Build bottom-up: config resolution (1) has to exist before the daemon (2) or CLI
       `daemon`'s existing dep shape (`cli/reindex.js`, `cli/stats.js`, `cli/daemon.js`) — thread `--vault`
       into `reindex`/`stats` (they need a resolved vault's `dbPath`/`vaultRoot`/`socketPath` unchanged),
       leave `daemon` alone (no vault concept, per S006).
-- [ ] Add `--vault` to every vault-scoped command's `parseArgs` options
-      (`search`/`grep`/`tags`/`metadata`/`links`/`read`/`write`/`edit`/`append`/`rename`/`attachment`/
-      `reindex`/`stats`/`logs`) — resolve once per handler via `resolveVault(config, values.vault ??
-      null)`, pass the resulting `vaultRoot`/`dbPath` (open a fresh `db` from `dbPath`) into the
-      existing `core/` calls, replacing whatever `deps.vaultRoot`/`deps.db` those calls used before.
+- [ ] Add `--vault` to every vault-scoped command's `parseArgs` options, split by resolution group
+      (S006/S009):
+  - **Group 1 (single-vault-target)** — `read`, `write`, `edit`, `append`, `rename`,
+    `attachment read`/`write`, `links <title>`, `reindex`, `stats`, `tags list`, `metadata keys`.
+    Resolve once per handler via `resolveVault(config, values.vault ?? null)`, pass the resulting
+    `vaultRoot`/`dbPath` (open a fresh `db` from `dbPath`) into the existing `core/` call, replacing
+    whatever `deps.vaultRoot`/`deps.db` it used before. Unchanged from the original single-group plan.
+  - **Group 2 (fan-out)** — `search`, `grep`, `tags notes`, `metadata query`, `links broken`. Resolve
+    via `resolveVaultsForQuery(config, values.vault ?? null)`, then **loop**: for each returned vault,
+    open its `db`, call the exact same `core/` function with the exact same options, then — only if
+    `vaults.length > 1` — map `vault: name` onto every returned row before concatenating (no `vault`
+    key at all when there's exactly one resolved vault, preserving today's exact output shape for that
+    case). `search` additionally: apply `--limit` per vault (not split across vaults), and group blocks
+    in `resolveVaultsForQuery`'s vault order rather than attempting to re-sort across vaults (S009 —
+    no cross-vault score/rank comparison). A per-vault target-scoping failure (e.g. `grep --note=<title>`
+    unresolvable in one particular vault) contributes zero rows from that vault rather than aborting
+    the whole call; an explicit single-vault `--vault` still hard-errors on it as before.
+  - `format.js`: `formatSearchTable`, `formatGrepTable`, `formatTagNotesTable`, and whatever formats
+    `metadata query`/`links broken` use need a `vault` column added to their row-shaping, present only
+    when the row actually carries the key — same convention `readonly` (S015) already uses.
+  - `--explain` under fan-out (S006): print each vault's own summary-line-then-table block in sequence
+    (labeled with the vault name), not a merged summary — implement as a loop around the existing
+    single-vault `--explain` rendering, one call per resolved vault.
 - [ ] Add `runVaults(args, deps)`: `parseArgs` for `--json` only, call `listVaults(resolveConfig(deps))`,
       format via a new `formatVaultsTable`/reuse `formatJson` — `registerCommand('vaults', runVaults)`.
       Add `vaults` to `TOP_LEVEL_HELP` and `COMMAND_USAGE`.
@@ -145,30 +180,43 @@ Build bottom-up: config resolution (1) has to exist before the daemon (2) or CLI
 - [ ] Add `list_vaults` to `TOOL_DEFS`: `inputSchema: { reason: z.string() }`, `annotations: {
       readOnlyHint: true, destructiveHint: false, idempotentHint: true }`, `handler: listVaultsTool`.
 - [ ] Add `vault: z.string().optional()` to every other tool's `inputSchema`.
-- [ ] `tools.js`: add a small `resolveToolVault(deps, input)` helper — `resolveVault(deps.config,
-      input.vault ?? null)` — called at the top of every tool handler (`searchTool`, `grepTool`,
-      `tagListTool`, `tagNotesTool`, `metadataKeysTool`, `metadataQueryTool`, `noteReadTool`,
-      `noteWriteTool`, `noteEditTool`, `noteAppendTool`, `noteRenameTool`, `attachmentReadTool`,
-      `attachmentWriteTool`) in place of destructuring `deps.vaultRoot`/`deps.dbPath` directly.
+- [ ] `tools.js`: split tool handlers into the same two resolution groups as step 3, matching S007's
+      grouping:
+  - **Group 1** — `note_read`, `note_write`, `note_edit`, `note_append`, `note_rename`,
+    `attachment_read`, `attachment_write`, `tag_list`, `metadata_keys`. Add a small
+    `resolveToolVault(deps, input)` helper — `resolveVault(deps.config, input.vault ?? null)` — called
+    at the top of each handler in place of destructuring `deps.vaultRoot`/`deps.dbPath` directly.
+  - **Group 2** — `search`, `grep`, `tag_notes`, `metadata_query`. Add a `resolveToolVaults(deps,
+    input)` helper — `resolveVaultsForQuery(deps.config, input.vault ?? null)` — then loop the same way
+    step 3's group 2 does: call the existing `core/` function once per resolved vault, map `vault: name`
+    onto every row only when more than one vault was resolved, concatenate. `search` groups blocks by
+    vault (`resolveVaultsForQuery`'s order) with `limit` applied per vault, never a cross-vault merged
+    ranking (S009).
 - [ ] Add `listVaultsTool(deps, input)`: `callTool(..., 'list_vaults', input, async () =>
       formatVaultsTable(listVaults(resolveConfig(deps))))` — reuse the CLI's `formatVaultsTable`
       from `src/format.js` (already shared cross-surface per S006/S007's existing pattern for every
       other list tool).
-- [ ] `callTool`: add `vault: resolvedVault?.name ?? null` to both the error and success `logAudit`
-      calls — resolve the vault *before* calling `fn()` so a resolution failure is itself audit-logged
-      with `vault: null` (there's nothing else to log it under) and surfaces as the normal
-      `isError: true` response.
+- [ ] `callTool`: add `vault` to both the error and success `logAudit` calls — for group 1, the single
+      resolved vault's name (or `null` if resolution itself failed, since there's nothing else to log it
+      under); for group 2 under fan-out, there's no single vault to log — use `null` (or a
+      comma-joined list of every vault touched, if that reads better in `audit.log`; decide against a
+      real fan-out call before committing to one, this is presentation-layer, not load-bearing).
 - [ ] `tools.test.js` / `server.test.js`: `vault` argument threads through to the right `dbPath` for a
       representative read tool and a representative write tool; `list_vaults` output shape and
       annotations; an unresolvable `vault` argument produces `isError: true` with the exact
-      `resolveVault` message, and an `audit.log` entry with `outcome: error`.
+      `resolveVault`/`resolveVaultsForQuery` message, and an `audit.log` entry with `outcome: error`;
+      a fan-out tool (e.g. `search`) with `vault` omitted against a 2-vault test config returns rows
+      from both, each carrying `vault`, grouped by vault; the same call against a 1-vault test config
+      returns rows with no `vault` key at all (shape-unchanged assertion).
 
 ## 5. `src/core/metadata.js` tools (S014) — no core change, wiring only
 
-- [ ] Confirm `metadataKeysTool`/`metadataQueryTool` (already covered by step 4's `resolveToolVault`
-      sweep) and `cli/main.js`'s `runMetadataKeys`/`runMetadataQuery` (step 3's `--vault` sweep) are
-      included — `core/metadata.js` itself needs no change, it already takes `db`/`vaultRoot` as plain
-      args.
+- [ ] Confirm `metadataKeysTool` (group 1, step 4's `resolveToolVault`) and `metadataQueryTool` (group
+      2, step 4's `resolveToolVaults`/fan-out loop), and `cli/main.js`'s `runMetadataKeys` (group 1)/
+      `runMetadataQuery` (group 2, step 3's fan-out loop) are wired into the correct group each —
+      `metadata_query` fans out, `metadata_keys` does not (S014 amendment: separate vocabularies per
+      vault, same reasoning as `tag_list`). `core/metadata.js` itself needs no change, it already takes
+      `db`/`vaultRoot` as plain args.
 
 ## 6. `src/cli/vectors.js` (S013) — `--vault`
 
@@ -211,8 +259,12 @@ Build bottom-up: config resolution (1) has to exist before the daemon (2) or CLI
 - [ ] `docs/installation.md`: update the install-prompt walkthrough (vault path/name/description/db
       path, four prompts now instead of two) and mention adding a second vault is a manual config edit.
 - [ ] `docs/usage.md`: `--vault` flag on every relevant command, new `mnotes vaults` command, `mnotes
-      logs --vault`.
-- [ ] `docs/usage-mcp.md`: `vault` argument on every relevant tool, new `list_vaults` tool.
+      logs --vault`, and the fan-out behavior for `search`/`grep`/`tags notes`/`metadata query`/
+      `links broken` when `--vault` is omitted with 2+ vaults configured (distinct from every other
+      command's default-vault-fallback behavior).
+- [ ] `docs/usage-mcp.md`: `vault` argument on every relevant tool, new `list_vaults` tool, and the same
+      fan-out note for `search`/`grep`/`tag_notes`/`metadata_query` — including the "carry a fanned-out
+      result's `vault` into any follow-up tool call" guidance from S007's `search`/`note_read` sections.
 - [ ] `docs/usage-vectors.md`: `--vault` flag.
 - [ ] `docs/process-management.md`: confirm no change needed (still one daemon process/service
       regardless of vault count) — check for any singular-vault-log-path assumption in its `indexer.log`
@@ -226,8 +278,12 @@ Build bottom-up: config resolution (1) has to exist before the daemon (2) or CLI
 - [ ] Manual smoke test: configure two vaults by hand in `config.toml` (one via install, one
       hand-added), restart the daemon, confirm both get independent `fswatch` watchers and DBs
       (`indexer.log` shows two `vault=` values); `mnotes vaults` and the MCP `list_vaults` tool list
-      both with no `path` leaked; a write/search/reindex against each `--vault`/`vault` stays isolated
-      from the other; deleting `default_vault` from a two-vault config makes the daemon refuse to start
-      with the documented error; a legacy single-vault config from before this change still starts and
-      resolves correctly with zero edits.
+      both with no `path` leaked; a write/note-read/reindex against each `--vault`/`vault` stays isolated
+      from the other; **note this two-vault config deliberately has no `default_vault` set** — confirm
+      `mnotes search`/`mnotes grep` with no `--vault` return results from *both* vaults grouped by vault
+      (not an error), while `mnotes read`/`mnotes stats`/`mnotes tags list` with no `--vault` correctly
+      error naming both configured vaults (no default to fall back to); setting `default_vault` afterward
+      makes those single-vault-target commands work again with no flag, while search/grep's fan-out
+      behavior is unaffected either way; a legacy single-vault config from before this change still
+      starts and resolves correctly with zero edits, and produces zero `vault` fields/columns anywhere.
 - [ ] Delete this plan file once the above is verified.

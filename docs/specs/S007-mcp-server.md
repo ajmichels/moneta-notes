@@ -19,13 +19,23 @@ responses. Prompts are out of scope (see below).
 ## `vault` argument and vault resolution
 
 Every vault-scoped tool below (every tool except `list_vaults` itself) gains an optional
-`vault<string>` input argument, resolved the same way S006's `--vault` flag is: `resolveVault(config,
-name)` (`src/config.js`, S009) — explicit `vault` wins, else `default_vault`, else the sole configured
-vault, else a hard error naming every configured vault. An unresolvable `vault` name surfaces as a
-normal thrown error, handled by the existing "Error mapping" rule below with no special-casing. A
-single-vault setup (the common case, including every config predating this feature) never requires a
-caller to pass `vault` at all — Claude only needs to reach for it once `list_vaults` shows more than one
-vault configured.
+`vault<string>` input argument. It splits into the same two resolution groups S006 defines for the CLI:
+
+1. **Single-vault-target tools** — `note_read`, `note_write`, `note_edit`, `note_append`,
+   `note_rename`, `attachment_read`, `attachment_write`, `tag_list`, `metadata_keys`. `vault` resolves
+   via `resolveVault(config, name)` (`src/config.js`, S009): explicit `vault` wins, else
+   `default_vault`, else the sole configured vault, else a hard error naming every configured vault.
+2. **Fan-out tools** — `search`, `grep`, `tag_notes`, `metadata_query`. `vault` resolves via
+   `resolveVaultsForQuery(config, name)` (S009): explicit `vault` still means exactly one target vault,
+   but an omitted `vault` fans out across **every** configured vault instead of falling back to
+   `default_vault`, merging results with a `vault` field on every row — see each tool's own section
+   below and S009's "Cross-vault fan-out for read/list tools" for the full mechanics.
+
+An unresolvable explicit `vault` name surfaces as a normal thrown error either way, handled by the
+existing "Error mapping" rule below with no special-casing. A single-vault setup (the common case,
+including every config predating this feature) never requires a caller to pass `vault` at all, and never
+sees a `vault` field in any tool's output — Claude only needs to reach for either once `list_vaults`
+shows more than one vault configured.
 
 ## Transport
 
@@ -126,8 +136,21 @@ independently reworded per tool:
 both config-backed per S002), `?vault<string>`, `reason<string>`.
 **Output**: `note_title`, `file_line_count`, `?fulltext_rank`, `?semantic_rank`, `?chunk_line_start`,
 `?chunk_line_end`, `?bm25_score` (`fulltext` mode only), `?cosine_distance` (`semantic` mode only),
-`?readonly` (S015, `READONLY_READ_NOTE`) — `hybrid` mode is rank position only, never a raw RRF score;
-`fulltext`/`semantic` mode also carries its native single-signal score (CLAUDE.md, S002).
+`?readonly` (S015, `READONLY_READ_NOTE`), `?vault` — `hybrid` mode is rank position only, never a raw
+RRF score; `fulltext`/`semantic` mode also carries its native single-signal score (CLAUDE.md, S002).
+
+**`vault` (S009)** is present only when `vault` was omitted *and* more than one vault is configured —
+in that case this tool fans out across every configured vault instead of resolving to one, and results
+are **grouped by vault, ranked within each** (each vault's own top-`limit` block, in `listVaults`'s
+name-sorted order) — never a single cross-vault-merged ranking, since `bm25_score`/`cosine_distance`/
+RRF rank position are all corpus-relative and have no meaningful comparison across two different
+vaults' indexes. `limit` applies per vault under fan-out, not split across vaults. The tool description
+should mention this — an agent calling `search` with no `vault` on a multi-vault setup should expect
+results from every vault, not just one, and **must carry a result's `vault` forward into any follow-up
+tool call naming that result's title** (`note_read`, `grep --note_title`, etc.) — those tools resolve an
+omitted `vault` to `default_vault`, which may not be the vault a given fanned-out result actually came
+from, so dropping it risks resolving against the wrong vault entirely (or a hard error, if that title
+doesn't exist there).
 
 `chunk_line_start`/`chunk_line_end` (S001/S002) are present only when the result has a semantic-side
 match — always in `semantic` mode, and in `hybrid` mode only for notes that matched (at least partly)
@@ -147,8 +170,10 @@ about to use `search` reliably, not an implementation detail to hide.
 **Input**: `pattern<string>`, `?regex<bool>=false`, `?note_title<string>`, `?vault<string>`,
 `reason<string>`.
 **Output**: `note_title`, `file_line_count`, `line_matches` (capped at 10 per note + `(+N more)`, per
-S004), `?readonly` (S015, `READONLY_READ_NOTE`) — **line numbers only** (`L2, L5`), never the matched
-line's text. Unlike the CLI (S006), the MCP tool has no input for opting into match text — grep is
+S004), `?readonly` (S015, `READONLY_READ_NOTE`), `?vault` (S009 — same fan-out-only presence rule as
+`search`'s `vault` field above; a plain concatenation across vaults here, no ranking to preserve) —
+**line numbers only** (`L2, L5`), never the matched line's text. Unlike the CLI (S006), the MCP tool has
+no input for opting into match text — grep is
 meant to help Claude locate *which* notes and *which lines* are worth a closer look, not to substitute
 for reading them. Returning matched text inline would burn context on content Claude hasn't decided it
 needs yet, especially for a broad pattern with many hits across many notes; the intended flow is
@@ -164,10 +189,18 @@ via a `[[wikilink]]` reference needs to know that's supported.
 **Input**: `?vault<string>`, `reason<string>`. **Output**: `tag`, `notes_with_tag` (exact-match count,
 per S004).
 
+**Does not fan out** (S009) — unlike `tag_notes` below, an omitted `vault` always resolves to exactly
+one vault (`default_vault`/sole vault/hard error, same as `note_read`), never every configured vault.
+Tags are a separate vocabulary per vault (S001); merging two vaults' tag counts into one list would
+misrepresent both, so `tag_list` stays single-vault-target rather than getting the same treatment
+`tag_notes` gets.
+
 ### `tag_notes`
 
 **Input**: `tag<string>`, `?vault<string>`, `reason<string>`. **Output**: `note_title`,
-`file_line_count`, `?readonly` (S015, `READONLY_READ_NOTE`) (parent-includes-child matching, per S004).
+`file_line_count`, `?readonly` (S015, `READONLY_READ_NOTE`), `?vault` (S009 — same fan-out-only
+presence rule as `search`'s `vault` field; plain concatenation, no ranking) (parent-includes-child
+matching, per S004).
 
 ### `note_read`
 
@@ -176,6 +209,12 @@ per S004).
 links_out, ?readonly }` (S015, `READONLY_READ_NOTE`) — always structured JSON (unlike the CLI's `read`,
 which defaults to plain text; MCP has no equivalent of the CLI's `--raw` mode since Claude always wants
 the structured shape, never a reason to strip it).
+
+`note_read` is single-vault-target, not fan-out (S009) — an omitted `vault` resolves to exactly one
+vault (`default_vault`/sole vault/hard error), never every configured vault, since a note read has
+exactly one answer. If `note_title` came from a fanned-out `search`/`grep`/`tag_notes` result, its
+`vault` field must be carried forward here explicitly — omitting it resolves against `default_vault`
+instead, which may not be where that result actually came from. The tool description should say so.
 
 `backlinks`/`links_out` (S003/S011) are the two wikilink traversal directions — titles of notes
 linking *to* this one, and titles this note links *to* — each a plain array of note titles, `[]` when
