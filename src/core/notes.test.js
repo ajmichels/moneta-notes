@@ -625,6 +625,54 @@ describe('noteWrite split-wikilink guard', () => {
     });
 });
 
+describe('noteWrite frontmatter-in-content guard (issue #13)', () => {
+    it('rejects content starting with a YAML frontmatter block on create, and does not create the file', () => {
+        const vaultRoot = makeTempVault();
+
+        expect(() => noteWrite(vaultRoot, 'Inline Frontmatter', {
+            metadata: { tags: [ 'project' ] },
+            content: '---\nid: Inline Frontmatter\ntags:\n  - project\n---\nbody text',
+        })).toThrow(/frontmatter/i);
+        expect(existsSync(titleToPath(vaultRoot, 'Inline Frontmatter'))).toBe(false);
+    });
+
+    it('rejects an inline frontmatter block on update, leaving the existing note untouched', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Update Inline Frontmatter', { content: 'original body' });
+
+        expect(() => noteWrite(vaultRoot, 'Update Inline Frontmatter', {
+            hash: created.hash,
+            content: '---\nstatus: done\n---\nnew body',
+        })).toThrow(/frontmatter/i);
+
+        expect(noteRead(vaultRoot, 'Update Inline Frontmatter').content).toBe('original body');
+    });
+
+    it('directs the caller to the metadata parameter', () => {
+        const vaultRoot = makeTempVault();
+
+        expect(() => noteWrite(vaultRoot, 'Frontmatter Error Message', {
+            content: '---\nstatus: done\n---\nbody',
+        })).toThrow(/metadata parameter/i);
+    });
+
+    it('allows content that merely mentions "---" mid-body, not as a leading frontmatter block', () => {
+        const vaultRoot = makeTempVault();
+
+        expect(() => noteWrite(vaultRoot, 'Horizontal Rule', {
+            content: 'intro\n\n---\n\nmore text',
+        })).not.toThrow();
+    });
+
+    it('allows content starting with a single "---" that never closes', () => {
+        const vaultRoot = makeTempVault();
+
+        expect(() => noteWrite(vaultRoot, 'Lone Rule', {
+            content: '---\njust a rule, not frontmatter',
+        })).not.toThrow();
+    });
+});
+
 describe('noteWrite tag guard', () => {
     it('rejects a hash-prefixed tag on create, and does not create the file', () => {
         const vaultRoot = makeTempVault();
@@ -805,6 +853,19 @@ describe('noteEdit', () => {
         expect(noteRead(vaultRoot, 'Edit Split Link').content).toBe('original body');
     });
 
+    it('rejects new_txt starting with a YAML frontmatter block (issue #13), leaving the note untouched', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Edit Inline Frontmatter', { content: 'original body' });
+
+        expect(() => noteEdit(vaultRoot, 'Edit Inline Frontmatter', {
+            hash: created.hash,
+            oldTxt: 'original body',
+            newTxt: '---\nstatus: done\n---\nnew body',
+        })).toThrow(/frontmatter/i);
+
+        expect(noteRead(vaultRoot, 'Edit Inline Frontmatter').content).toBe('original body');
+    });
+
     it('throws when old_txt is not found', () => {
         const vaultRoot = makeTempVault();
         const created = noteWrite(vaultRoot, 'No Match', { content: 'hello world' });
@@ -912,6 +973,17 @@ describe('noteAppend', () => {
             .toThrow(/split across a newline/i);
 
         expect(noteRead(vaultRoot, 'Append Split Link').content).toBe('original body');
+    });
+
+    it('rejects appended content starting with a YAML frontmatter block (issue #13)', () => {
+        const vaultRoot = makeTempVault();
+        const created = noteWrite(vaultRoot, 'Append Inline Frontmatter', { content: 'original body' });
+
+        expect(() => noteAppend(
+            vaultRoot, 'Append Inline Frontmatter', created.hash, '---\nstatus: done\n---\nmore',
+        )).toThrow(/frontmatter/i);
+
+        expect(noteRead(vaultRoot, 'Append Inline Frontmatter').content).toBe('original body');
     });
 
     it('throws a staleness error on hash mismatch', () => {

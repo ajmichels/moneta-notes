@@ -91,6 +91,13 @@ further down this spec — one string, reused, not independently reworded per to
   `metadata_query`, in its own S014 tool description): *"A `readonly` field/column is present when the
   note matches a read-only pattern — check it before attempting to write."*
 
+**`NO_INLINE_FRONTMATTER_NOTE`** (on `note_write`, `note_edit`, `note_append`; issue #13, S003):
+*"Do not write a `---` YAML frontmatter block yourself — pass frontmatter fields via the metadata
+parameter instead; this stays body text only."* Same shared-snippet pattern as the two above — stated
+in the tool description up front, not left to be discovered via `core/notes.js`'s
+`assertNoFrontmatterBlock` error (S003) when a caller (an agent that notices a note "should have
+frontmatter" and hand-writes one) hits it.
+
 ### `search`
 
 **Input**: `query<string>`, `?mode<fulltext|semantic|hybrid>=hybrid`, `?limit<int>=20` (max `100`,
@@ -176,7 +183,8 @@ backslash only escapes the one `#` it precedes, not a whole run.
 ### `note_write`
 
 **Input**: `note_title<string>`, `hash<null|string>`, `?metadata<json>`, `content<string>`,
-`?force<bool>=false`, `reason<string>`. Tool description carries `READONLY_WRITE_NOTE` (S015).
+`?force<bool>=false`, `reason<string>`. Tool description carries `READONLY_WRITE_NOTE` (S015) and
+`NO_INLINE_FRONTMATTER_NOTE` (issue #13).
 **Output**: `{ title, hash, line_count }`.
 
 No hash + new title = create. No hash + existing title = error. Hash matching = full content replace
@@ -195,7 +203,7 @@ ambiguous wikilink reference."*
 
 **Input**: `note_title<string>`, `hash<string>` (required, non-nullable per S003), `old_txt<string>`,
 `new_txt<string>`, `?metadata<json>`, `reason<string>`. Tool description carries `READONLY_WRITE_NOTE`
-(S015).
+(S015) and `NO_INLINE_FRONTMATTER_NOTE` (issue #13).
 **Output**: `{ title, hash, line_count }`.
 
 Fails first if `note_title` matches a `.mnotesreadonly` pattern (S015), before the hash check.
@@ -208,7 +216,8 @@ S010) — tool description states this the same way.
 ### `note_append`
 
 **Input**: `note_title<string>`, `hash<string>` (required per S003), `content<string>`,
-`reason<string>`. Tool description carries `READONLY_WRITE_NOTE` (S015).
+`reason<string>`. Tool description carries `READONLY_WRITE_NOTE` (S015) and
+`NO_INLINE_FRONTMATTER_NOTE` (issue #13).
 **Output**: `{ title, hash, line_count }`.
 
 Fails first if `note_title` matches a `.mnotesreadonly` pattern (S015), before the hash check.

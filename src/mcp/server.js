@@ -68,6 +68,13 @@ const READONLY_WRITE_NOTE = ' Fails if the target path matches a pattern in the 
 const READONLY_READ_NOTE = ' A readonly field/column is present when the note matches a read-only '
     + 'pattern — check it before attempting to write.';
 
+// Issue #13: an agent that notices a note "should have frontmatter" sometimes hand-writes a
+// "---\n...\n---" block at the top of content/new_txt instead of using the metadata param — that
+// block is never parsed as real frontmatter (it's just body text) and the write is rejected with a
+// specific error. Stated up front here rather than left to be discovered via that error.
+const NO_INLINE_FRONTMATTER_NOTE = ' Do not write a "---" YAML frontmatter block yourself — pass '
+    + 'frontmatter fields via the metadata parameter instead; this stays body text only.';
+
 const TOOL_DEFS = [
     {
         name: 'search',
@@ -208,7 +215,7 @@ const TOOL_DEFS = [
             + 'current content_hash). No hash against an existing title is an error, not a silent '
             + 'overwrite. note_title must be the note\'s exact absolute title (full path from vault '
             + 'root) — as returned by search or note_read, never a short or ambiguous wikilink '
-            + 'reference.' + TAG_ESCAPE_NOTE + READONLY_WRITE_NOTE,
+            + 'reference.' + TAG_ESCAPE_NOTE + READONLY_WRITE_NOTE + NO_INLINE_FRONTMATTER_NOTE,
         inputSchema: {
             note_title: z.string(),
             hash: z.string().nullable(),
@@ -228,7 +235,8 @@ const TOOL_DEFS = [
         name: 'note_edit',
         description: 'Surgically replace old_txt with new_txt in an existing note. old_txt must '
             + 'match exactly once. note_title must be the note\'s exact absolute title, as returned '
-            + 'by search or note_read — no resolution fallback.' + TAG_ESCAPE_NOTE + READONLY_WRITE_NOTE,
+            + 'by search or note_read — no resolution fallback.' + TAG_ESCAPE_NOTE + READONLY_WRITE_NOTE
+            + NO_INLINE_FRONTMATTER_NOTE,
         inputSchema: {
             note_title: z.string(),
             hash: z.string(),
@@ -248,7 +256,7 @@ const TOOL_DEFS = [
         name: 'note_append',
         description: 'Append content to the end of an existing note. note_title must be the note\'s '
             + 'exact absolute title, as returned by search or note_read — no resolution fallback.'
-            + TAG_ESCAPE_NOTE + READONLY_WRITE_NOTE,
+            + TAG_ESCAPE_NOTE + READONLY_WRITE_NOTE + NO_INLINE_FRONTMATTER_NOTE,
         inputSchema: {
             note_title: z.string(),
             hash: z.string(),

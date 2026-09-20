@@ -22,6 +22,11 @@ reindex ([S004](specs/S004-grep-tags.md)): an isolated `#5` is already safe (rej
 numeric), but adjacent refs (`#1/#2`) or a hex-looking run (`#3498db`) become real tags. Escape a single
 value with a backslash (`\#foo`, Obsidian's own escape syntax) or wrap a longer run in backticks.
 
+Frontmatter always goes through the `metadata` param, never hand-written into `content`/`new_txt`: if
+`note_write`'s `content`, `note_edit`'s `new_txt`, or `note_append`'s `content` starts with its own
+`---`-delimited block, the call is rejected before touching disk, naming the offending parameter and
+pointing at `metadata` instead (see [S003](specs/S003-notes.md#frontmatter-belongs-in-metadata-never-in-contentnew_txt)).
+
 A vault-root `.mnotesreadonly` file ([S015](specs/S015-readonly-paths.md), same gitignore syntax as
 `.mnotesignore`) marks matching notes/attachments as protected: `note_write`/`note_edit`/`note_append`/
 `note_rename`/`attachment_write` fail with an error naming the matched pattern before touching disk

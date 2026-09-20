@@ -235,6 +235,29 @@ function assertNoSplitWikilinks(text, title, toolName) {
     }
 }
 
+// gray-matter only recognizes frontmatter at the true head of the raw file — `content`/`new_txt`/
+// appended content are always the note *body* (see stringifyNote), so a caller who includes a
+// "---\n...\n---" block there isn't setting frontmatter, they're just writing four literal dashes
+// into the body twice, and any fields inside never reach `metadata`. This is common enough (an
+// agent "helpfully" hand-writing YAML it thinks the note needs) to be worth a hard, specific error
+// rather than a silently broken-looking note (issue #13) — frontmatter only ever goes through the
+// `metadata` param. Anchored to the very start of the given text, matching a real frontmatter
+// block's own requirement that "---" be the file's first line; non-greedy so the earliest closing
+// "---" ends the match, and unterminated (a lone leading "---" with no closing delimiter) is left
+// alone since that's just a horizontal rule, not an attempted frontmatter block.
+const LEADING_FRONTMATTER_BLOCK_RE = /^---\r?\n[\s\S]*?\r?\n---\r?\n/;
+
+function assertNoFrontmatterBlock(text, title, toolName, paramName) {
+    if (LEADING_FRONTMATTER_BLOCK_RE.test(text)) {
+        throw new Error(
+            `${toolName}: ${paramName} for "${title}" starts with a YAML frontmatter block `
+            + '("---" ... "---") — frontmatter is managed via the metadata parameter, not written '
+            + `directly into ${paramName}. Pass frontmatter fields via metadata instead, and keep `
+            + `${paramName} to the note's body text only.`,
+        );
+    }
+}
+
 function mergeMetadata(existing, patch) {
     if (!patch) {
         return { ...existing };
@@ -289,6 +312,7 @@ export function noteWrite(vaultRoot, title, {
     assertFlatMetadataPatch(metadata, title, 'note_write');
     assertNoHashPrefixedTags(metadata, title, 'note_write');
     assertNoSplitWikilinks(content, title, 'note_write');
+    assertNoFrontmatterBlock(content, title, 'note_write', 'content');
 
     const filePath = titleToPath(vaultRoot, title);
     assertWritable(vaultRoot, `${title}.md`);
@@ -330,6 +354,7 @@ export function noteEdit(vaultRoot, title, {
     assertFlatMetadataPatch(metadata, title, 'note_edit');
     assertNoHashPrefixedTags(metadata, title, 'note_edit');
     assertNoSplitWikilinks(newTxt, title, 'note_edit');
+    assertNoFrontmatterBlock(newTxt, title, 'note_edit', 'new_txt');
 
     const filePath = titleToPath(vaultRoot, title);
     assertWritable(vaultRoot, `${title}.md`);
@@ -391,6 +416,7 @@ export function noteAppend(vaultRoot, title, hash, content) {
         throw new Error(`note_append: hash is required for "${title}"`);
     }
     assertNoSplitWikilinks(content, title, 'note_append');
+    assertNoFrontmatterBlock(content, title, 'note_append', 'content');
 
     const filePath = titleToPath(vaultRoot, title);
     assertWritable(vaultRoot, `${title}.md`);

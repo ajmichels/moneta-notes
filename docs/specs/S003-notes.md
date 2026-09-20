@@ -82,6 +82,25 @@ rather than re-validating or stripping it. `metadata_query`/`metadata_keys` (S01
 query whatever nested structures already exist in the vault — this rule only stops `mnotes` itself
 from writing new ones.
 
+## Frontmatter belongs in `metadata`, never in `content`/`new_txt`
+
+An agent occasionally notices a note "should have frontmatter" and hand-writes a `---\n...\n---`
+block at the top of `content` (`note_write`) or `new_txt` (`note_edit`) instead of passing the same
+fields through the `metadata` param (issue #13). This can't work even by accident: `gray-matter` only
+recognizes frontmatter at the true head of the raw on-disk file, and `content`/`new_txt` are always
+the note's *body* (see "Flat frontmatter only" above and `stringifyNote`) — so a hand-written block
+there just becomes literal body text sitting above the real frontmatter block `mnotes` writes
+separately, not a second source of metadata fields.
+
+`note_write`, `note_edit`, and `note_append` each reject this before touching disk: if the text being
+newly supplied (`content` for `note_write`/`note_append`, `new_txt` for `note_edit`) starts with a
+`---`-delimited block, the call throws a descriptive error naming the offending parameter and
+pointing at `metadata` instead — no silent strip, no partial write, same "fail loudly" posture as the
+other content-shape guards in this file (flat-metadata, hash-prefixed tags, split wikilinks). The
+check is anchored to the very start of the given text and requires an actual closing `---` line, so a
+body that legitimately opens with a Markdown horizontal rule (`---` with no closing delimiter, or one
+appearing mid-body) is untouched — only a leading, closed block is rejected.
+
 ## Tools
 
 ### `note_read`
@@ -199,6 +218,9 @@ the tool surface correctly, not an implementation detail to leave undocumented.
 - `metadata` patch values must be flat — a scalar, or an array of scalars — never a nested object,
   bare or inside an array (see "Flat frontmatter only" above). A patch violating this is a hard error,
   not a silent flatten or drop, and nothing is written to disk.
+- `content` starting with its own `---`-delimited frontmatter block is a hard error (see "Frontmatter
+  belongs in `metadata`, never in `content`/`new_txt`" above) — frontmatter fields go through
+  `metadata`, never hand-written into `content`.
 - **`hash` not matching current content_hash** → staleness error.
 - Size-drop guard: if the new `content`'s line count is below ~50% of the current line count, the
   write is rejected unless `force: true` is passed. Applies to updates only (not create, where there's
@@ -220,6 +242,8 @@ tool, so a null hash has no meaningful interpretation), `old_txt<string>`, `new_
 - `metadata`, if provided, merges into frontmatter using the same semantics as `note_write` (`null`
   deletes a key, and a patch value must be flat — see "Flat frontmatter only" above). This closes a
   gap in the README's current `note_edit` documentation, which has no metadata param at all.
+- `new_txt` starting with its own `---`-delimited frontmatter block is a hard error, same guard and
+  rationale as `note_write`'s `content` above.
 - Size-drop guard applies here too (a large `old_txt` → small/empty `new_txt` replacement is just as
   capable of collapsing a note as a bad `note_write` would be).
 - Returns `{ title, hash, line_count }`, same as `note_write`.
@@ -235,6 +259,8 @@ and gets no special exemption, consistent with CLAUDE.md's "no exceptions" rule)
   `${note_title}.md`.
 - Appends `content` to the end of the note body. No `metadata` param — append stays content-only and
   single-purpose; a caller wanting to change metadata alongside an append makes two calls.
+- `content` starting with its own `---`-delimited frontmatter block is a hard error, same guard and
+  rationale as `note_write`'s `content` above.
 - No size-drop guard (append can only grow line count — the guard is structurally unreachable here).
 - Returns `{ title, hash, line_count }`.
 
