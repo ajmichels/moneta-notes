@@ -213,9 +213,12 @@ export function formatLogEntryJsonLine(entry) {
 // by name/description alone, never by the on-disk location.
 export function formatVaultsTable(vaults, { align = false } = {}) {
     const rows = vaults.map((v) => ({
-        name: v.name, description: v.description, default: v.isDefault ? 'true' : '',
+        name: v.name,
+        description: v.description,
+        default: v.isDefault ? 'true' : '',
+        excluded_from_defaults: v.excludedFromDefaults ? 'true' : '',
     }));
-    return formatTable([ 'name', 'description', 'default' ], rows, { align });
+    return formatTable([ 'name', 'description', 'default', 'excluded_from_defaults' ], rows, { align });
 }
 
 export function formatStats(stats, { json = false, daemonRunning } = {}) {

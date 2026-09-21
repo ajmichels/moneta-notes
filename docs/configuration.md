@@ -46,6 +46,7 @@ description = "D&D campaign notes"
 | `path` | yes | — | Root directory of the Obsidian vault this entry points at. |
 | `db_path` | no | `<app-support-dir>/index-<name>.db` | Path to this vault's own SQLite index file (FTS5 + sqlite-vec) — every vault gets its own, never shared. |
 | `description` | no | none | Free text shown by `mnotes vaults` / the MCP `list_vaults` tool, so a caller (human or Claude) can tell vaults apart by purpose without knowing their on-disk paths. |
+| `exclude_from_defaults` | no | `false` | Drops this vault out of the cross-vault fan-out (point 3 below) when `--vault`/`vault` is omitted. Doesn't affect explicit `--vault=<name>` targeting, and has no effect at all in a single-vault config. |
 
 **The table key (`notes`, `dnd`, ...) is the vault's name** — the identifier passed as `--vault <name>`
 on the CLI or the `vault` argument on MCP tools. It must match `^[a-z0-9][a-z0-9_-]*$`; `mnotes` throws
@@ -61,7 +62,8 @@ a specific error naming the offending key if it doesn't, whether install-prompte
 3. `search`, `grep`, `tags notes`, `metadata query`/`metadata_query`, and `links broken` are the
    exception: with `--vault`/`vault` omitted and 2+ vaults configured, they **fan out across every
    vault** instead of erroring — see [usage.md](usage.md#cross-vault-fan-out) /
-   [usage-mcp.md](usage-mcp.md).
+   [usage-mcp.md](usage-mcp.md). Set `exclude_from_defaults = true` on a vault to leave it out of that
+   fan-out.
 
 **Adding a second vault is a manual `config.toml` edit** — `scripts/install.sh` only ever prompts for
 one (the primary) vault; append another `[vaults.<name>]` table by hand afterward, and restart the

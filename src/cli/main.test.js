@@ -1233,11 +1233,30 @@ describe('runVaults', () => {
 
         const result = await runVaults([ '--json' ], { config });
 
-        expect(JSON.parse(result.stdout)).toEqual([ { name: 'notes', description: null, isDefault: true } ]);
+        expect(JSON.parse(result.stdout)).toEqual([
+            { name: 'notes', description: null, isDefault: true, excludedFromDefaults: false },
+        ]);
     });
 
     it('mnotes vaults --vault=x errors as an unrecognized flag (no such option registered)', async () => {
         const result = await dispatch([ 'vaults', '--vault=x' ], {});
         expect(result.exitCode).toBe(1);
+    });
+
+    it('marks a vault with exclude_from_defaults=true in the table output', async () => {
+        const config = {
+            vaults: {
+                dnd: { path: '/x/DnD', exclude_from_defaults: true },
+                notes: { path: '/x/Notes' },
+            },
+        };
+
+        const result = await runVaults([], { config });
+        const lines = result.stdout.split('\n');
+        const dndLine = lines.find((l) => l.includes('dnd'));
+        const notesLine = lines.find((l) => l.includes('notes'));
+
+        expect(dndLine).toContain('true');
+        expect(notesLine).not.toMatch(/true/);
     });
 });

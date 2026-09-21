@@ -62,9 +62,11 @@ Every tool above except `list_vaults` accepts an optional `vault<string>` argume
 as the CLI's `--vault` (see [Usage](usage.md#multi-vault---vault)), naming one of the vaults configured
 under `[vaults.<name>]`. Omitted, it resolves via `default_vault` if set, or the sole configured vault
 if there's only one. `search`, `grep`, `tag_notes`, and `metadata_query` are the exception: omitted with
-2+ vaults configured, they fan out across every vault instead of erroring, tagging each row with a
-`vault` field (present only in that fanned-out shape) and grouping output by vault, same as the CLI.
-Every other tool has no such fallback — with 2+ vaults configured and no `default_vault`, it's an
+2+ vaults configured, they fan out across every vault **except one configured with
+`exclude_from_defaults = true`** instead of erroring, tagging each row with a `vault` field (present
+only in that fanned-out shape) and grouping output by vault, same as the CLI. An excluded vault is
+still a fully valid explicit `vault` target — the flag only changes what an omitted `vault` means. Every
+other tool has no such fallback — with 2+ vaults configured and no `default_vault`, it's an
 `isError: true` result naming the configured vaults.
 
 `note_read` always includes a top-level `vault` field naming the vault the note was actually resolved
@@ -72,7 +74,8 @@ and read from — unconditional, unlike the fanned-out tools' row-level `vault` 
 never fans out (see [S003](specs/S003-notes.md#note_read)).
 
 Call `list_vaults` (takes only `reason`) to discover what's configured — `name`/`description`/whether
-each is the default, never the on-disk path. Carry a vault's `name` into any other tool's `vault`
+each is the default/whether each is excluded from the fan-out default, never the on-disk path. Carry a
+vault's `name` into any other tool's `vault`
 argument directly, including a `vault` value read off a fanned-out `search`/`grep`/`tag_notes`/
 `metadata_query` row when following up with `note_read` or another tool on that same result.
 

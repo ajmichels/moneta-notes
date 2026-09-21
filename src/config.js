@@ -207,6 +207,7 @@ export function listVaults(config) {
         name,
         description: config.vaults[name].description ?? null,
         isDefault: name === defaultName,
+        excludedFromDefaults: config.vaults[name].exclude_from_defaults === true,
     }));
 }
 
@@ -219,7 +220,11 @@ export function resolveVaultsForQuery(config, name = null) {
         return { vaults: [ resolveVault(config, null) ] };
     }
 
-    return { vaults: listVaults(config).map((v) => resolveVault(config, v.name)) };
+    return {
+        vaults: listVaults(config)
+            .filter((v) => !v.excludedFromDefaults)
+            .map((v) => resolveVault(config, v.name)),
+    };
 }
 
 // cli/main.js and mcp/tools.js command handlers receive a plain `deps` object (built once, up

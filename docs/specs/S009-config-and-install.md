@@ -191,7 +191,9 @@ Each `[vaults.<name>]` table's `path` is required; `db_path` is optional per vau
 `index-notes.db`/`index-dnd.db` alongside each other on macOS, same computation under Linux's
 `${XDG_DATA_HOME:-~/.local/share}/mnotes/`). `description` is optional free text surfaced by the
 `mnotes vaults` CLI command and the MCP `list_vaults` tool (S006/S007) so a caller (human or Claude) can
-tell vaults apart by purpose without knowing their on-disk paths. `embedding_model` stays a single
+tell vaults apart by purpose without knowing their on-disk paths. `exclude_from_defaults` is an optional
+boolean, defaulting to `false`, that opts a vault out of the cross-vault fan-out described below — see
+"Cross-vault fan-out for read/list tools" for its exact effect. `embedding_model` stays a single
 top-level value, along with everything under `[search]`/`[notes]`/`[grep]`/`[attachments]`/`[vectors]`/
 `[index]`/`[logging]` — there is one shared daemon process and one shared embedding pipeline across
 every configured vault (see S005's amendment below), so none of that tuning is per-vault.
@@ -520,14 +522,30 @@ not a corpus-wide list, so fanning it out has the same "which vault's note did y
 - `name` omitted, exactly one vault configured → `{ vaults: [resolveVault(config, null)] }` — identical
   to today's single-vault behavior, byte-for-byte. A single-vault setup (the common case) never
   triggers any of this machinery, regardless of which of the five tools is called.
-- `name` omitted, 2+ vaults configured → `{ vaults: listVaults(config).map(v => resolveVault(config,
-  v.name)) }` — every configured vault, in `listVaults`'s existing name-sorted order, **unconditionally**
-  — `default_vault` plays no role in this branch at all. This is the one place `resolveVault`'s own
+- `name` omitted, 2+ vaults configured → every configured vault **except one with
+  `exclude_from_defaults = true`** in its `[vaults.<name>]` table, in `listVaults`'s existing
+  name-sorted order, resolved via `resolveVault(config, v.name)` for each survivor —
+  `default_vault` plays no role in this branch at all. This is the one place `resolveVault`'s own
   "ambiguous, no default" error (see "Multi-vault: naming, defaults, and backward compatibility" above)
   is deliberately bypassed: fan-out doesn't need a single answer, so a 2+-vault config with no
   `default_vault` set is a perfectly valid, sometimes deliberate shape under this design (every fan-out
   tool works with zero `--vault` needed; every single-vault-target tool simply requires one explicitly,
-  every time).
+  every time). If every configured vault is excluded, the result is an empty vault list — the five
+  fan-out tools treat that the same as "target doesn't resolve in any vault" below (empty results, not
+  an error), not a special case worth its own error path.
+
+**`exclude_from_defaults` only ever changes what an *omitted* `--vault`/`vault` resolves to.** An
+explicit `--vault dnd`/`vault: "dnd"` targets an excluded vault exactly as it would any other — the flag
+opts a vault out of the *implicit* multi-vault default, not out of being addressable at all, which is
+why it lives in `resolveVaultsForQuery`'s 2+-vault branch and nowhere near `resolveVault` itself. It's
+also a no-op in the single-vault-configured branch above: with only one vault, "fan out" and "resolve
+that vault" are the same operation, so a lone vault stays reachable with no `--vault` needed even if
+someone sets the flag on it — the byte-for-byte backward-compatibility guarantee for single-vault setups
+takes precedence over honoring the flag there. `listVaults(config)` surfaces the flag as
+`excludedFromDefaults` on each entry (alongside `isDefault`), and `mnotes vaults`/`list_vaults`
+(S006/S007) render it as a column/field the same way — an excluded vault is still listed, just marked,
+since it remains a fully valid `--vault` target and hiding it from the listing would make it
+undiscoverable as one.
 
 **Output shape**: the `vault` field/column is present **exactly when `resolveVaultsForQuery` returned
 more than one vault** — i.e., the caller omitted `vault`/`--vault` *and* more than one vault is

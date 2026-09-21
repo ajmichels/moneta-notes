@@ -341,6 +341,41 @@ describe('resolveVaultsForQuery', () => {
 
         expect(result.vaults.map((v) => v.name).sort()).toEqual([ 'dnd', 'notes' ]);
     });
+
+    it('name omitted, 2+ vaults — a vault with exclude_from_defaults=true is dropped from fan-out', () => {
+        const config = {
+            vaults: { notes: { path: '/n' }, dnd: { path: '/d', exclude_from_defaults: true } },
+        };
+
+        const result = resolveVaultsForQuery(config);
+
+        expect(result.vaults.map((v) => v.name)).toEqual([ 'notes' ]);
+    });
+
+    it('name given explicitly — still resolves an exclude_from_defaults=true vault normally', () => {
+        const config = {
+            vaults: { notes: { path: '/n' }, dnd: { path: '/d', exclude_from_defaults: true } },
+        };
+
+        expect(resolveVaultsForQuery(config, 'dnd').vaults).toEqual([ resolveVault(config, 'dnd') ]);
+    });
+
+    it('name omitted, exactly one vault configured — exclude_from_defaults is ignored (still that one)', () => {
+        const config = { vaults: { notes: { path: '/n', exclude_from_defaults: true } } };
+
+        expect(resolveVaultsForQuery(config).vaults).toEqual([ resolveVault(config, null) ]);
+    });
+
+    it('name omitted, every configured vault excluded — returns an empty fan-out, not an error', () => {
+        const config = {
+            vaults: {
+                notes: { path: '/n', exclude_from_defaults: true },
+                dnd: { path: '/d', exclude_from_defaults: true },
+            },
+        };
+
+        expect(resolveVaultsForQuery(config).vaults).toEqual([]);
+    });
 });
 
 describe('listVaults', () => {
@@ -354,8 +389,8 @@ describe('listVaults', () => {
         };
 
         expect(listVaults(config)).toEqual([
-            { name: 'dnd', description: 'D&D notes', isDefault: true },
-            { name: 'notes', description: null, isDefault: false },
+            { name: 'dnd', description: 'D&D notes', isDefault: true, excludedFromDefaults: false },
+            { name: 'notes', description: null, isDefault: false, excludedFromDefaults: false },
         ]);
     });
 
@@ -363,7 +398,7 @@ describe('listVaults', () => {
         const config = { vaults: { notes: { path: '/n' } } };
 
         expect(listVaults(config)).toEqual([
-            { name: 'notes', description: null, isDefault: true },
+            { name: 'notes', description: null, isDefault: true, excludedFromDefaults: false },
         ]);
     });
 
@@ -371,6 +406,20 @@ describe('listVaults', () => {
         const config = { vaults: { notes: { path: '/n' }, dnd: { path: '/d' } } };
 
         expect(listVaults(config).every((v) => v.isDefault === false)).toBe(true);
+    });
+
+    it('reports excludedFromDefaults true only for a vault with exclude_from_defaults=true', () => {
+        const config = {
+            vaults: {
+                notes: { path: '/n' },
+                dnd: { path: '/d', exclude_from_defaults: true },
+            },
+        };
+
+        expect(listVaults(config)).toEqual([
+            { name: 'dnd', description: null, isDefault: false, excludedFromDefaults: true },
+            { name: 'notes', description: null, isDefault: false, excludedFromDefaults: false },
+        ]);
     });
 });
 

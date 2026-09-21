@@ -76,6 +76,11 @@ commands, `stats`, `tags list`, `metadata keys`) has no such fallback — with 2
 `default_vault`, it's a hard error naming the configured vaults, since there's genuinely nothing to
 default a single-note/single-corpus operation to.
 
+Set `exclude_from_defaults = true` on a `[vaults.<name>]` table to drop that vault out of the fan-out
+above — an omitted `--vault` then covers every *other* configured vault, never that one. It's still a
+fully valid explicit target (`--vault=<name>` reaches it exactly as before) and still shows up in
+`mnotes vaults`, just marked; the flag only changes what an omitted `--vault` means, nothing else.
+
 ```sh
 mnotes read "Weekly Notes/2026-W32" --vault=dnd
 mnotes search "goblin ambush"                    # fans out across every vault if 2+ are configured
@@ -91,9 +96,9 @@ mnotes vaults
 mnotes vaults --json
 ```
 
-Lists every configured vault: `name | description | default`. Never includes the on-disk path — a
-caller tells vaults apart by name/description, not by where they live. No `--vault` flag (there's
-nothing to scope to).
+Lists every configured vault: `name | description | default | excluded_from_defaults`. Never includes
+the on-disk path — a caller tells vaults apart by name/description, not by where they live. No
+`--vault` flag (there's nothing to scope to).
 
 ## Commands
 
