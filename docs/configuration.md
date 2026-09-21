@@ -75,6 +75,22 @@ synthesized name only ever surfaces in a `mnotes vaults` listing, never in a `--
 to type. A file mixing the old flat keys with a `[vaults.*]` table is invalid — `mnotes` throws rather
 than guessing which one wins.
 
+**This continuity covers `vault_path` (and an explicit `db_path` override), not an implicit `db_path`
+default.** Before multi-vault support, the built-in default index location was
+`<app-support-dir>/index.db`. The built-in default is now per-vault —
+`<app-support-dir>/index-<name>.db` — so if you never set `db_path` explicitly in `config.toml` (the
+common case; `scripts/install.sh` only writes it when it differs from the suggested default), upgrading
+past this changes the derived default from `index.db` to `index-notes.db` for the same vault. The
+daemon doesn't detect or migrate the old file — it just creates a fresh, empty index at the new path
+and does a one-time full reindex of the vault on its next startup (embedding every note again). This is
+lossless (the vault content itself is untouched, and the index is a pure derived cache — see
+[Uninstallation](uninstallation.md)) but isn't instant on a large vault, and the old `index.db` is left
+orphaned on disk afterward — safe to delete by hand once you've confirmed the new index is populated
+(`mnotes stats`), or it'll be cleaned up automatically if you ever run `scripts/uninstall.sh`. If you'd
+rather avoid the rebuild, set `db_path = "<app-support-dir>/index.db"` explicitly under your vault
+before upgrading (or in `[vaults.<name>]` if you've already adopted the new syntax) to keep pointing at
+the existing file.
+
 ## Top-level
 
 | Key | Default | What it does |
