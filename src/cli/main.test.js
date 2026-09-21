@@ -616,6 +616,7 @@ describe('runRead', () => {
         const parsed = JSON.parse(result.stdout);
         expect(parsed.title).toBe('A');
         expect(typeof parsed.content_hash).toBe('string');
+        expect(parsed.vault).toBeNull();
         expect(result.stderr).toBe('');
     });
 
@@ -1119,9 +1120,11 @@ describe('multi-vault: --vault resolution (S009)', () => {
         writeNoteFile(rootB, 'InBeta.md', 'beta body');
         const config = twoVaultConfig(rootA, rootB);
 
-        const result = await runRead([ 'InBeta', '--vault=beta' ], { config });
+        const result = await runRead([ 'InBeta', '--vault=beta', '--json' ], { config });
 
-        expect(result.stdout).toContain('beta body');
+        const parsed = JSON.parse(result.stdout);
+        expect(parsed.content).toBe('beta body');
+        expect(parsed.vault).toBe('beta');
     });
 
     it('an unknown --vault surfaces as a hard error naming the configured vaults', async () => {

@@ -463,6 +463,7 @@ describe('noteReadTool', () => {
         expect(parsed.content).toBe('body text');
         expect(parsed.metadata).toEqual({});
         expect(typeof parsed.content_hash).toBe('string');
+        expect(parsed.vault).toBeNull();
     });
 
     it('maps a missing-note error to isError: true with the message preserved', async () => {
@@ -920,7 +921,9 @@ describe('multi-vault: vault argument resolution (S007/S009)', () => {
             makeDeps({ config }), { note_title: 'InBeta', vault: 'beta', reason: 'testing vault resolution' },
         );
 
-        expect(JSON.parse(result.content[0].text).content).toBe('beta body');
+        const parsed = JSON.parse(result.content[0].text);
+        expect(parsed.content).toBe('beta body');
+        expect(parsed.vault).toBe('beta');
     });
 
     it('a representative write tool (note_write) resolves `vault` via config to the right vaultRoot', async () => {

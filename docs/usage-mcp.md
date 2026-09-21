@@ -67,6 +67,10 @@ if there's only one. `search`, `grep`, `tag_notes`, and `metadata_query` are the
 Every other tool has no such fallback — with 2+ vaults configured and no `default_vault`, it's an
 `isError: true` result naming the configured vaults.
 
+`note_read` always includes a top-level `vault` field naming the vault the note was actually resolved
+and read from — unconditional, unlike the fanned-out tools' row-level `vault` above, since `note_read`
+never fans out (see [S003](specs/S003-notes.md#note_read)).
+
 Call `list_vaults` (takes only `reason`) to discover what's configured — `name`/`description`/whether
 each is the default, never the on-disk path. Carry a vault's `name` into any other tool's `vault`
 argument directly, including a `vault` value read off a fanned-out `search`/`grep`/`tag_notes`/

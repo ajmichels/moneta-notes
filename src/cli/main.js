@@ -602,7 +602,7 @@ export async function runRead(args, deps) {
     const result = noteRead(vault.path, title, { startLine, endLine, db });
 
     if (values.json) {
-        return { stdout: formatJson(result), stderr: '', exitCode: 0 };
+        return { stdout: formatJson({ vault: vault.name, ...result }), stderr: '', exitCode: 0 };
     }
 
     return {

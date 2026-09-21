@@ -229,7 +229,7 @@ mnotes read "Weekly Notes/2026-W32" --json | jq -r .content_hash
 |---|---|---|
 | default | Note body only, frontmatter stripped | Parsed `metadata` object, as pretty-printed JSON |
 | `--raw` | Exact file bytes as stored (frontmatter included), unmodified | Nothing |
-| `--json` | Full structured JSON (`title`, `content_hash`, `metadata`, `content`, line info, `backlinks`, `links_out`) | Nothing |
+| `--json` | Full structured JSON (`vault`, `title`, `content_hash`, `metadata`, `content`, line info, `backlinks`, `links_out`) | Nothing |
 
 Also accepts `--vault=<name>` — required when 2+ vaults are configured and `default_vault` isn't set
 (see [Multi-vault](#multi-vault---vault) above).

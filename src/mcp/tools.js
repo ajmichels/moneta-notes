@@ -222,7 +222,7 @@ export async function noteReadTool(deps, input) {
         const result = vault.dbPath
             ? await withDb(vault.dbPath, (db) => noteRead(vault.path, noteTitle, { startLine, endLine, db }))
             : noteRead(vault.path, noteTitle, { startLine, endLine });
-        return formatJson(result);
+        return formatJson({ vault: vault.name, ...result });
     }, { vault: () => vault?.name ?? null });
 }
 

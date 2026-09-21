@@ -100,9 +100,17 @@ appearing mid-body) is untouched — only a leading, closed block is rejected.
 
 ### `note_read`
 
-`note_title<string>`, `?start_line<int>`, `?end_line<int>`, `reason<string>`. Returns `title`,
+`note_title<string>`, `?start_line<int>`, `?end_line<int>`, `reason<string>`. Returns `vault`, `title`,
 `start_line`, `end_line`, `total_lines`, `content_hash`, `metadata` (parsed frontmatter, including the
 system-managed `id`), `content`, `backlinks`, `links_out`.
+
+**`vault<string>`** (S009) — the name of the vault the note was actually read from, always present. A
+top-level sibling field, not folded into `metadata`, same reasoning as `readonly` below: it isn't part
+of the note's own frontmatter, it's resolved by the caller's `vault` argument (or the configured
+default) before `noteRead` ever runs. Attached at the `cli`/`mcp` layer, same as the `vault` field
+`search`/`grep`/`tag_notes`/`metadata_query`/`links broken` attach per row when fanned out across
+multiple vaults (S009) — except `note_read` never fans out, so it's unconditional here rather than
+appearing only when 2+ vaults were queried.
 
 Frontmatter is parsed via a YAML frontmatter library (e.g. `gray-matter`). A note with no frontmatter
 block at all reads back as `metadata: {}` — but in practice this should be rare, since every note
